@@ -64,6 +64,21 @@ func (s *HlsServer) OnDemandEnabled() bool {
 	return s != nil && s.conf.OnDemand
 }
 
+// EnsureSessionWithAppName creates an on-demand session only when one is not
+// already present. It returns true when this call created the session.
+func (s *HlsServer) EnsureSessionWithAppName(appName, streamName string) bool {
+	if s == nil || !s.conf.Enable || !s.conf.OnDemand {
+		return false
+	}
+	if _, ok := s.getSession(appName, streamName); ok {
+		return false
+	}
+	key := hlsSessionKey(appName, streamName)
+	session := NewHlsSessionWithAppName(appName, streamName, s.conf)
+	_, loaded := s.sessions.LoadOrStore(key, session)
+	return !loaded
+}
+
 func (s *HlsServer) NewHlsSessionWithAppName(appName, streamName string) {
 	if s == nil || !s.conf.Enable {
 		return

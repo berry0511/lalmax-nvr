@@ -97,7 +97,7 @@ G.711 包括 A-law（PCMA）和 µ-law（PCMU）。表中未列出的音频不�
 - **片段合并**：周期补齐，加上 **滚动合并** 写入当前 UTC 小时文件
 - **ONVIF**：WS-Discovery / Hello、云台、成像、流地址、编码检测、IP 自愈、可选子码流
 - **流管理**：运行时流清单、摄像头绑定、可选 **登记为设备**（不会开始录像）
-- **IPTV**：导入并检测 M3U，通过同源 HLS 代理在浏览器直播放；也可将频道发布到 NVR，通过其他协议播放或录像（[说明](docs/zh/iptv.md)）
+- **媒体接入**：统一配置摄像头、直播地址、IPTV、Emby 和编码器推流，并查看来源概况；Jellyfin、Plex 和本地文件暂未支持（[总览](docs/zh/media-sources.md) · [IPTV 指南](docs/zh/iptv.md) · [Emby 指南](docs/zh/emby.md)）
 - **DLNA**：可选的 UPnP MediaServer — 在局域网中发现 NVR，并在电视或其他 DLNA 播放器上浏览实时流和录像；在 `lalmax-nvr.yaml` 中配置 `dlna.enabled` 和独立 HTTP 端口（默认 `8200`）
 - **Web 界面**：深色/浅色主题、响应式、中英文切换、Chart.js 图表
 - **智能家居与文件访问**：MQTT 触发录像、WebDAV 浏览存储文件；FTP 当前存在[哈希密码认证限制](docs/zh/ftp-integration.md)

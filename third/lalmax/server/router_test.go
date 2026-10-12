@@ -438,9 +438,12 @@ func TestHookGroupEventsFromDirectLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	svr.lalsvr.WithOnHookSession(func(uniqueKey string, streamName string) baseLogic.ICustomizeHookSessionContext {
-		key := maxlogic.StreamKeyFromStreamName(streamName)
-		group, created := maxlogic.GetGroupManagerInstance().GetOrCreateGroupByStreamName(uniqueKey, streamName, svr.hlssvr, svr.conf.LogicConfig.GopCacheNum, svr.conf.LogicConfig.SingleGopMaxFrameNum)
+	withAppName := svr.lalsvr.(interface {
+		WithOnHookSessionWithAppName(func(appName string, uniqueKey string, streamName string) baseLogic.ICustomizeHookSessionContext)
+	})
+	withAppName.WithOnHookSessionWithAppName(func(appName string, uniqueKey string, streamName string) baseLogic.ICustomizeHookSessionContext {
+		key := maxlogic.NewStreamKey(appName, streamName)
+		group, created := maxlogic.GetGroupManagerInstance().GetOrCreateGroup(key, uniqueKey, svr.hlssvr, svr.conf.LogicConfig.GopCacheNum, svr.conf.LogicConfig.SingleGopMaxFrameNum)
 		group.BindStopHook(key, func(stopKey maxlogic.StreamKey) {
 			svr.notifyHub.NotifyGroupStop(HookGroupInfo{
 				AppName:    stopKey.AppName,
@@ -489,6 +492,30 @@ func TestHookGroupEventsFromDirectLifecycle(t *testing.T) {
 	}
 	if stop.StreamName != streamName {
 		t.Fatalf("unexpected stop payload: %+v", stop)
+	}
+}
+
+func TestCustomizePublisherHookPreservesAppName(t *testing.T) {
+	svr, err := NewLalMaxServer(&config.Config{
+		Fmp4Config: config.Fmp4Config{
+			Hls: config.Fmp4HlsConfig{Enable: true, LowLatency: true, OnDemand: true},
+		},
+		LalRawContent: []byte(`{"rtmp":{"enable":false},"rtsp":{"enable":false},"http_api":{"enable":false},"pprof":{"enable":false}}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svr.initHookSession()
+	streamName := uniqueTestName("customize_app_name")
+	session, err := svr.lalsvr.AddCustomizePubSession(streamName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svr.lalsvr.DelCustomizePubSession(session)
+
+	_, group := maxlogic.GetGroupManagerInstance().GetGroup(maxlogic.NewStreamKey("live", streamName))
+	if group == nil || group.Key().AppName != "live" {
+		t.Fatalf("customize publisher HLS group did not preserve app name: %+v", group)
 	}
 }
 

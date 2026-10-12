@@ -97,7 +97,7 @@ G.711 covers both A-law (PCMA) and µ-law (PCMU). Audio codecs not listed for a 
 - **Segment Merge**: Periodic backfill plus **rolling merge** into the current UTC hour file
 - **ONVIF**: WS-Discovery / Hello, PTZ, imaging, stream URI, encoding detect, IP self-heal, optional sub-stream
 - **Stream Management**: Runtime stream inventory, camera binding, optional **register as device** (does not start recording)
-- **IPTV**: Import and validate M3U playlists, play channels in the browser through the same-origin HLS proxy, or publish channels to NVR for protocol playback and recording ([guide](docs/en/iptv.md))
+- **Media Inputs**: Configure cameras, live URLs, IPTV, Emby, and encoder push from one place, with a source overview. Jellyfin, Plex, and local files are not supported yet ([overview](docs/en/media-sources.md) · [IPTV guide](docs/en/iptv.md) · [Emby guide](docs/en/emby.md))
 - **DLNA**: Optional UPnP MediaServer — discover the NVR on the LAN and browse live streams and recordings on TVs or other DLNA players; configure `dlna.enabled` and the dedicated HTTP port (default `8200`) in `lalmax-nvr.yaml`
 - **Web UI**: Dark/light theme, responsive, i18n (EN/ZH), Chart.js dashboards
 - **Smart home and file access**: MQTT recording triggers and WebDAV storage browsing; FTP currently has a [hash-password authentication limitation](docs/en/ftp-integration.md)

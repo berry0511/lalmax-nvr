@@ -146,6 +146,21 @@ export async function updateSettings(
   });
 }
 
+export interface EncryptionKeySettings {
+  enabled: boolean;
+  managed_by: 'none' | 'web' | 'environment' | 'environment_file' | string;
+}
+
+export async function getEncryptionKeySettings(signal?: AbortSignal): Promise<EncryptionKeySettings> {
+  return apiRequest<EncryptionKeySettings>('/settings/encryption-key', { signal });
+}
+
+export async function setEncryptionKey(key: string, signal?: AbortSignal): Promise<EncryptionKeySettings> {
+  return apiRequest<EncryptionKeySettings>('/settings/encryption-key', {
+    method: 'PUT', body: JSON.stringify({ key }), signal,
+  });
+}
+
 // --- Global merge settings ---
 
 export async function getMergeSettings(signal?: AbortSignal): Promise<MergeConfig> {

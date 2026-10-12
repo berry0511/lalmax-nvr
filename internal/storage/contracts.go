@@ -133,6 +133,18 @@ type IPTVRepository interface {
 	DeleteRecordingPlanByStream(ctx context.Context, streamID string) error
 }
 
+// EmbyRepository stores one Emby server connection and the media items managed
+// as NVR streams.
+type EmbyRepository interface {
+	GetEmbyServer(ctx context.Context) (*EmbyServer, error)
+	SaveEmbyServer(ctx context.Context, server EmbyServer) error
+	ListEmbyItems(ctx context.Context) ([]EmbyItem, error)
+	GetEmbyItem(ctx context.Context, id string) (*EmbyItem, error)
+	SaveEmbyItem(ctx context.Context, item EmbyItem) error
+	SetEmbyItemPublish(ctx context.Context, id string, enabled, loop bool) error
+	DeleteEmbyItem(ctx context.Context, id string) error
+}
+
 // DLNARepository provides the catalog data exposed by the DLNA content server.
 type DLNARepository interface {
 	ListCameras(ctx context.Context) ([]CameraRow, error)
@@ -313,6 +325,7 @@ var (
 	_ CameraDiscoveryRepository = (*DB)(nil)
 	_ AlarmRuleRepository       = (*DB)(nil)
 	_ IPTVRepository            = (*DB)(nil)
+	_ EmbyRepository            = (*DB)(nil)
 	_ DLNARepository            = (*DB)(nil)
 	_ CleanupRepository         = (*DB)(nil)
 	_ MergeRepository           = (*DB)(nil)

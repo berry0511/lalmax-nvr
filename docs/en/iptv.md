@@ -2,7 +2,7 @@
 
 IPTV is an independent module for importing M3U playlists, probing channels, managing channel lists, and resolving playback URLs. Channels are not cameras and are not stored in `created_streams`.
 
-Web UI: **IPTV** in the sidebar (`#/iptv`). REST API: `/api/iptv`.
+Web UI: **Media Sources → IPTV** (`#/media-sources?tab=iptv`; the legacy `#/iptv` link still works). REST API: `/api/iptv`. See the [Media Sources overview](media-sources.md) for how IPTV and Emby differ.
 
 ## How it works
 
@@ -48,7 +48,7 @@ Use a separate disk budget for IPTV recordings, and avoid continuous plans for l
 
 ## Web UI
 
-1. Open **IPTV** and import an M3U URL or paste `#EXTM3U` text.
+1. Open **Media Sources → IPTV** and import an M3U URL or paste `#EXTM3U` text.
 2. Wait for probe results: `pending` → `probing` → `playable` / `warning` / `unsupported` / `failed`.
 3. Select channels to keep and enroll them. Enrollment does not start HLS pulls.
 4. Click a channel to play it through the browser proxy. Enable **Publish** for playback over NVR protocols, and create a recording plan for its `stream_id` when recording is needed. Browser proxy playback is independent of NVR; publication and recording share the same upstream pull.

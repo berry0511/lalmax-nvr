@@ -42,6 +42,19 @@ Stream details include state and available `play_urls`; use those returned URLs 
 
 Browser playback uses the same-origin HLS proxy. The NVR starts a server-side HLS pull only when a channel is published or a recording plan needs it. See [IPTV](iptv.md).
 
+## Emby
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET / PUT | `/api/emby/config` | Read connection status / save Emby server URL, user ID, and token |
+| GET | `/api/emby/library?q=&limit=&offset=` | Search Emby movies and episodes |
+| GET | `/api/emby/items` | List managed media items |
+| POST | `/api/emby/items` | Add an Emby item as an NVR channel |
+| PUT | `/api/emby/items/{id}` | Update `publish_enabled` or `loop` |
+| DELETE | `/api/emby/items/{id}` | Stop and remove an NVR channel |
+
+Publication plays once by default and takes the stream offline at the end. Set `loop: true` to create a new Emby playback session and restart from the beginning. Emby ingest requires `media.mode: embedded`. See the [Emby Library guide](emby.md).
+
 ## Recording
 
 | Method | Path | Purpose |

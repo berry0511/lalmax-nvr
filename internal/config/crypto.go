@@ -8,24 +8,124 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 )
 
 const encPrefix = "ENC:"
 
-// encryptionKey caches the key derived from the environment variable.
-// It is read once and cached for the process lifetime.
+var (
+	ErrEncryptionKeyConfigured = errors.New("encryption key is already configured or managed by the environment")
+	ErrInvalidEncryptionKey    = errors.New("encryption key must be exactly 32 bytes, either raw or base64-encoded")
+)
+
+// encryptionKey caches the active key for the process lifetime. The web UI can
+// configure it once in a permission-restricted sidecar file.
 var encryptionKey []byte
+var encryptionKeyMu sync.RWMutex
+var webEncryptionKeyFile string
+
+// SetWebEncryptionKeyFile configures the sidecar path used by web-managed keys.
+// Call it before loading configuration so encrypted values can be decrypted.
+func SetWebEncryptionKeyFile(path string) {
+	encryptionKeyMu.Lock()
+	webEncryptionKeyFile = path
+	encryptionKey = nil
+	encryptionKeyMu.Unlock()
+}
+
+// EncryptionKeySource reports where the active encryption key is managed.
+// The key itself is never returned.
+func EncryptionKeySource() string {
+	if strings.TrimSpace(os.Getenv("NVR_ENCRYPTION_KEY")) != "" {
+		return "environment"
+	}
+	if strings.TrimSpace(os.Getenv("NVR_ENCRYPTION_KEY_FILE")) != "" {
+		return "environment_file"
+	}
+	encryptionKeyMu.RLock()
+	path := webEncryptionKeyFile
+	encryptionKeyMu.RUnlock()
+	if path != "" {
+		if _, err := os.Stat(path); err == nil {
+			return "web"
+		}
+	}
+	return "none"
+}
+
+// CreateWebEncryptionKey persists a key configured through the web UI. It is
+// intentionally set-once: replacing a key would make existing ciphertext
+// unreadable without a full data migration.
+func CreateWebEncryptionKey(path, keyValue string) error {
+	key, err := parseEncryptionKey(keyValue)
+	if err != nil {
+		return ErrInvalidEncryptionKey
+	}
+	if strings.TrimSpace(os.Getenv("NVR_ENCRYPTION_KEY")) != "" || strings.TrimSpace(os.Getenv("NVR_ENCRYPTION_KEY_FILE")) != "" {
+		return ErrEncryptionKeyConfigured
+	}
+	if path == "" {
+		return errors.New("config path is not available")
+	}
+
+	encryptionKeyMu.Lock()
+	defer encryptionKeyMu.Unlock()
+	if encryptionKey != nil {
+		return ErrEncryptionKeyConfigured
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return fmt.Errorf("create key directory: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return ErrEncryptionKeyConfigured
+		}
+		return fmt.Errorf("create encryption key file: %w", err)
+	}
+	if _, err := f.WriteString(base64.StdEncoding.EncodeToString(key) + "\n"); err != nil {
+		f.Close()
+		os.Remove(path)
+		return fmt.Errorf("write encryption key file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(path)
+		return fmt.Errorf("close encryption key file: %w", err)
+	}
+	encryptionKey = key
+	webEncryptionKeyFile = path
+	return nil
+}
 
 // GetEncryptionKey returns the AES-256 encryption key from NVR_ENCRYPTION_KEY
 // environment variable. The key must be exactly 32 bytes (base64-encoded or raw).
 // Returns nil if no key is configured.
 func GetEncryptionKey() []byte {
+	encryptionKeyMu.RLock()
 	if encryptionKey != nil {
-		return encryptionKey
+		key := encryptionKey
+		encryptionKeyMu.RUnlock()
+		return key
 	}
+	encryptionKeyMu.RUnlock()
 
 	keyStr := os.Getenv("NVR_ENCRYPTION_KEY")
+	if keyStr != "" {
+		key, err := parseEncryptionKey(keyStr)
+		if err != nil {
+			return nil
+		}
+		encryptionKeyMu.Lock()
+		if encryptionKey == nil {
+			encryptionKey = key
+		}
+		key = encryptionKey
+		encryptionKeyMu.Unlock()
+		return key
+	}
+
 	if keyStr == "" {
 		// Also check for key file
 		keyFile := os.Getenv("NVR_ENCRYPTION_KEY_FILE")
@@ -38,23 +138,42 @@ func GetEncryptionKey() []byte {
 		}
 	}
 	if keyStr == "" {
+		encryptionKeyMu.RLock()
+		keyFile := webEncryptionKeyFile
+		encryptionKeyMu.RUnlock()
+		if keyFile != "" {
+			data, err := os.ReadFile(keyFile)
+			if err == nil {
+				keyStr = strings.TrimSpace(string(data))
+			}
+		}
+	}
+	if keyStr == "" {
 		return nil
 	}
 
-	// Try base64 decode first
-	key, err := base64.StdEncoding.DecodeString(keyStr)
-	if err == nil && len(key) == 32 {
+	key, err := parseEncryptionKey(keyStr)
+	if err != nil {
+		return nil
+	}
+	encryptionKeyMu.Lock()
+	if encryptionKey == nil {
 		encryptionKey = key
-		return encryptionKey
 	}
+	key = encryptionKey
+	encryptionKeyMu.Unlock()
+	return key
+}
 
-	// Try raw bytes (must be exactly 32)
+func parseEncryptionKey(keyStr string) ([]byte, error) {
+	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(keyStr))
+	if err == nil && len(key) == 32 {
+		return key, nil
+	}
 	if len(keyStr) == 32 {
-		encryptionKey = []byte(keyStr)
-		return encryptionKey
+		return []byte(keyStr), nil
 	}
-
-	return nil
+	return nil, errors.New("encryption key must be exactly 32 bytes, either raw or base64-encoded")
 }
 
 // HasKey returns true if an encryption key is available.

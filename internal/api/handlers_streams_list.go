@@ -464,6 +464,9 @@ func inferStreamSourceType(info media.StreamInfo, managed bool) string {
 	if isIPTVStreamID(info.StreamID) {
 		return "iptv"
 	}
+	if isEmbyStreamID(info.StreamID) {
+		return "emby"
+	}
 	if info.Publisher != nil {
 		if src := inferStreamSourceTypeFromProtocol(info.Publisher.Protocol); src == "gb28181" {
 			return src
@@ -491,6 +494,10 @@ func isIPTVStreamID(streamID string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(streamID)), "iptv_")
 }
 
+func isEmbyStreamID(streamID string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(streamID)), "emby_")
+}
+
 func isVoIPStreamID(streamID string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(streamID)), "voip_")
 }
@@ -501,6 +508,9 @@ func inferStreamSourceTypeForID(streamID, protocol string) string {
 	}
 	if isIPTVStreamID(streamID) {
 		return "iptv"
+	}
+	if isEmbyStreamID(streamID) {
+		return "emby"
 	}
 	return inferStreamSourceTypeFromProtocol(protocol)
 }

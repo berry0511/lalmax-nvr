@@ -31,6 +31,7 @@ import (
 	"github.com/lalmax-pro/lalmax-nvr/internal/config"
 	"github.com/lalmax-pro/lalmax-nvr/internal/dlna"
 	"github.com/lalmax-pro/lalmax-nvr/internal/docsportal"
+	"github.com/lalmax-pro/lalmax-nvr/internal/emby"
 	"github.com/lalmax-pro/lalmax-nvr/internal/event"
 	"github.com/lalmax-pro/lalmax-nvr/internal/ftp"
 	"github.com/lalmax-pro/lalmax-nvr/internal/gb28181"
@@ -162,6 +163,7 @@ func cmdHealth() {
 		case "--config":
 			i++
 			if i < len(os.Args) {
+				config.SetWebEncryptionKeyFile(os.Args[i] + ".encryption-key")
 				cfg, err := config.Load(os.Args[i])
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
@@ -312,6 +314,7 @@ func cmdEncryptConfig() {
 			}
 		}
 	}
+	config.SetWebEncryptionKeyFile(cfgPath + ".encryption-key")
 	fields, err := config.EncryptConfigFile(cfgPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -423,6 +426,7 @@ type App struct {
 	httpServer *http.Server
 	dlna       *dlna.Service
 	iptvSvc    *iptv.Service
+	embySvc    *emby.Service
 	hlsPuller  *media.HLSPullManager
 
 	// Remote log handler (nil when disabled)
@@ -852,6 +856,22 @@ func (a *App) buildRouter() http.Handler {
 	if a.iptvSvc != nil {
 		handler.SetIPTVService(a.iptvSvc)
 	}
+	if a.embySvc == nil {
+		var puller media.HLSPuller
+		if a.mediaEngine != nil {
+			if a.hlsPuller == nil {
+				a.hlsPuller = media.NewHLSPullManager(a.mediaEngine)
+				a.hlsPuller.SetOnlineCallback(a.historyMgr.RecordHLSPullState)
+				a.hlsPuller.SetMaxTasks(a.cfg.IPTV.MaxConcurrentPulls)
+			}
+			puller = a.hlsPuller
+		}
+		a.embySvc = emby.NewService(a.db, puller)
+		if err := a.embySvc.Recover(context.Background()); err != nil {
+			slog.Warn("Emby publication recovery failed", "error", err)
+		}
+	}
+	handler.SetEmbyService(a.embySvc)
 	a.apiHandler = handler
 	handler.SetMultiUserAuthMW(a.multiUserMW)
 	handler.SetRestartFunc(func() {
@@ -1483,6 +1503,10 @@ func (a *App) Stop() error {
 			log.Info("stopping IPTV module")
 			a.iptvSvc.Stop()
 		}
+		if a.embySvc != nil {
+			log.Info("stopping Emby module")
+			a.embySvc.Stop()
+		}
 
 		// 1. HTTP server — stop accepting new requests
 		log.Info("stopping HTTP server")
@@ -1643,6 +1667,7 @@ func main() {
 	// Load and validate config. A setup relocation marker may point this
 	// process at the canonical config inside the selected data directory.
 	effectiveConfigPath := resolveConfigPath(*configPath)
+	config.SetWebEncryptionKeyFile(effectiveConfigPath + ".encryption-key")
 	cfg, err := config.Load(effectiveConfigPath)
 	if err != nil {
 		if !os.IsNotExist(err) {

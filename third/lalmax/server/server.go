@@ -198,9 +198,9 @@ func NewLalMaxServer(conf *config.Config, opts ...LalMaxServerOption) (*LalMaxSe
 
 func (s *LalMaxServer) initHookSession() {
 	s.hookOnce.Do(func() {
-		s.lalsvr.WithOnHookSession(func(uniqueKey string, streamName string) logic.ICustomizeHookSessionContext {
-			key := maxlogic.StreamKeyFromStreamName(streamName)
-			group, created := maxlogic.GetGroupManagerInstance().GetOrCreateGroupByStreamName(uniqueKey, streamName, s.hlssvr, s.conf.LogicConfig.GopCacheNum, s.conf.LogicConfig.SingleGopMaxFrameNum)
+		onHookSession := func(appName string, uniqueKey string, streamName string) logic.ICustomizeHookSessionContext {
+			key := maxlogic.NewStreamKey(appName, streamName)
+			group, created := maxlogic.GetGroupManagerInstance().GetOrCreateGroup(key, uniqueKey, s.hlssvr, s.conf.LogicConfig.GopCacheNum, s.conf.LogicConfig.SingleGopMaxFrameNum)
 			group.BindActiveHook(key, func(activeKey maxlogic.StreamKey) {
 				if s.notifyHub == nil || !activeKey.Valid() {
 					return
@@ -226,7 +226,16 @@ func (s *LalMaxServer) initHookSession() {
 				})
 			}
 			return group
-		})
+		}
+		if withAppName, ok := s.lalsvr.(interface {
+			WithOnHookSessionWithAppName(func(appName string, uniqueKey string, streamName string) logic.ICustomizeHookSessionContext)
+		}); ok {
+			withAppName.WithOnHookSessionWithAppName(onHookSession)
+		} else {
+			s.lalsvr.WithOnHookSession(func(uniqueKey string, streamName string) logic.ICustomizeHookSessionContext {
+				return onHookSession("", uniqueKey, streamName)
+			})
+		}
 	})
 }
 

@@ -16,7 +16,7 @@
   import Setup from './routes/Setup.svelte';
   import Streams from './routes/Streams.svelte';
   import StreamDetail from './routes/StreamDetail.svelte';
-  import IPTV from './routes/IPTV.svelte';
+  import MediaSources from './routes/MediaSources.svelte';
 
   import Devices from './routes/Devices.svelte';
   import DeviceGroups from './routes/DeviceGroups.svelte';
@@ -121,7 +121,7 @@
     }
 
     if (segments[0] === 'devices') {
-      return { route: 'devices', params: {} };
+      return { route: 'devices', params: { add: query.get('add') || '' } };
     }
 
     if (segments[0] === 'map') {
@@ -139,7 +139,8 @@
         }
         return { route: 'stream-detail', params: { id: streamId } };
       }
-      return { route: 'streams', params: {} };
+      const createMode = query.get('create') === 'pull' || query.get('create') === 'push' ? query.get('create') || '' : '';
+      return { route: 'streams', params: { createMode } };
     }
     if (segments[0] === 'stats') {
       return { route: 'stats', params: {} };
@@ -166,8 +167,15 @@
       return { route: 'gb-channels', params: {} };
     }
 
-    if (segments[0] === 'iptv') {
-      return { route: 'iptv', params: {} };
+    if (segments[0] === 'media-sources') {
+      const requestedTab = query.get('tab');
+      const tab = requestedTab === 'emby' || requestedTab === 'iptv' ? requestedTab : 'overview';
+      return { route: 'media-sources', params: { tab } };
+    }
+
+    // Keep saved links and bookmarks working while both sources share one page.
+    if (segments[0] === 'iptv' || segments[0] === 'emby') {
+      return { route: 'media-sources', params: { tab: segments[0] } };
     }
 
 
@@ -282,9 +290,9 @@
       {:else if currentRoute === 'live'}
         <LiveView cameraId={params.id} />
       {:else if currentRoute === 'devices'}
-        <Devices />
+        <Devices initialAdd={params.add === '1'} />
       {:else if currentRoute === 'streams'}
-        <Streams />
+        <Streams initialCreateMode={params.createMode === 'pull' || params.createMode === 'push' ? params.createMode : undefined} />
       {:else if currentRoute === 'stream-detail'}
         <StreamDetail streamId={params.id} />
       {:else if currentRoute === 'stats'}
@@ -299,8 +307,8 @@
         <DeviceGroups />
       {:else if currentRoute === 'gb-channels'}
         <GB28181Channels />
-      {:else if currentRoute === 'iptv'}
-        <IPTV />
+      {:else if currentRoute === 'media-sources'}
+        <MediaSources activeTab={params.tab === 'emby' || params.tab === 'iptv' ? params.tab : 'overview'} />
       {:else if currentRoute === 'users'}
         <Users />
       {:else if currentRoute === 'logs'}

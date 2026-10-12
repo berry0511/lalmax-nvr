@@ -28,8 +28,8 @@ func NewManager(db storage.StreamHistoryRepository, engine media.Engine) *Manage
 	return &Manager{db: db, engine: engine, iptvSessions: make(map[string]string)}
 }
 
-// RecordHLSPullState persists IPTV online sessions based on actual video
-// delivery, since native HLS pulls do not emit regular publisher events.
+// RecordHLSPullState persists native HLS pull sessions based on actual video
+// delivery, since these pulls do not emit regular publisher events.
 func (m *Manager) RecordHLSPullState(streamID string, online bool, at time.Time) {
 	if m == nil || m.db == nil || streamID == "" {
 		return
@@ -43,7 +43,7 @@ func (m *Manager) RecordHLSPullState(streamID string, online bool, at time.Time)
 			m.mu.Unlock()
 			return
 		}
-		sessionID := fmt.Sprintf("iptv-hls-%s-%d", streamID, at.UnixNano())
+		sessionID := fmt.Sprintf("hls-pull-%s-%d", streamID, at.UnixNano())
 		m.iptvSessions[streamID] = sessionID
 		m.mu.Unlock()
 		history := &storage.StreamHistory{

@@ -52,7 +52,7 @@ type ServerManager struct {
 	mutex        sync.Mutex
 	groupManager IGroupManager
 
-	onHookSession func(uniqueKey string, streamName string) ICustomizeHookSessionContext
+	onHookSession func(appName string, uniqueKey string, streamName string) ICustomizeHookSessionContext
 
 	notifyHandlerThread taskpool.Pool
 }
@@ -412,7 +412,8 @@ func (sm *ServerManager) AddCustomizePubSession(streamName string) (ICustomizePu
 		return nil, err
 	}
 
-	group := sm.getOrCreateGroup("", streamName)
+	// Custom publishers use the same default app as emitted play URLs and hook metadata.
+	group := sm.getOrCreateGroup("live", streamName)
 	sessionCtx, err := group.AddCustomizePubSession(streamName)
 	if err != nil {
 		return nil, err
@@ -430,7 +431,7 @@ func (sm *ServerManager) AddCustomizePubSession(streamName string) (ICustomizePu
 func (sm *ServerManager) DelCustomizePubSession(sessionCtx ICustomizePubSessionContext) {
 	sm.mutex.Lock()
 	defer sm.mutex.Unlock()
-	group := sm.getGroup("", sessionCtx.StreamName())
+	group := sm.getGroup("live", sessionCtx.StreamName())
 	if group == nil {
 		return
 	}
@@ -438,6 +439,18 @@ func (sm *ServerManager) DelCustomizePubSession(sessionCtx ICustomizePubSessionC
 }
 
 func (sm *ServerManager) WithOnHookSession(onHookSession func(uniqueKey string, streamName string) ICustomizeHookSessionContext) {
+	if onHookSession == nil {
+		sm.onHookSession = nil
+		return
+	}
+	sm.onHookSession = func(_ string, uniqueKey string, streamName string) ICustomizeHookSessionContext {
+		return onHookSession(uniqueKey, streamName)
+	}
+}
+
+// WithOnHookSessionWithAppName is an additive hook API that includes the
+// publisher's app name while preserving the original WithOnHookSession API.
+func (sm *ServerManager) WithOnHookSessionWithAppName(onHookSession func(appName string, uniqueKey string, streamName string) ICustomizeHookSessionContext) {
 	sm.onHookSession = onHookSession
 }
 

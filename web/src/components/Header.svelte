@@ -30,7 +30,6 @@
     Brain,
     Send,
     MapPin,
-    Tv,
   } from 'lucide-svelte';
 
   // Props
@@ -91,7 +90,7 @@
     { href: '#/map', labelKey: 'nav.map', route: '/map', icon: MapPin },
     { href: '#/device-groups', labelKey: 'nav.device_groups', route: '/device-groups', icon: FolderTree },
     { href: '#/gb-channels', labelKey: 'nav.gb_channels', route: '/gb-channels', icon: Network },
-    { href: '#/iptv', labelKey: 'nav.iptv', route: '/iptv', icon: Tv },
+    { href: '#/media-sources', labelKey: 'nav.media_sources', route: '/media-sources', icon: Link },
     { href: '#/recordings', labelKey: 'nav.recordings', route: '/recordings', icon: Film },
     { href: '#/recording-plans', labelKey: 'nav.recording_plans', route: '/recording-plans', icon: CalendarClock },
     { href: '#/events', labelKey: 'nav.events', route: '/events', icon: Bell },
@@ -106,7 +105,9 @@
   ];
 
   function isActive(route: string): boolean {
-    return activeRoute === route || activeRoute.startsWith(route + '/');
+    const currentPath = activeRoute.split('?')[0];
+    if (route === '/media-sources' && (currentPath === '/iptv' || currentPath === '/emby')) return true;
+    return currentPath === route || currentPath.startsWith(route + '/');
   }
 
   function goBack() {

@@ -43,6 +43,8 @@
   import ONVIFRecordingQuery from '$lib/components/ONVIFRecordingQuery.svelte';
   import Pagination from '../components/Pagination.svelte';
 
+  let { initialAdd = false }: { initialAdd?: boolean } = $props();
+
   // Device type tabs
   type DeviceType = 'onvif' | 'gb28181' | 'xiaomi' | 'push' | 'archives';
   let activeTab = $state<DeviceType>('onvif');
@@ -1193,6 +1195,7 @@
   }
 
   onMount(() => {
+    if (initialAdd) openAddForm();
     loadDevices();
     loadHealth();
     loadArchives();
