@@ -4,7 +4,7 @@ lalmax-nvr 使用数据库保存设备配置、录像索引、事件、VoIP 通�
 
 ## 配置数据库
 
-新部署保持 `storage.database_driver` 和 `storage.database_dsn` 未设置，即使用 `{storage.root_dir}/lalmax-nvr.db` 中的 SQLite。若直接使用 PostgreSQL 或 MySQL，在配置文件中同时设置这两个字段。DSN 属于敏感信息；配置 `NVR_ENCRYPTION_KEY` 后，lalmax-nvr 保存配置时会加密 DSN。
+新部署保持 `storage.database_driver` 和 `storage.database_dsn` 未设置，即使用 `{storage.root_dir}/lalmax-nvr.db` 中的 SQLite。若直接使用 PostgreSQL 或 MySQL，在配置文件中同时设置这两个字段。DSN 属于敏感信息；配置 `NVR_ENCRYPTION_KEY`（也可在 Web **设置 → 安全** 中设置密钥）后，lalmax-nvr 保存配置时会加密 DSN。
 
 也可以在 Web **设置 → 数据库迁移** 页面测试并保存 PostgreSQL 或 MySQL 目标连接。数据库账号需要在目标库中创建表和索引、读写数据的权限；请先创建目标数据库本身。
 

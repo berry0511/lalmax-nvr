@@ -315,6 +315,8 @@
         return t('streams.sourceVoIP');
       case 'iptv':
         return t('streams.sourceIPTV');
+      case 'emby':
+        return t('streams.sourceEmby');
       case 'rtmp_push':
         return t('streams.sourceRTMPPush');
       case 'srt_push':

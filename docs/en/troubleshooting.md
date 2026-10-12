@@ -22,7 +22,7 @@ These endpoints do not require login. If the connection fails, inspect process l
 
 Request `GET /api/streams/{stream_id}` and inspect whether media is active and which `play_urls` are available. Browser playback usually uses NVR proxy paths such as `/api/streams/{stream_id}/stream/*`, `stream.flv`, `stream.m4s`, or `stream/ws`. If a path returns 404, first verify the stream ID, publication state, and whether that protocol is present in `play_urls`.
 
-IPTV channel playback on its own page uses the same-origin HLS proxy. To play over NVR protocols such as RTSP or FLV, enable **Publish** on the channel card. Publication and recording pulls require `media.mode: embedded`. See [IPTV](iptv.md).
+IPTV channel playback under **Media Sources → IPTV** uses the same-origin HLS proxy. To play over NVR protocols such as RTSP or FLV, enable **Publish** on the channel card. Publication and recording pulls require `media.mode: embedded`. See the [IPTV guide](iptv.md) and [Media Sources overview](media-sources.md).
 
 ## Recordings are missing
 

@@ -182,11 +182,10 @@ func (group *Group) OnMsg(msg base.RtmpMsg) {
 	}
 	defer group.lifecycleMux.RUnlock()
 
+	group.msgMux.Lock()
 	if group.hlssvr != nil {
 		group.hlssvr.OnMsgWithAppName(group.key.AppName, group.key.StreamName, msg)
 	}
-
-	group.msgMux.Lock()
 	hasVideo := group.hasVideo
 	shouldNotifyActive := false
 	consumers := make([]*subscriberState, 0)
@@ -222,6 +221,25 @@ func (group *Group) OnMsg(msg base.RtmpMsg) {
 
 	for _, c := range consumers {
 		group.handleSubscriberMsg(c, msg, hasVideo)
+	}
+}
+
+// ReplayCachedGopToHls seeds a newly created on-demand HLS session with the
+// codec headers and cached GOP before it begins consuming live frames.
+func (group *Group) ReplayCachedGopToHls() {
+	if group == nil || group.hlssvr == nil {
+		return
+	}
+	group.lifecycleMux.RLock()
+	defer group.lifecycleMux.RUnlock()
+	if group.closed.Load() {
+		return
+	}
+
+	group.msgMux.Lock()
+	defer group.msgMux.Unlock()
+	for _, msg := range group.getGopReplayMessages() {
+		group.hlssvr.OnMsgWithAppName(group.key.AppName, group.key.StreamName, msg)
 	}
 }
 

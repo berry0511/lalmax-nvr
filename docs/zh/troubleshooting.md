@@ -22,7 +22,7 @@ curl -i http://localhost:9090/api/readyz
 
 先请求 `GET /api/streams/{stream_id}`，检查是否有活动媒体流和 `play_urls`。浏览器直播通常通过 NVR 的 `/api/streams/{stream_id}/stream/*`、`stream.flv`、`stream.m4s` 或 `stream/ws` 等代理路径播放；若这些路径返回 404，先确认流 ID、流是否已发布，以及所用协议是否在 `play_urls` 中。
 
-IPTV 的频道页面播放走同源 HLS 代理；如需 RTSP、FLV 等 NVR 协议播放，应在频道卡片启用**发布**。发布和录像拉流要求 `media.mode: embedded`。详见 [IPTV](iptv.md)。
+在 **媒体源 → IPTV** 中播放频道时使用同源 HLS 代理；如需 RTSP、FLV 等 NVR 协议播放，应在频道卡片启用**发布**。发布和录像拉流要求 `media.mode: embedded`。详见 [IPTV 指南](iptv.md)和[媒体源总览](media-sources.md)。
 
 ## 找不到录像
 

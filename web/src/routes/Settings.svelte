@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { getSettings, updateSettings, getMergeSettings, updateMergeSettings, getFeatures, updateFeatures, getStats, listCameras, getStreamingSettings, updateStreamingSettings, getAutoDiscoverSettings, updateAutoDiscoverSettings, getAiSettings, saveAiSettings, detectAiBackend, getAiBackendConfig, updateAiBackendConfig, getGB28181Settings, updateGB28181Settings, reloadConfig, checkConfigChange, regenerateLalmaxConfig, getHLSSettings, updateHLSSettings, getLocalNetworkInterfaces, updateDLNASettings, getDatabaseMigrationSettings, saveDatabaseMigrationTarget, testDatabaseMigrationTarget, runDatabaseMigration } from '$lib/api';
-  import type { AiBackendConfig } from '$lib/api';
+  import { getSettings, updateSettings, getMergeSettings, updateMergeSettings, getFeatures, updateFeatures, getStats, listCameras, getStreamingSettings, updateStreamingSettings, getAutoDiscoverSettings, updateAutoDiscoverSettings, getAiSettings, saveAiSettings, detectAiBackend, getAiBackendConfig, updateAiBackendConfig, getGB28181Settings, updateGB28181Settings, reloadConfig, checkConfigChange, regenerateLalmaxConfig, getHLSSettings, updateHLSSettings, getLocalNetworkInterfaces, updateDLNASettings, getDatabaseMigrationSettings, saveDatabaseMigrationTarget, testDatabaseMigrationTarget, runDatabaseMigration, getEncryptionKeySettings, setEncryptionKey } from '$lib/api';
+  import type { AiBackendConfig, EncryptionKeySettings } from '$lib/api';
   import type { SettingsConfig, FeatureFlags, StorageStats, Camera, StreamingConfig, GB28181Config, HLSConfig, NetworkInterface } from '$lib/api';
   import { getItemsPerPage, setItemsPerPage, getAutoRefresh, setAutoRefresh } from '../lib/preferences';
   import { t } from '$lib/i18n';
@@ -158,6 +158,7 @@ let settingsTabs = $derived([
   { id: 'general', label: t('settings.tabs.general') },
   { id: 'advanced', label: t('settings.tabs.advanced') },
   { id: 'database', label: t('settings.tabs.database') },
+  { id: 'security', label: t('settings.tabs.security') },
 ]);
 let databaseTargetDriver = $state<'postgres' | 'mysql' | 'sqlite'>('postgres');
 let databaseTargetDSN = $state('');
@@ -169,6 +170,9 @@ let databaseTargetMigrating = $state(false);
 let databaseMigrationAvailable = $state(false);
 let databaseActiveDriver = $state('sqlite');
 let showDatabaseMigrationConfirm = $state(false);
+let encryptionKeySettings = $state<EncryptionKeySettings | null>(null);
+let encryptionKeyInput = $state('');
+let encryptionKeySaving = $state(false);
 
 // Derived: is any setting dirty?
 let isDirty = $derived(() => {
@@ -340,6 +344,11 @@ function getAffectedCameraCount(protocol: string): number {
     error = '';
 
     try {
+      try {
+        encryptionKeySettings = await getEncryptionKeySettings();
+      } catch (e) {
+        console.warn('Failed to load encryption key settings:', e);
+      }
       settings = await getSettings();
       retentionDays = settings.cleanup.retention_days;
       diskThresholdPercent = settings.cleanup.disk_threshold_percent;
@@ -413,6 +422,27 @@ function getAffectedCameraCount(protocol: string): number {
       error = e instanceof Error ? e.message : t('common.failedLoadSettings');
     } finally {
       loading = false;
+    }
+  }
+
+  function generateEncryptionKey() {
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    let binary = '';
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    encryptionKeyInput = btoa(binary);
+  }
+
+  async function saveEncryptionKey() {
+    if (!encryptionKeyInput.trim()) return;
+    encryptionKeySaving = true;
+    try {
+      encryptionKeySettings = await setEncryptionKey(encryptionKeyInput.trim());
+      encryptionKeyInput = '';
+      showToast(t('settings.security.saved'), 'success');
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : t('settings.security.saveFailed'), 'error');
+    } finally {
+      encryptionKeySaving = false;
     }
   }
 
@@ -2364,7 +2394,7 @@ type="button"
           </div>
         </div>
 
-      {:else}
+      {:else if activeSettingsTab === 'database'}
         <div class="card p-8 border th-border space-y-6">
           <div>
             <h3 class="text-lg font-semibold th-text-primary mb-1">{t('settings.database.title')}</h3>
@@ -2412,6 +2442,41 @@ type="button"
             {/if}
           </div>
         </div>
+      {:else}
+        <div class="card p-8 border th-border space-y-6">
+          <div>
+            <h3 class="text-lg font-semibold th-text-primary mb-1">{t('settings.security.title')}</h3>
+            <p class="text-sm th-text-secondary">{t('settings.security.description')}</p>
+          </div>
+          {#if encryptionKeySettings?.enabled}
+            <div class="rounded-lg border th-border p-4 th-bg-hover space-y-1">
+              <p class="font-medium th-text-primary">{t('settings.security.enabled')}</p>
+              <p class="text-sm th-text-secondary">{t(`settings.security.source.${encryptionKeySettings.managed_by}`)}</p>
+              <p class="text-xs th-text-tertiary">{t('settings.security.rotationHint')}</p>
+            </div>
+          {:else if encryptionKeySettings?.managed_by === 'none'}
+            <div class="space-y-4">
+              <p class="text-sm th-text-secondary">{t('settings.security.notConfigured')}</p>
+              <div>
+                <label for="encryption-key" class="input-label">{t('settings.security.key')}</label>
+                <input id="encryption-key" type="password" class="input" bind:value={encryptionKeyInput} autocomplete="new-password" spellcheck="false" placeholder={t('settings.security.keyPlaceholder')} />
+                <p class="text-xs th-text-tertiary mt-1">{t('settings.security.keyHint')}</p>
+              </div>
+              <div class="flex flex-wrap items-center gap-3">
+                <button class="btn btn-secondary" type="button" onclick={generateEncryptionKey}>{t('settings.security.generate')}</button>
+                <button class="btn btn-primary" type="button" onclick={saveEncryptionKey} disabled={encryptionKeySaving || !encryptionKeyInput.trim()}>
+                  {#if encryptionKeySaving}<span class="spinner mr-2"></span>{/if}{t('settings.security.save')}
+                </button>
+              </div>
+            </div>
+          {:else}
+            <div class="rounded-lg border th-border p-4 th-bg-hover space-y-1">
+              <p class="font-medium th-text-primary">{t('settings.security.externallyManaged')}</p>
+              <p class="text-sm th-text-secondary">{t(`settings.security.source.${encryptionKeySettings?.managed_by ?? 'none'}`)}</p>
+              <p class="text-xs th-text-tertiary">{t('settings.security.externalHint')}</p>
+            </div>
+          {/if}
+        </div>
       {/if}
 
         <!-- Config conflict warning -->
@@ -2428,7 +2493,7 @@ type="button"
         {/if}
 
         <!-- Save + utility buttons -->
-        {#if activeSettingsTab !== 'database'}
+        {#if activeSettingsTab !== 'database' && activeSettingsTab !== 'security'}
         <div class="flex items-center gap-4 pt-2">
           <button
             onclick={save}

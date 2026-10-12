@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,8 @@ var (
 	ErrHLSPullUnsupportedCodec = errors.New("hls pull requires h264/h265 video and optional aac audio")
 	// ErrHLSPullBusy is returned when the concurrent pull budget is exhausted.
 	ErrHLSPullBusy = errors.New("hls pull concurrency limit reached")
+	// errHLSPullPlaybackDuration marks the natural end of a bounded VOD playback.
+	errHLSPullPlaybackDuration = errors.New("hls pull playback duration reached")
 )
 
 // HLSPullManager pulls standard HLS playlists and injects frames into lal.
@@ -121,7 +124,7 @@ func (m *HLSPullManager) StartHLSPull(_ context.Context, req StartHLSPullRequest
 	if streamID == "" {
 		return nil, errors.New("stream ID is required")
 	}
-	if playlist == "" {
+	if playlist == "" && req.PlaylistURLProvider == nil {
 		return nil, errors.New("playlist URL is required")
 	}
 	if !engineSupportsCustomizePub(m.engine) {
@@ -193,12 +196,16 @@ func (m *HLSPullManager) StopAllHLSPulls() {
 
 func (m *HLSPullManager) runTask(ctx context.Context, task *hlsPullTask) {
 	defer close(task.done)
+	var completedWith error
 	defer func() {
 		m.mu.Lock()
 		if cur, ok := m.tasks[task.streamID]; ok && cur == task {
 			delete(m.tasks, task.streamID)
 		}
 		m.mu.Unlock()
+		if ctx.Err() == nil && task.req.OnComplete != nil {
+			task.req.OnComplete(completedWith)
+		}
 	}()
 
 	attempts := 0
@@ -208,10 +215,52 @@ func (m *HLSPullManager) runTask(ctx context.Context, task *hlsPullTask) {
 			return
 		}
 		attempts++
+		if task.req.PlaylistURLProvider != nil {
+			playlistURL, headers, err := task.req.PlaylistURLProvider(ctx)
+			if err != nil {
+				completedWith = err
+			} else {
+				task.req.PlaylistURL = playlistURL
+				task.req.Headers = headers
+			}
+			if err != nil {
+				if task.req.PullRetryNum >= 0 && attempts > task.req.PullRetryNum {
+					return
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(wait):
+				}
+				if wait < hlsPullMaxRetryWait {
+					wait = min(wait*2, hlsPullMaxRetryWait)
+				}
+				continue
+			}
+		}
 		err := m.pullOnce(ctx, task)
 		if ctx.Err() != nil {
 			return
 		}
+		if errors.Is(err, gohlslib.ErrClientEOS) {
+			if task.req.RepeatOnEnd {
+				attempts = 0
+				wait = hlsPullRetryInterval
+				continue
+			}
+			completedWith = nil
+			return
+		}
+		if errors.Is(err, errHLSPullPlaybackDuration) {
+			if task.req.RepeatOnEnd {
+				attempts = 0
+				wait = hlsPullRetryInterval
+				continue
+			}
+			completedWith = nil
+			return
+		}
+		completedWith = err
 		if task.req.PullRetryNum >= 0 && attempts > task.req.PullRetryNum {
 			return
 		}
@@ -245,7 +294,7 @@ func (m *HLSPullManager) pullOnce(ctx context.Context, task *hlsPullTask) error 
 
 	client := &gohlslib.Client{
 		URI:                       task.req.PlaylistURL,
-		HTTPClient:                headerClient(m.httpClient, task.req.Headers),
+		HTTPClient:                headerClient(m.httpClient, task.req.Headers, task.req.PlaylistURL, task.req.RestrictHeadersToOrigin),
 		OnDownloadPrimaryPlaylist: func(string) {},
 		OnDownloadStreamPlaylist:  func(string) {},
 		OnDownloadSegment:         func(string) {},
@@ -255,8 +304,10 @@ func (m *HLSPullManager) pullOnce(ctx context.Context, task *hlsPullTask) error 
 	var onlineOnce sync.Once
 	var onlineMu sync.Mutex
 	wasOnline := false
+	videoStarted := make(chan struct{})
 	markOnline := func() {
 		onlineOnce.Do(func() {
+			close(videoStarted)
 			onlineMu.Lock()
 			wasOnline = true
 			onlineMu.Unlock()
@@ -279,11 +330,34 @@ func (m *HLSPullManager) pullOnce(ctx context.Context, task *hlsPullTask) error 
 	}
 	defer client.Close()
 
+	if task.req.PlaybackDuration <= 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-client.Wait():
+			return err
+		}
+	}
+	waitForVideo := time.NewTimer(30 * time.Second)
+	defer waitForVideo.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-videoStarted:
+	case err := <-client.Wait():
+		return err
+	case <-waitForVideo.C:
+		return errors.New("HLS pull did not receive video before playback duration timer")
+	}
+	playbackTimer := time.NewTimer(task.req.PlaybackDuration)
+	defer playbackTimer.Stop()
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case err := <-client.Wait():
 		return err
+	case <-playbackTimer.C:
+		return errHLSPullPlaybackDuration
 	}
 }
 
@@ -428,7 +502,7 @@ func AnnexBFromAU(au [][]byte) []byte {
 	return out
 }
 
-func headerClient(baseClient *http.Client, headers map[string]string) *http.Client {
+func headerClient(baseClient *http.Client, headers map[string]string, playlistURL string, restrictOrigin bool) *http.Client {
 	if baseClient == nil {
 		baseClient = http.DefaultClient
 	}
@@ -439,12 +513,21 @@ func headerClient(baseClient *http.Client, headers map[string]string) *http.Clie
 	if transport == nil {
 		transport = http.DefaultTransport
 	}
+	allowedOrigin := ""
+	if restrictOrigin {
+		if u, err := url.Parse(playlistURL); err == nil {
+			allowedOrigin = strings.ToLower(u.Scheme + "://" + u.Host)
+		}
+	}
 	return &http.Client{
 		Timeout:   baseClient.Timeout,
-		Transport: &headerRoundTripper{base: transport, headers: headers},
+		Transport: &headerRoundTripper{base: transport, headers: headers, allowedOrigin: allowedOrigin},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
 				return errors.New("too many redirects")
+			}
+			if allowedOrigin != "" && strings.ToLower(req.URL.Scheme+"://"+req.URL.Host) != allowedOrigin {
+				return errors.New("HLS redirect changed origin")
 			}
 			return nil
 		},
@@ -462,16 +545,19 @@ func engineSupportsCustomizePub(engine Engine) bool {
 }
 
 type headerRoundTripper struct {
-	base    http.RoundTripper
-	headers map[string]string
+	base          http.RoundTripper
+	headers       map[string]string
+	allowedOrigin string
 }
 
 func (h *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	for k, v := range h.headers {
-		if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
-			continue
+	if h.allowedOrigin == "" || strings.ToLower(req.URL.Scheme+"://"+req.URL.Host) == h.allowedOrigin {
+		for k, v := range h.headers {
+			if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
+				continue
+			}
+			req.Header.Set(k, v)
 		}
-		req.Header.Set(k, v)
 	}
 	return h.base.RoundTrip(req)
 }

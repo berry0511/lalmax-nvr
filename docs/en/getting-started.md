@@ -1,6 +1,6 @@
 # Getting started
 
-The NVR serves its Web UI and API on `:9090` by default. The media engine defaults to `media.mode: embedded`. Cameras, IPTV channels, streams, and recording plans are managed separately; adding a device alone does not start recording.
+The NVR serves its Web UI and API on `:9090` by default. The media engine defaults to `media.mode: embedded`. Cameras, media sources (IPTV and Emby), runtime streams, and recording plans are managed separately; adding a device alone does not start recording.
 
 ## Docker Compose
 
@@ -35,8 +35,9 @@ Windows build and start scripts are under [`scripts/windows`](../../scripts/wind
 ## Add sources
 
 1. Add an RTSP or ONVIF camera on the **Devices** page. The connection check tests reachability, not decoding; see [Camera ingest](camera-guide.md).
-2. Import an M3U playlist and probe channels on the **IPTV** page. Channels play directly in the browser; enable publication or create a plan when other protocols or recording are needed. See [IPTV](iptv.md).
-3. Create a plan for the desired `stream_id` on the **Recording plans** page. See [Recording plans](recording-plans.md).
+2. Open **Media Sources → IPTV** to import an M3U playlist and probe channels. Channels play directly in the browser; enable publication or create a plan when other protocols or recording are needed. See the [IPTV guide](iptv.md).
+3. If you use Emby, configure the server and add movies or episodes under **Media Sources → Emby Library**. Publish an item as an NVR stream; it goes offline at the end by default, or can loop. See the [Emby Library guide](emby.md).
+4. Create a plan for the desired `stream_id` on the **Recording plans** page. See [Recording plans](recording-plans.md) and the [Media Sources overview](media-sources.md) for source differences and navigation.
 
 A running NVR serves API documentation at `/docs/`. [WebDAV](webdav-integration.md) is read-only by default and uses Web/API authentication. [FTP](ftp-integration.md) is enabled by default, but its plaintext password authentication currently conflicts with the hash saved after initialization; read its guide before relying on it.
 

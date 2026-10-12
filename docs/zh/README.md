@@ -24,7 +24,9 @@
 | [GB28181](gb28181-guide.md) | 国标设备接入与相关操作 |
 | [VoIP 呼叫与对讲](voip.md) | SIP 终端与 PBX、网页外呼、WebRTC 双向对讲、通话记录及终端接入 |
 | [JT1078 / JT808](configuration.md#jt1078-推流配置) | `:1078` 媒体收流，以及可选的 `:808` 信令 |
+| [媒体接入总览](media-sources.md) | 摄像头、直播地址、IPTV、Emby 和编码器推流的统一入口 |
 | [IPTV](iptv.md) | 导入和检测 M3U、浏览器播放；按需发布到 NVR 供其他协议播放，或创建录像计划 |
+| [Emby 影音库](emby.md) | 浏览电影和剧集并发布为直播流；片尾下线或自动循环 |
 | [小米摄像头](xiaomi-setup.md) | 小米摄像头接入 |
 | [MediaMTX](mediamtx-guide.md) | 通过可选的 MediaMTX 接入摄像头 |
 | [DLNA](dlna.md) | 在局域网播放器中发现并观看实时流、录像 |

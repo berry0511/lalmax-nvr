@@ -2,7 +2,7 @@
 
 IPTV 是独立模块，负责导入 M3U、检测频道、管理频道和播放地址。频道不是摄像头，也不会写入 `created_streams`。
 
-Web UI：侧栏 **IPTV**（`#/iptv`）。REST：`/api/iptv`。
+Web UI：侧栏 **媒体源 → IPTV**（`#/media-sources?tab=iptv`；旧链接 `#/iptv` 仍可用）。REST：`/api/iptv`。有关 IPTV 与 Emby 的整体区别，见[媒体源总览](media-sources.md)。
 
 ## 工作方式
 
@@ -48,7 +48,7 @@ curl -u admin:password -X POST http://localhost:9090/api/recording-plans \
 
 ## Web 界面
 
-1. 打开 **IPTV**，导入 M3U URL 或粘贴 `#EXTM3U` 文本。
+1. 打开 **媒体源 → IPTV**，导入 M3U URL 或粘贴 `#EXTM3U` 文本。
 2. 等待检测结果：`pending` → `probing` → `playable` / `warning` / `unsupported` / `failed`。
 3. 选择需要保留的频道并纳管。纳管不会启动 HLS pull。
 4. 点击频道开始浏览器直播放；需要通过 NVR 协议观看时，启用频道卡片上的“发布”；要录像时，在录像计划中为频道配置 `stream_id`。浏览器代理播放独立于 NVR；发布和录像可以同时使用同一条上游拉流。

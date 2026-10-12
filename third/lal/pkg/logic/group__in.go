@@ -378,7 +378,7 @@ func (group *Group) addIn() {
 	}
 
 	if group.option.onHookSession != nil {
-		group.customizeHookSessionContext = group.option.onHookSession(group.inSessionUniqueKey(), group.streamName)
+		group.customizeHookSessionContext = group.option.onHookSession(group.appName, group.inSessionUniqueKey(), group.streamName)
 	}
 
 	group.startPushIfNeeded()
@@ -401,7 +401,9 @@ func (group *Group) delIn() {
 	}
 
 	group.stopPushIfNeeded()
-	group.stopHlsIfNeeded()
+	// delIn is called with group.mutex already held by each Del*PubSession
+	// method. stopHlsIfNeeded reacquires that mutex and deadlocks here.
+	group.stopHlsMuxerLocked()
 	group.stopRecordFlvIfNeeded()
 	group.stopRecordMpegtsIfNeeded()
 

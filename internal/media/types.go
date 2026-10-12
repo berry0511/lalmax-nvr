@@ -83,6 +83,15 @@ type StartHLSPullRequest struct {
 	Headers      map[string]string
 	PullTimeout  time.Duration
 	PullRetryNum int
+	// PlaylistURLProvider creates a fresh playlist/session before each attempt.
+	// It is used by finite VOD sources such as Emby when looping is enabled.
+	PlaylistURLProvider func(context.Context) (string, map[string]string, error)
+	RepeatOnEnd         bool
+	// PlaybackDuration bounds finite live-style playlists that do not publish
+	// #EXT-X-ENDLIST (Emby transcoding playlists can keep polling after VOD ends).
+	PlaybackDuration        time.Duration
+	RestrictHeadersToOrigin bool
+	OnComplete              func(error)
 }
 
 // RTMPEvent represents an RTMP stream event for the ingest handler.

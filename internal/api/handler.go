@@ -19,6 +19,7 @@ import (
 	"github.com/lalmax-pro/lalmax-nvr/internal/ai"
 	"github.com/lalmax-pro/lalmax-nvr/internal/camera"
 	"github.com/lalmax-pro/lalmax-nvr/internal/config"
+	"github.com/lalmax-pro/lalmax-nvr/internal/emby"
 	"github.com/lalmax-pro/lalmax-nvr/internal/event"
 	"github.com/lalmax-pro/lalmax-nvr/internal/gb28181"
 	"github.com/lalmax-pro/lalmax-nvr/internal/iptv"
@@ -195,6 +196,7 @@ type Handler struct {
 	serviceLogPath    string
 	dlnaApply         func(context.Context) error
 	iptvSvc           *iptv.Service
+	embySvc           *emby.Service
 }
 
 // GB28181StreamStatus reports active GB28181 play sessions for stream status overlay.
@@ -234,6 +236,9 @@ func (h *Handler) SetDLNAApply(fn func(context.Context) error) { h.dlnaApply = f
 
 // SetIPTVService attaches the independent IPTV module.
 func (h *Handler) SetIPTVService(svc *iptv.Service) { h.iptvSvc = svc }
+
+// SetEmbyService attaches Emby library ingestion and publication.
+func (h *Handler) SetEmbyService(svc *emby.Service) { h.embySvc = svc }
 
 // SetRestartFunc registers the process restart callback used by first-time
 // setup after it has moved the canonical configuration into the data folder.
@@ -508,8 +513,19 @@ func (h *Handler) Routes() http.Handler {
 			r.With(middleware.RequireOperatePermission()).Put("/channels/{id}", h.handleIPTVUpdateChannel)
 			r.With(middleware.RequireOperatePermission()).Delete("/channels/{id}", h.handleIPTVDeleteChannel)
 		})
+		r.Route("/api/emby", func(r chi.Router) {
+			r.Get("/config", h.handleEmbyGetConfig)
+			r.With(middleware.RequireOperatePermission()).Put("/config", h.handleEmbySaveConfig)
+			r.Get("/library", h.handleEmbyBrowse)
+			r.Get("/items", h.handleEmbyListItems)
+			r.With(middleware.RequireOperatePermission()).Post("/items", h.handleEmbyAddItem)
+			r.With(middleware.RequireOperatePermission()).Put("/items/{id}", h.handleEmbyUpdateItem)
+			r.With(middleware.RequireOperatePermission()).Delete("/items/{id}", h.handleEmbyDeleteItem)
+		})
 		r.Get("/api/settings", h.handleGetSettings)
 		r.With(middleware.RequireOperatePermission()).Put("/api/settings", h.handleUpdateSettings)
+		r.Get("/api/settings/encryption-key", h.handleGetEncryptionKeySettings)
+		r.With(middleware.RequireOperatePermission()).Put("/api/settings/encryption-key", h.handleSetEncryptionKey)
 		r.Get("/api/settings/database-migration", h.handleGetDatabaseMigrationSettings)
 		r.With(middleware.RequireOperatePermission()).Put("/api/settings/database-migration", h.handleUpdateDatabaseMigrationSettings)
 		r.With(middleware.RequireOperatePermission()).Post("/api/settings/database-migration/test", h.handleTestDatabaseMigrationTarget)

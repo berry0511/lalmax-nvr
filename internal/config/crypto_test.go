@@ -24,14 +24,18 @@ func helperSetEnvKey(t *testing.T, key []byte) {
 	t.Helper()
 	t.Setenv("NVR_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(key))
 	// Reset cached key
+	encryptionKeyMu.Lock()
 	encryptionKey = nil
+	encryptionKeyMu.Unlock()
 }
 
 func helperClearEnvKey(t *testing.T) {
 	t.Helper()
 	t.Setenv("NVR_ENCRYPTION_KEY", "")
 	t.Setenv("NVR_ENCRYPTION_KEY_FILE", "")
+	encryptionKeyMu.Lock()
 	encryptionKey = nil
+	encryptionKeyMu.Unlock()
 }
 
 func TestEncryptDecryptRoundTrip(t *testing.T) {

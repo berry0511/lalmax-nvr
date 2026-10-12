@@ -4,7 +4,7 @@ lalmax-nvr stores device configuration, recording indexes, events, VoIP call his
 
 ## Configure a database
 
-For a new deployment, leave `storage.database_driver` and `storage.database_dsn` unset to use `{storage.root_dir}/lalmax-nvr.db` with SQLite. To start directly on PostgreSQL or MySQL, set both fields in the configuration file. The DSN is a secret: configure `NVR_ENCRYPTION_KEY` so lalmax-nvr encrypts it when saving the configuration.
+For a new deployment, leave `storage.database_driver` and `storage.database_dsn` unset to use `{storage.root_dir}/lalmax-nvr.db` with SQLite. To start directly on PostgreSQL or MySQL, set both fields in the configuration file. The DSN is a secret: configure `NVR_ENCRYPTION_KEY` (or set the key in Web **Settings → Security**) so lalmax-nvr encrypts it when saving the configuration.
 
 The database migration page in **Settings** can test and save a PostgreSQL or MySQL destination. The account needs permission to create tables and indexes and to read and write rows in the selected database. Create the database itself before connecting.
 

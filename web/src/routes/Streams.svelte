@@ -17,6 +17,8 @@
     X,
   } from 'lucide-svelte';
 
+  let { initialCreateMode }: { initialCreateMode?: 'push' | 'pull' } = $props();
+
   const PAGE_SIZE = 12;
   const streamIDPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
@@ -216,6 +218,10 @@
   }
 
   onMount(() => {
+    if (initialCreateMode) {
+      openCreateDialog();
+      createMode = initialCreateMode;
+    }
     void loadStreams();
     stopEvents = subscribeNvrEvents({}, () => { void loadStreams({ silent: true }); }, { debounceMs: 500 });
     refreshTimer = window.setInterval(() => {

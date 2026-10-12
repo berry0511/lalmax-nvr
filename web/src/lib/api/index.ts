@@ -242,6 +242,8 @@ export type { NvrEvent, EventsResponse, EventsParams, EventSource, EventSeverity
 export {
   getSettings,
   updateSettings,
+  getEncryptionKeySettings,
+  setEncryptionKey,
   getDatabaseMigrationSettings,
   saveDatabaseMigrationTarget,
   testDatabaseMigrationTarget,
@@ -298,6 +300,7 @@ export type {
   GB28181Config,
   HLSConfig,
   AutoDiscoverSettings,
+  EncryptionKeySettings,
 } from './settings';
 
 // Streams — runtime stream inventory
@@ -332,6 +335,12 @@ export {
   deleteIPTVChannel,
 } from './iptv';
 export type { IPTVImportJob, IPTVImportItem, IPTVSource, IPTVChannel, IPTVPlaybackDetails } from './iptv';
+
+export {
+  getEmbyConfig, saveEmbyConfig, browseEmbyLibrary, listEmbyItems,
+  addEmbyItem, updateEmbyItem, deleteEmbyItem,
+} from './emby';
+export type { EmbyConfig, EmbyMediaItem, EmbyManagedItem } from './emby';
 
 export type {
   StreamInfo,

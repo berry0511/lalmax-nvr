@@ -11,7 +11,7 @@
 | HTTP JPEG | 可返回 JPEG 图片的 `http://` 或 `https://` 地址 | NVR 轮询图片，不提供音频 |
 | 小米 | 通过小米账号和设备 ID 接入 | 详见 [小米摄像头](xiaomi-setup.md) |
 
-创建摄像头 API 也接受 `rtmp-pull`、`http-flv-pull` 和 `udp-ts-pull` 作为拉流来源。IPTV 频道由独立的 [IPTV](iptv.md) 页面管理，无需添加为摄像头。RTMP、SRT、WHIP 推流可直接出现在流管理中，需要设备身份时再登记。
+创建摄像头 API 也接受 `rtmp-pull`、`http-flv-pull` 和 `udp-ts-pull` 作为拉流来源。IPTV 频道属于独立媒体源，在 **媒体源 → IPTV** 中管理，无需添加为摄像头；详见 [IPTV 指南](iptv.md)。RTMP、SRT、WHIP 推流可直接出现在流管理中，需要设备身份时再登记。
 
 品牌和型号并不保证特定 URL 或编码可用。请以摄像头自身提供的媒体地址、ONVIF 返回值和实际探测结果为准。
 

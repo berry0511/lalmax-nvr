@@ -42,6 +42,19 @@
 
 浏览器播放使用同源 HLS 代理。只有启用频道发布或录像计划需要该频道时，NVR 才启动服务端 HLS 拉流；详见 [IPTV](iptv.md)。
 
+## Emby
+
+| 方法 | 路径 | 用途 |
+|------|------|------|
+| GET / PUT | `/api/emby/config` | 查询连接状态 / 保存 Emby 服务地址、用户 ID 与令牌 |
+| GET | `/api/emby/library?q=&limit=&offset=` | 搜索 Emby 电影和剧集 |
+| GET | `/api/emby/items` | 列出已纳管媒体项 |
+| POST | `/api/emby/items` | 将 `{ "emby_item_id": "…" }` 添加为 NVR 频道 |
+| PUT | `/api/emby/items/{id}` | 更新 `publish_enabled` 或 `loop` |
+| DELETE | `/api/emby/items/{id}` | 停止并移除 NVR 频道 |
+
+发布默认单次播放，正常结束后流下线；`loop: true` 会在片尾重新创建 Emby 播放会话并从头循环。Emby 接入要求 `media.mode: embedded`。详见 [Emby 影音库](emby.md)。
+
 ## 录像
 
 | 方法 | 路径 | 用途 |

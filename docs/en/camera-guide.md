@@ -11,7 +11,7 @@ Add cameras on the Web UI **Devices** page. Camera records are stored in the NVR
 | HTTP JPEG | An `http://` or `https://` URL that returns JPEG images | The NVR polls images; audio is unavailable |
 | Xiaomi | Xiaomi account and device ID | See [Xiaomi cameras](xiaomi-setup.md) |
 
-The camera creation API also accepts `rtmp-pull`, `http-flv-pull`, and `udp-ts-pull` as pull sources. Manage IPTV channels in the separate [IPTV](iptv.md) page; they need not be added as cameras. RTMP, SRT, and WHIP pushes can appear directly in Stream management and can be registered as devices when needed.
+The camera creation API also accepts `rtmp-pull`, `http-flv-pull`, and `udp-ts-pull` as pull sources. IPTV channels are a separate media source managed under **Media Sources → IPTV**; they do not need to be added as cameras. See the [IPTV guide](iptv.md). RTMP, SRT, and WHIP pushes can appear directly in Stream management and can be registered as devices when needed.
 
 A brand or model name does not guarantee a particular URL or codec. Use the media URL supplied by the camera, ONVIF responses, and actual probe results.
 

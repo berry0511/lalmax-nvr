@@ -19,7 +19,7 @@ import (
 
 type HlsSession struct {
 	muxer               *gohlslib.Muxer
-	done                bool
+	done                atomic.Bool
 	data                []Frame
 	audioCodecId        int
 	videoCodecId        int
@@ -88,7 +88,7 @@ func NewHlsSessionWithAppName(appName, streamName string, conf config.Fmp4HlsCon
 }
 
 func (session *HlsSession) OnMsg(msg base.RtmpMsg) {
-	if session.done {
+	if session.done.Load() {
 		if msg.Header.MsgTypeId == base.RtmpTypeIdVideo {
 			if msg.IsVideoKeySeqHeader() {
 				session.videoCodecId = int(msg.VideoCodecId())
@@ -340,11 +340,11 @@ func (session *HlsSession) drain() {
 		}
 	}
 
-	session.done = true
+	session.done.Store(true)
 }
 
 func (session *HlsSession) OnStop() {
-	if session.done {
+	if session.done.Load() {
 		session.muxer.Close()
 	}
 }
@@ -356,6 +356,11 @@ func (session *HlsSession) touchAccess() {
 func (session *HlsSession) HandleRequest(ctx *gin.Context) {
 	nazalog.Info("handle hls request, appName:", session.appName, " streamName:", session.streamName, " path:", ctx.Request.URL.Path)
 	session.touchAccess()
+	if !session.done.Load() {
+		ctx.Header("Retry-After", "1")
+		ctx.AbortWithStatus(503)
+		return
+	}
 	session.muxer.Handle(ctx.Writer, ctx.Request)
 }
 

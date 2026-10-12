@@ -661,6 +661,9 @@ func (d *DB) Init(ctx context.Context) error {
 	if err := d.migrateIPTV(ctx); err != nil {
 		return err
 	}
+	if err := d.migrateEmby(ctx); err != nil {
+		return err
+	}
 
 	return nil
 

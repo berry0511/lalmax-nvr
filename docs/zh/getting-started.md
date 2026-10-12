@@ -1,6 +1,6 @@
 # 快速入门
 
-NVR 默认在 `:9090` 提供 Web UI 和 API。媒体引擎默认使用 `media.mode: embedded`。摄像头、IPTV 频道、流和录像计划分别管理；仅添加设备不会自动录像。
+NVR 默认在 `:9090` 提供 Web UI 和 API。媒体引擎默认使用 `media.mode: embedded`。摄像头、媒体源（IPTV 与 Emby）、运行流和录像计划分别管理；仅添加设备不会自动录像。
 
 ## Docker Compose
 
@@ -35,8 +35,9 @@ Windows 构建和启动脚本位于 [`scripts/windows`](../../scripts/windows/)�
 ## 添加来源
 
 1. 在 **设备** 页添加 RTSP 或 ONVIF 摄像头。连接测试只检查地址可达，不验证解码；见[摄像头接入](camera-guide.md)。
-2. 在 **IPTV** 页导入 M3U 并检测频道。频道可直接在浏览器播放；需要其他协议或录像时，再启用发布或创建计划；见 [IPTV](iptv.md)。
-3. 在 **录像计划** 页为要录制的 `stream_id` 创建计划；见[录像计划](recording-plans.md)。
+2. 在 **媒体源 → IPTV** 导入 M3U 并检测频道。频道可直接在浏览器播放；需要其他协议或录像时，再启用发布或创建计划；见 [IPTV 指南](iptv.md)。
+3. 若使用 Emby，在 **媒体源 → Emby 影音库** 配置服务器并添加电影或剧集；可发布为 NVR 流，片尾结束后默认下线，也可设为循环；见 [Emby 指南](emby.md)。
+4. 在 **录像计划** 页为要录制的 `stream_id` 创建计划；见[录像计划](recording-plans.md)。IPTV 与 Emby 的区别和入口见[媒体源总览](media-sources.md)。
 
 运行中的 NVR 在 `/docs/` 提供 API 文档。[WebDAV](webdav-integration.md) 默认只读并使用 Web/API 认证。[FTP](ftp-integration.md) 默认开启，但当前明文密码认证与初始化后的哈希密码存在限制，请先阅读其指南。
 

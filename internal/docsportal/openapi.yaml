@@ -76,6 +76,10 @@ tags:
       Independent IPTV module: import and probe M3U, play in the browser through the same-origin HLS proxy, or publish to NVR with one HLS pull shared by publication and recording plans.
   - name: VoIP
     description: SIP 注册终端、入站通话状态及控制。
+  - name: Emby
+    description: |
+      浏览 Emby 媒体库并将电影或剧集发布为 NVR 流；默认片尾下线，可配置循环。
+      Browse the Emby library and publish movies or episodes as NVR streams; stop at the end or loop.
 paths:
   /api/iptv/imports:
     post:
@@ -172,6 +176,88 @@ paths:
           description: Invalid channel state or unsupported codec
         "503":
           description: IPTV publishing requires embedded media mode
+  /api/emby/config:
+    get:
+      tags: [Emby]
+      summary: 获取 Emby 连接状态 · Get Emby connection status
+      responses:
+        "200": { description: Connection state; access token is never returned }
+    put:
+      tags: [Emby]
+      summary: 配置 Emby 连接 · Configure Emby connection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [base_url, user_id]
+              properties:
+                name: { type: string }
+                base_url: { type: string, format: uri }
+                user_id: { type: string }
+                token: { type: string, description: Leave blank to keep a saved token. }
+      responses:
+        "200": { description: Connection verified and saved }
+        "502": { description: Emby connection or authentication failed }
+  /api/emby/library:
+    get:
+      tags: [Emby]
+      summary: 搜索 Emby 媒体库 · Search Emby library
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, maximum: 100 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0 } }
+      responses:
+        "200": { description: Movies and episodes }
+        "409": { description: Emby is not configured }
+  /api/emby/items:
+    get:
+      tags: [Emby]
+      summary: 列出已纳管媒体项 · List managed items
+      responses:
+        "200": { description: Managed Emby items }
+    post:
+      tags: [Emby]
+      summary: 纳管 Emby 媒体项 · Add an Emby item
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [emby_item_id]
+              properties:
+                emby_item_id: { type: string }
+      responses:
+        "201": { description: NVR stream record created }
+        "404": { description: Movie or episode not found }
+  /api/emby/items/{id}:
+    put:
+      tags: [Emby]
+      summary: 更新 Emby 发布状态 · Update Emby publication
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                publish_enabled: { type: boolean }
+                loop: { type: boolean }
+      responses:
+        "200": { description: Updated item; normal end-of-file takes the stream offline unless loop is enabled }
+        "404": { description: Managed item not found }
+    delete:
+      tags: [Emby]
+      summary: 停止并移除 Emby 媒体项 · Stop and remove an Emby item
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Removed from NVR }
+        "404": { description: Managed item not found }
   /api/health:
     get:
       tags: [Health]

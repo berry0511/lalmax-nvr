@@ -323,6 +323,7 @@
       case 'camera': return t('streams.sourceCamera');
       case 'voip': return t('streams.sourceVoIP');
       case 'iptv': return t('streams.sourceIPTV');
+      case 'emby': return t('streams.sourceEmby');
       case 'gb28181': return t('streams.sourceGB28181');
       case 'rtmp_push': return t('streams.sourceRTMPPush');
       case 'srt_push': return t('streams.sourceSRTPush');

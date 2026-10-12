@@ -67,7 +67,7 @@ import (
 //                                                                                                                                              -> ...
 
 type GroupOption struct {
-	onHookSession func(uniqueKey string, streamName string) ICustomizeHookSessionContext
+	onHookSession func(appName string, uniqueKey string, streamName string) ICustomizeHookSessionContext
 }
 
 type IGroupObserver interface {
@@ -126,8 +126,8 @@ type Group struct {
 	pushEnable    bool
 	url2PushProxy map[string]*pushProxy
 	// hls
-	hlsMuxer            *hls.Muxer
-	hlsLastAccessUnix   int64
+	hlsMuxer          *hls.Muxer
+	hlsLastAccessUnix int64
 	// record
 	recordFlv    *httpflv.FlvFileWriter
 	recordMpegts *mpegts.FileWriter
