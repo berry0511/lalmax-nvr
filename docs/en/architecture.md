@@ -2,7 +2,7 @@
 
 lalmax-nvr is a **business NVR layer** on top of an embedded **lal / lalmax media engine**. Each camera is ingested once: lalmax relays and transcodes for viewers; the NVR owns devices, recording, storage, and the web UI.
 
-See also: [Getting Started](getting-started.md) · [Configuration](configuration.md) · [Deployment](deployment.md) · [ONVIF](onvif-guide.md) · [GB28181](gb28181-guide.md) · [VoIP](../zh/voip.md) *(Chinese)*
+See also: [Getting Started](getting-started.md) · [Configuration](configuration.md) · [Deployment](deployment.md) · [ONVIF](onvif-guide.md) · [GB28181](gb28181-guide.md) · [VoIP](voip.md)
 
 ## Layers
 
@@ -87,7 +87,7 @@ How a stream enters the group differs by protocol. GB28181 is not RTSP pull.
 | RTSP | none (URL) | NVR **pulls** RTSP | [Camera Guide](camera-guide.md) |
 | ONVIF | SOAP: discovery / `GetStreamUri` | resolve RTSP, then **pull** | [ONVIF Guide](onvif-guide.md) |
 | GB28181 | SIP: device REGISTER, platform INVITE | device **pushes** PS/RTP to `media_ip` | [GB28181 Guide](gb28181-guide.md) |
-| SIP VoIP | SIP: terminal registration and inbound call; NVR can also call through a PBX | terminal sends RTP/SRTP, bridged by NVR into a live stream; Web talk uses WebRTC | [VoIP guide (Chinese)](../zh/voip.md) |
+| SIP VoIP | SIP: terminal registration and inbound call; NVR can also call through a PBX | terminal sends RTP/SRTP, bridged by NVR into a live stream; Web talk uses WebRTC | [VoIP guide](voip.md) |
 | RTMP / SRT / WHIP | encoder connects in | encoder **publishes** | `rtmp` / `srt` / `whip` in config |
 | JT1078 | optional JT808: after register/auth, 0x9101 live or 0x9201 playback | terminal **publishes** TCP/UDP frames to `:1078`. With signaling enabled, ungranted channels are rejected | [configuration](configuration.md) |
 | Xiaomi CS2 | cloud auth + P2P | NVR fetches frames, injects lalmax | [Xiaomi](xiaomi-setup.md) |
