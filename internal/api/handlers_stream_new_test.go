@@ -1105,7 +1105,7 @@ func TestListStreams_IncludesRecentHistory(t *testing.T) {
 		SessionID:  "sess-obs-1",
 		StartedAt:  endedAt.Add(-10 * time.Minute),
 	}))
-	require.NoError(t, db.FinishStreamHistory(context.Background(), "sess-obs-1", endedAt, 1000, 2000))
+	require.NoError(t, db.FinishStreamHistory(context.Background(), "obs-room-1", "sess-obs-1", endedAt, "publisher_stopped", "", 1000, 2000))
 
 	engine := &stubMediaEngine{streams: nil}
 
@@ -2003,7 +2003,7 @@ func TestDeleteStream_OfflineHistoryOnly(t *testing.T) {
 		SessionID:  "sess-obs-1",
 		StartedAt:  endedAt.Add(-10 * time.Minute),
 	}))
-	require.NoError(t, db.FinishStreamHistory(context.Background(), "sess-obs-1", endedAt, 1000, 2000))
+	require.NoError(t, db.FinishStreamHistory(context.Background(), "obs-room-1", "sess-obs-1", endedAt, "publisher_stopped", "", 1000, 2000))
 
 	engine := &stubMediaEngine{stream: nil}
 

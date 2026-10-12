@@ -37,6 +37,7 @@
     protocols: ProtocolInfo[];
     protocolsMap: Map<string, ProtocolInfo>;
     xiaomiDeviceList?: XiaomiDevice[];
+    initialValues?: { name?: string; protocol?: string; url?: string } | null;
     onsave: () => void;
     oncancel: () => void;
   }
@@ -46,6 +47,7 @@
     protocols,
     protocolsMap,
     xiaomiDeviceList = [],
+    initialValues = null,
     onsave,
     oncancel,
   }: Props = $props();
@@ -121,6 +123,11 @@
       }
     } else {
       resetFormFields();
+      if (initialValues) {
+        formName = initialValues.name || '';
+        formProtocol = initialValues.protocol || 'rtsp';
+        formUrl = initialValues.url || '';
+      }
       mergeConfig = null;
       mergeConfigLoading = false;
       deviceCaps = null;

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,20 +18,28 @@ var logger = slog.Default().With("component", "stream-history")
 
 // Manager subscribes to lalmax pub start/stop events and records stream history.
 type Manager struct {
-	db           storage.StreamHistoryRepository
-	engine       media.Engine
-	cancelFunc   context.CancelFunc
-	mu           sync.Mutex
-	iptvSessions map[string]string
+	db                storage.StreamHistoryRepository
+	engine            media.Engine
+	cancelFunc        context.CancelFunc
+	mu                sync.Mutex
+	iptvSessions      map[string]string
+	activeSessions    map[string]struct{}
+	hookRegistered    bool
+	historyReconciled bool
 }
 
 func NewManager(db storage.StreamHistoryRepository, engine media.Engine) *Manager {
-	return &Manager{db: db, engine: engine, iptvSessions: make(map[string]string)}
+	return &Manager{
+		db:             db,
+		engine:         engine,
+		iptvSessions:   make(map[string]string),
+		activeSessions: make(map[string]struct{}),
+	}
 }
 
-// RecordHLSPullState persists native HLS pull sessions based on actual video
-// delivery, since these pulls do not emit regular publisher events.
-func (m *Manager) RecordHLSPullState(streamID string, online bool, at time.Time) {
+// RecordHLSPullSessionState tracks the accepted lifetime of a native HLS pull
+// task. Media availability is recorded separately from lalmax hook events.
+func (m *Manager) RecordHLSPullSessionState(streamID string, online bool, at time.Time, offlineReason, offlineDetail string) {
 	if m == nil || m.db == nil || streamID == "" {
 		return
 	}
@@ -53,8 +62,13 @@ func (m *Manager) RecordHLSPullState(streamID string, online bool, at time.Time)
 			SessionID: sessionID,
 			StartedAt: at,
 		}
-		if err := m.db.InsertStreamHistory(context.Background(), history); err != nil {
+		if err := m.insertStartOnce(history); err != nil {
 			logger.Error("failed to insert IPTV pull history", "stream_id", streamID, "error", err)
+			m.mu.Lock()
+			if m.iptvSessions[streamID] == sessionID {
+				delete(m.iptvSessions, streamID)
+			}
+			m.mu.Unlock()
 		}
 		return
 	}
@@ -62,14 +76,41 @@ func (m *Manager) RecordHLSPullState(streamID string, online bool, at time.Time)
 	delete(m.iptvSessions, streamID)
 	m.mu.Unlock()
 	if exists {
-		if err := m.db.FinishStreamHistory(context.Background(), sessionID, at, 0, 0); err != nil {
+		if offlineReason == "" {
+			offlineReason = "unknown"
+		}
+		if err := m.db.FinishStreamHistory(context.Background(), streamID, sessionID, at, offlineReason, offlineDetail, 0, 0); err != nil {
 			logger.Warn("failed to finish IPTV pull history", "stream_id", streamID, "error", err)
 		}
+		m.forgetActive(streamID, sessionID, "HLS_PULL")
+	}
+}
+
+func (m *Manager) RecordMediaState(streamID string, active bool, at time.Time) {
+	if m == nil || m.db == nil || streamID == "" {
+		return
+	}
+	if err := m.db.RecordStreamHistoryMediaState(context.Background(), streamID, at, active); err != nil {
+		logger.Warn("failed to update stream media state", "stream_id", streamID, "active", active, "error", err)
 	}
 }
 
 // Start begins listening for pub events and recording history.
 func (m *Manager) Start(ctx context.Context) error {
+	if err := m.Reconcile(ctx); err != nil {
+		return fmt.Errorf("finalize previous stream history sessions: %w", err)
+	}
+	m.mu.Lock()
+	hookRegistered := m.hookRegistered
+	m.mu.Unlock()
+	if hookRegistered {
+		// The embedded engine already delivers the same lifecycle through its
+		// hook plugin. Subscribing to SSE too would insert every session twice.
+		return nil
+	}
+	if m.engine == nil {
+		return nil
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	m.cancelFunc = cancel
 
@@ -86,6 +127,10 @@ func (m *Manager) Start(ctx context.Context) error {
 				Types: []media.EventType{
 					media.EventPublisherStarted,
 					media.EventPublisherStopped,
+					media.EventRelayPullStarted,
+					media.EventRelayPullStopped,
+					media.EventStreamActive,
+					media.EventStreamStopped,
 				},
 			})
 			if err != nil {
@@ -110,6 +155,24 @@ func (m *Manager) Start(ctx context.Context) error {
 	return nil
 }
 
+// Reconcile closes rows left open by the previous process. Call it before
+// source recovery starts so restored tasks are not mistaken for stale rows.
+func (m *Manager) Reconcile(ctx context.Context) error {
+	if m == nil || m.db == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.historyReconciled {
+		return nil
+	}
+	if err := m.db.FinalizeOpenStreamHistories(ctx, time.Now(), "process_restarted"); err != nil {
+		return err
+	}
+	m.historyReconciled = true
+	return nil
+}
+
 func (m *Manager) Stop() {
 	if m.cancelFunc != nil {
 		m.cancelFunc()
@@ -129,7 +192,15 @@ func (m *Manager) run(ctx context.Context, events <-chan media.Event) {
 			case media.EventPublisherStarted:
 				m.handlePubStart(ev)
 			case media.EventPublisherStopped:
-				m.handlePubStop(ev)
+				m.handlePubStop(ev, "publisher_stopped")
+			case media.EventRelayPullStarted:
+				m.handlePubStart(ev)
+			case media.EventRelayPullStopped:
+				m.handlePubStop(ev, "relay_pull_stopped")
+			case media.EventStreamActive:
+				m.RecordMediaState(ev.StreamID, true, ev.At)
+			case media.EventStreamStopped:
+				m.RecordMediaState(ev.StreamID, false, ev.At)
 			}
 		}
 	}
@@ -151,12 +222,27 @@ type pubStopPayload struct {
 	StreamName    string `json:"stream_name"`
 	ReadBytesSum  uint64 `json:"read_bytes_sum"`
 	WroteBytesSum uint64 `json:"wrote_bytes_sum"`
+	Reason        string `json:"reason"`
+	Error         string `json:"error"`
+	Message       string `json:"message"`
 }
 
 func (m *Manager) handlePubStart(ev media.Event) {
 	var payload pubStartPayload
 	if err := json.Unmarshal(ev.Raw, &payload); err != nil {
 		logger.Warn("failed to parse pub_start payload", "error", err)
+		return
+	}
+	if ev.StreamID == "" {
+		ev.StreamID = payload.StreamName
+	}
+	if ev.Protocol == "" {
+		ev.Protocol = payload.Protocol
+	}
+	if ev.SessionID == "" {
+		ev.SessionID = payload.SessionId
+	}
+	if isInternalHLSHistory(ev.StreamID, ev.Protocol) {
 		return
 	}
 
@@ -169,14 +255,14 @@ func (m *Manager) handlePubStart(ev media.Event) {
 		StartedAt:  ev.At,
 	}
 
-	if err := m.db.InsertStreamHistory(context.Background(), h); err != nil {
+	if err := m.insertStartOnce(h); err != nil {
 		logger.Error("failed to insert stream history", "stream_id", ev.StreamID, "error", err)
 		return
 	}
 	logger.Info("stream history recorded", "stream_id", ev.StreamID, "protocol", ev.Protocol, "remote", payload.RemoteAddr)
 }
 
-func (m *Manager) handlePubStop(ev media.Event) {
+func (m *Manager) handlePubStop(ev media.Event, defaultReason string) {
 	var payload pubStopPayload
 	if err := json.Unmarshal(ev.Raw, &payload); err != nil {
 		// If we can't parse the payload, still try to finish with zero bytes
@@ -187,23 +273,107 @@ func (m *Manager) handlePubStop(ev media.Event) {
 	if endedAt.IsZero() {
 		endedAt = time.Now()
 	}
+	if payload.SessionId != "" {
+		ev.SessionID = payload.SessionId
+	}
+	if payload.StreamName != "" {
+		ev.StreamID = payload.StreamName
+	}
+	if ev.Protocol == "" {
+		ev.Protocol = payload.Protocol
+	}
+	if isInternalHLSHistory(ev.StreamID, ev.Protocol) {
+		return
+	}
+	reason, detail := classifyStopReason(payload, defaultReason)
 
-	if err := m.db.FinishStreamHistory(context.Background(), ev.SessionID, endedAt, payload.ReadBytesSum, payload.WroteBytesSum); err != nil {
+	if err := m.db.FinishStreamHistory(context.Background(), ev.StreamID, ev.SessionID, endedAt, reason, detail, payload.ReadBytesSum, payload.WroteBytesSum); err != nil {
 		logger.Warn("failed to finish stream history", "session_id", ev.SessionID, "error", err)
 	}
+	m.forgetActive(ev.StreamID, ev.SessionID, ev.Protocol)
+}
+
+func isInternalHLSHistory(streamID, protocol string) bool {
+	if !strings.EqualFold(strings.TrimSpace(protocol), "customize") {
+		return false
+	}
+	streamID = strings.ToLower(strings.TrimSpace(streamID))
+	return strings.HasPrefix(streamID, "iptv_") || strings.HasPrefix(streamID, "emby_")
+}
+
+func classifyStopReason(payload pubStopPayload, fallback string) (string, string) {
+	if payload.Reason != "" {
+		return payload.Reason, payload.Message
+	}
+	if payload.Error != "" {
+		return "upstream_error", payload.Error
+	}
+	if payload.Message != "" {
+		return "upstream_error", payload.Message
+	}
+	if fallback == "" {
+		fallback = "unknown"
+	}
+	return fallback, ""
+}
+
+func historySessionKey(streamID, sessionID, protocol string) string {
+	return streamID + "\x00" + sessionID + "\x00" + protocol
+}
+
+func (m *Manager) insertStartOnce(history *storage.StreamHistory) error {
+	key := historySessionKey(history.StreamID, history.SessionID, history.Protocol)
+	if history.SessionID != "" {
+		m.mu.Lock()
+		if _, exists := m.activeSessions[key]; exists {
+			m.mu.Unlock()
+			return nil
+		}
+		m.activeSessions[key] = struct{}{}
+		m.mu.Unlock()
+	}
+	if err := m.db.InsertStreamHistory(context.Background(), history); err != nil {
+		if history.SessionID != "" {
+			m.mu.Lock()
+			delete(m.activeSessions, key)
+			m.mu.Unlock()
+		}
+		return err
+	}
+	return nil
+}
+
+func (m *Manager) forgetActive(streamID, sessionID, protocol string) {
+	if sessionID == "" {
+		return
+	}
+	m.mu.Lock()
+	delete(m.activeSessions, historySessionKey(streamID, sessionID, protocol))
+	m.mu.Unlock()
 }
 
 // RegisterAsHookPlugin registers with lalmax's hook plugin system as a fallback event source.
 // This provides more detailed payload (RemoteAddr, bytes) compared to the SSE-based events.
 func (m *Manager) RegisterAsHookPlugin(server *lalmaxserver.LalMaxServer) (func(), error) {
 	plugin := &hookPlugin{mgr: m}
-	return server.RegisterHookPlugin(plugin, lalmaxserver.HookPluginOptions{
+	cancel, err := server.RegisterHookPlugin(plugin, lalmaxserver.HookPluginOptions{
 		BufferSize: 128,
 		Filter: lalmaxserver.NewHookEventFilter("", "", "", []string{
 			lalmaxserver.HookEventPubStart,
 			lalmaxserver.HookEventPubStop,
+			lalmaxserver.HookEventRelayPullStart,
+			lalmaxserver.HookEventRelayPullStop,
+			lalmaxserver.HookEventStreamActive,
+			lalmaxserver.HookEventGroupStop,
 		}),
 	})
+	if err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	m.hookRegistered = true
+	m.mu.Unlock()
+	return cancel, nil
 }
 
 type hookPlugin struct {
@@ -215,30 +385,52 @@ func (p *hookPlugin) Name() string { return "stream-history" }
 func (p *hookPlugin) OnHookEvent(event lalmaxserver.HookEvent) error {
 	switch event.Event {
 	case lalmaxserver.HookEventPubStart:
-		var payload pubStartPayload
-		if err := json.Unmarshal(event.Payload, &payload); err != nil {
-			return nil
-		}
-		h := &storage.StreamHistory{
-			StreamID:   payload.StreamName,
-			AppName:    payload.AppName,
-			Protocol:   payload.Protocol,
-			RemoteAddr: payload.RemoteAddr,
-			SessionID:  payload.SessionId,
-			StartedAt:  time.Now(),
-		}
-		if err := p.mgr.db.InsertStreamHistory(context.Background(), h); err != nil {
-			logger.Error("hook: failed to insert stream history", "stream_id", payload.StreamName, "error", err)
-		}
-
+		p.mgr.handlePubStart(hookStartEvent(event))
 	case lalmaxserver.HookEventPubStop:
-		var payload pubStopPayload
-		if err := json.Unmarshal(event.Payload, &payload); err != nil {
-			return nil
-		}
-		if err := p.mgr.db.FinishStreamHistory(context.Background(), payload.SessionId, time.Now(), payload.ReadBytesSum, payload.WroteBytesSum); err != nil {
-			logger.Warn("hook: failed to finish stream history", "session_id", payload.SessionId, "error", err)
-		}
+		p.mgr.handlePubStop(hookStopEvent(media.EventPublisherStopped, event), "publisher_stopped")
+	case lalmaxserver.HookEventRelayPullStart:
+		p.mgr.handlePubStart(hookStartEvent(event))
+	case lalmaxserver.HookEventRelayPullStop:
+		p.mgr.handlePubStop(hookStopEvent(media.EventRelayPullStopped, event), "relay_pull_stopped")
+	case lalmaxserver.HookEventStreamActive:
+		p.mgr.RecordMediaState(hookGroupStreamID(event.Payload), true, hookEventAt(event))
+	case lalmaxserver.HookEventGroupStop:
+		p.mgr.RecordMediaState(hookGroupStreamID(event.Payload), false, hookEventAt(event))
 	}
 	return nil
+}
+
+func hookStartEvent(hookEvent lalmaxserver.HookEvent) media.Event {
+	var payload pubStartPayload
+	_ = json.Unmarshal(hookEvent.Payload, &payload)
+	return media.Event{
+		Type: media.EventPublisherStarted, StreamID: payload.StreamName,
+		AppName: payload.AppName, Protocol: payload.Protocol,
+		SessionID: payload.SessionId, At: hookEventAt(hookEvent), Raw: hookEvent.Payload,
+	}
+}
+
+func hookStopEvent(eventType media.EventType, hookEvent lalmaxserver.HookEvent) media.Event {
+	var payload pubStopPayload
+	_ = json.Unmarshal(hookEvent.Payload, &payload)
+	return media.Event{
+		Type: eventType, StreamID: payload.StreamName,
+		AppName: payload.AppName, Protocol: payload.Protocol,
+		SessionID: payload.SessionId, At: hookEventAt(hookEvent), Raw: hookEvent.Payload,
+	}
+}
+
+func hookGroupStreamID(raw []byte) string {
+	var payload struct {
+		StreamName string `json:"stream_name"`
+	}
+	_ = json.Unmarshal(raw, &payload)
+	return payload.StreamName
+}
+
+func hookEventAt(event lalmaxserver.HookEvent) time.Time {
+	if at, err := time.Parse(time.RFC3339Nano, event.Timestamp); err == nil {
+		return at
+	}
+	return time.Now()
 }

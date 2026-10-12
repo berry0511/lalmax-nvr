@@ -19,18 +19,16 @@
     protocol: string;
     cameras: Camera[];
     oncameraadded?: () => void;
+    onselectdevice?: (device: DiscoveredDevice) => void;
   }
 
-  let { protocol, cameras, oncameraadded }: Props = $props();
+  let { protocol, cameras, oncameraadded, onselectdevice }: Props = $props();
 
   // ONVIF state
   let scanning = $state(false);
   let scanDone = $state(false);
   let scanError = $state<{category: string; message: string} | null>(null);
   let discoveredDevices = $state<DiscoveredDevice[]>([]);
-  let addingDeviceId = $state<string | null>(null);
-  let onvifUsername = $state('');
-  let onvifPassword = $state('');
 
   // Manual probe state - show by default since multicast discovery often not supported
   let manualHost = $state('');
@@ -134,23 +132,10 @@
     }
   }
 
-  async function addDiscoveredDevice(device: DiscoveredDevice) {
-    addingDeviceId = device.uuid;
-    try {
-      await createCamera({
-        name: device.name || t('onvif.deviceName'),
-        protocol: 'onvif',
-        url: device.endpoint || (device.xaddrs.length > 0 ? device.xaddrs[0] : ''),
-        enabled: true,
-        username: onvifUsername || undefined,
-        password: onvifPassword || undefined,
-      });
-      showToast(t('cameras.cameraAdded'), 'success');
-      discoveredDevices = discoveredDevices.filter(d => d.uuid !== device.uuid);
-      oncameraadded?.();
-    } catch (e) { console.warn('Failed to add ONVIF device:', e); showToast(t('cameras.failedAdd'), 'error'); } finally {
-      addingDeviceId = null;
-    }
+  function configureDiscoveredDevice(device: DiscoveredDevice) {
+    onselectdevice?.(device);
+    discoveredDevices = discoveredDevices.filter(d => d.uuid !== device.uuid);
+    if (probedDevice?.uuid === device.uuid) probedDevice = null;
   }
 
   // Xiaomi handlers
@@ -345,20 +330,6 @@
         >&times;</button>
       </div>
 
-      <!-- ONVIF Credentials -->
-      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4 items-end">
-        <div>
-          <label class="input-label text-xs" for="onvif-username">{t('onvif.username')}</label>
-          <input type="text" class="input py-1 text-sm" bind:value={onvifUsername} placeholder="admin" />
-        </div>
-        <div>
-          <label class="input-label text-xs" for="onvif-password">{t('onvif.password')}</label>
-          <input type="password" class="input py-1 text-sm" bind:value={onvifPassword} placeholder="******" />
-        </div>
-        <div class="flex items-center">
-          <span class="text-xs th-text-muted">{t('onvif.credentialsHint')}</span>
-        </div>
-      </div>
       {#if scanning}
         <div class="flex items-center gap-3 th-text-secondary py-4">
           <span class="spinner"></span>
@@ -391,14 +362,10 @@
                 {/if}
               </div>
               <button
-                onclick={() => addDiscoveredDevice(device)}
+                onclick={() => configureDiscoveredDevice(device)}
                 class="btn btn-primary btn-sm shrink-0"
-                disabled={addingDeviceId === device.uuid}
               >
-                {#if addingDeviceId === device.uuid}
-                  <span class="spinner mr-1"></span>
-                {/if}
-                {t('onvif.addCamera')}
+                {t('onvif.configureAndAdd')}
               </button>
             </div>
           {/each}
@@ -462,16 +429,11 @@
               </div>
               <button
                 onclick={() => {
-                  addDiscoveredDevice(probedDevice);
-                  probedDevice = null;
+                  configureDiscoveredDevice(probedDevice);
                 }}
                 class="btn btn-primary btn-sm shrink-0"
-                disabled={addingDeviceId === probedDevice.uuid}
               >
-                {#if addingDeviceId === probedDevice.uuid}
-                  <span class="spinner mr-1"></span>
-                {/if}
-                {t('onvif.addCamera')}
+                {t('onvif.configureAndAdd')}
               </button>
             </div>
           {/if}

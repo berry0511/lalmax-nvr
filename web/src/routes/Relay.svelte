@@ -52,11 +52,35 @@
 
   async function loadStreams() {
     try {
-      const result = await listStreams({ managed: true, limit: 100 });
+      // Relay sources can be managed cameras or external inputs such as IPTV.
+      const result = await listStreams({ limit: 100 });
       streams = result.streams;
     } catch (e) {
       console.error('Failed to load streams:', e);
     }
+  }
+
+  function sourceTypeLabel(sourceType: string): string {
+    const labels: Record<string, string> = {
+      camera: 'streams.sourceCamera',
+      voip: 'streams.sourceVoIP',
+      iptv: 'streams.sourceIPTV',
+      emby: 'streams.sourceEmby',
+      gb28181: 'streams.sourceGB28181',
+      rtmp_push: 'streams.sourceRTMPPush',
+      srt_push: 'streams.sourceSRTPush',
+      whip_push: 'streams.sourceWHIPPush',
+      relay_pull: 'streams.sourceRelayPull',
+      push: 'streams.sourcePush',
+    };
+    const labelKey = labels[sourceType];
+    return labelKey ? t(labelKey) : sourceType;
+  }
+
+  function streamOptionLabel(stream: StreamInfo): string {
+    const name = stream.name && stream.name !== stream.stream_id ? `${stream.name} · ` : '';
+    const status = t(stream.active ? 'streams.active' : 'streams.idle');
+    return `${name}${stream.stream_id} · ${sourceTypeLabel(stream.source_type)} · ${status}`;
   }
 
   async function loadTaskStats(taskId: string) {
@@ -276,7 +300,10 @@
     <h1 class="text-2xl font-bold">{t('relay.title')}</h1>
     <button 
       class="btn btn-primary"
-      onclick={() => showCreateDialog = true}
+      onclick={() => {
+        showCreateDialog = true;
+        loadStreams();
+      }}
     >
       {t('relay.create')}
     </button>
@@ -462,7 +489,7 @@
         >
           <option value="">{t('relay.selectStream')}</option>
           {#each streams as stream}
-            <option value={stream.stream_id}>{stream.stream_id}</option>
+            <option value={stream.stream_id}>{streamOptionLabel(stream)}</option>
           {/each}
         </select>
       </div>

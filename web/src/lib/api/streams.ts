@@ -211,6 +211,10 @@ export interface StreamHistorySession {
   started_at: string;
   ended_at?: string;
   duration_sec: number;
+  offline_reason?: string;
+  offline_detail?: string;
+  media_started_at?: string;
+  media_ended_at?: string;
 }
 
 export interface StreamHistoryResponse {

@@ -8,17 +8,21 @@ import (
 
 // StreamHistory represents a stream publish session record.
 type StreamHistory struct {
-	ID           int64      `json:"id"`
-	StreamID     string     `json:"stream_id"`
-	AppName      string     `json:"app_name"`
-	Protocol     string     `json:"protocol"`
-	RemoteAddr   string     `json:"remote_addr"`
-	SessionID    string     `json:"session_id"`
-	StartedAt    time.Time  `json:"started_at"`
-	EndedAt      *time.Time `json:"ended_at,omitempty"`
-	DurationSec  float64    `json:"duration_sec"`
-	BytesRead    uint64     `json:"bytes_read"`
-	BytesWritten uint64     `json:"bytes_written"`
+	ID             int64      `json:"id"`
+	StreamID       string     `json:"stream_id"`
+	AppName        string     `json:"app_name"`
+	Protocol       string     `json:"protocol"`
+	RemoteAddr     string     `json:"remote_addr"`
+	SessionID      string     `json:"session_id"`
+	StartedAt      time.Time  `json:"started_at"`
+	EndedAt        *time.Time `json:"ended_at,omitempty"`
+	DurationSec    float64    `json:"duration_sec"`
+	MediaStartedAt *time.Time `json:"media_started_at,omitempty"`
+	MediaEndedAt   *time.Time `json:"media_ended_at,omitempty"`
+	BytesRead      uint64     `json:"bytes_read"`
+	BytesWritten   uint64     `json:"bytes_written"`
+	OfflineReason  string     `json:"offline_reason,omitempty"`
+	OfflineDetail  string     `json:"offline_detail,omitempty"`
 }
 
 // StreamBan represents a banned stream.
@@ -30,7 +34,7 @@ type StreamBan struct {
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
-// InsertStreamHistory inserts a new stream history record (on pub start).
+// InsertStreamHistory inserts a new publisher or source session record.
 func (d *DB) InsertStreamHistory(ctx context.Context, h *StreamHistory) error {
 	q := `INSERT INTO stream_history (stream_id, app_name, protocol, remote_addr, session_id, started_at)
 	      VALUES (?, ?, ?, ?, ?, ?);`
@@ -42,13 +46,12 @@ func (d *DB) InsertStreamHistory(ctx context.Context, h *StreamHistory) error {
 	return nil
 }
 
-// FinishStreamHistory updates a stream history record on pub stop.
-// Matches by session_id.
-func (d *DB) FinishStreamHistory(ctx context.Context, sessionID string, endedAt time.Time, bytesRead, bytesWritten uint64) error {
+// FinishStreamHistory updates the session end and offline reason.
+func (d *DB) FinishStreamHistory(ctx context.Context, streamID, sessionID string, endedAt time.Time, reason, detail string, bytesRead, bytesWritten uint64) error {
 	var startedAt time.Time
 	err := d.queryRowContext(ctx,
-		`SELECT started_at FROM stream_history WHERE session_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1;`,
-		sessionID).Scan(parseTimeScan(&startedAt))
+		`SELECT started_at FROM stream_history WHERE stream_id = ? AND session_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1;`,
+		streamID, sessionID).Scan(parseTimeScan(&startedAt))
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil
@@ -57,10 +60,78 @@ func (d *DB) FinishStreamHistory(ctx context.Context, sessionID string, endedAt 
 	}
 
 	duration := endedAt.Sub(startedAt).Seconds()
-	q := `UPDATE stream_history SET ended_at = ?, duration_sec = ?, bytes_read = ?, bytes_written = ?
-	      WHERE session_id = ? AND ended_at IS NULL;`
-	_, err = d.execContext(ctx, q, timeToDB(endedAt), duration, bytesRead, bytesWritten, sessionID)
+	q := `UPDATE stream_history SET ended_at = ?, duration_sec = ?, bytes_read = ?, bytes_written = ?, offline_reason = ?, offline_detail = ?,
+	      media_ended_at = CASE WHEN media_started_at IS NOT NULL AND media_ended_at IS NULL THEN ? ELSE media_ended_at END
+	      WHERE stream_id = ? AND session_id = ? AND ended_at IS NULL;`
+	_, err = d.execContext(ctx, q, timeToDB(endedAt), duration, bytesRead, bytesWritten, reason, detail, timeToDB(endedAt), streamID, sessionID)
 	return err
+}
+
+// RecordStreamHistoryMediaState stores the first active-media time and the
+// latest media-end time on the currently open session for a stream.
+func (d *DB) RecordStreamHistoryMediaState(ctx context.Context, streamID string, at time.Time, active bool) error {
+	if streamID == "" {
+		return nil
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	var q string
+	if active {
+		q = `UPDATE stream_history SET media_started_at = COALESCE(media_started_at, ?), media_ended_at = NULL
+			WHERE id = (SELECT id FROM stream_history WHERE stream_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1)`
+		_, err := d.execContext(ctx, q, timeToDB(at), streamID)
+		return err
+	}
+	q = `UPDATE stream_history SET media_ended_at = ?
+		WHERE id = (SELECT id FROM stream_history WHERE stream_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1)
+		AND media_started_at IS NOT NULL`
+	_, err := d.execContext(ctx, q, timeToDB(at), streamID)
+	return err
+}
+
+// FinalizeOpenStreamHistories closes sessions left open by a previous process.
+// It runs before media sources are restored, so these rows cannot be confused
+// with a new session that reuses the same lal session ID.
+func (d *DB) FinalizeOpenStreamHistories(ctx context.Context, endedAt time.Time, reason string) error {
+	if endedAt.IsZero() {
+		endedAt = time.Now()
+	}
+	rows, err := d.queryContext(ctx, `SELECT id, started_at FROM stream_history WHERE ended_at IS NULL`)
+	if err != nil {
+		return err
+	}
+	type openSession struct {
+		id        int64
+		startedAt time.Time
+	}
+	var sessions []openSession
+	for rows.Next() {
+		var session openSession
+		if err := rows.Scan(&session.id, parseTimeScan(&session.startedAt)); err != nil {
+			rows.Close()
+			return err
+		}
+		sessions = append(sessions, session)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, session := range sessions {
+		duration := endedAt.Sub(session.startedAt).Seconds()
+		if duration < 0 {
+			duration = 0
+		}
+		if _, err := d.execContext(ctx, `UPDATE stream_history
+			SET ended_at = ?, duration_sec = ?, offline_reason = ?, offline_detail = '',
+			media_ended_at = CASE WHEN media_started_at IS NOT NULL AND media_ended_at IS NULL THEN ? ELSE media_ended_at END
+			WHERE id = ? AND ended_at IS NULL`, timeToDB(endedAt), duration, reason, timeToDB(endedAt), session.id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ListStreamHistory returns stream history records, optionally filtered by stream_id.
@@ -78,12 +149,12 @@ func (d *DB) ListStreamHistory(ctx context.Context, streamID string, limit, offs
 	if streamID != "" {
 		countQ = `SELECT COUNT(*) FROM stream_history WHERE stream_id = ?;`
 		countArgs = []any{streamID}
-		listQ = `SELECT id, stream_id, app_name, protocol, remote_addr, session_id, started_at, ended_at, duration_sec, bytes_read, bytes_written
+		listQ = `SELECT id, stream_id, app_name, protocol, remote_addr, session_id, started_at, ended_at, duration_sec, bytes_read, bytes_written, offline_reason, offline_detail, media_started_at, media_ended_at
 		         FROM stream_history WHERE stream_id = ? ORDER BY id DESC LIMIT ? OFFSET ?;`
 		listArgs = []any{streamID, limit, offset}
 	} else {
 		countQ = `SELECT COUNT(*) FROM stream_history;`
-		listQ = `SELECT id, stream_id, app_name, protocol, remote_addr, session_id, started_at, ended_at, duration_sec, bytes_read, bytes_written
+		listQ = `SELECT id, stream_id, app_name, protocol, remote_addr, session_id, started_at, ended_at, duration_sec, bytes_read, bytes_written, offline_reason, offline_detail, media_started_at, media_ended_at
 		         FROM stream_history ORDER BY id DESC LIMIT ? OFFSET ?;`
 		listArgs = []any{limit, offset}
 	}
@@ -103,13 +174,22 @@ func (d *DB) ListStreamHistory(ctx context.Context, streamID string, limit, offs
 	for rows.Next() {
 		var h StreamHistory
 		var endedAt sql.NullTime
+		var mediaStartedAt, mediaEndedAt sql.NullTime
 		if err := rows.Scan(&h.ID, &h.StreamID, &h.AppName, &h.Protocol, &h.RemoteAddr, &h.SessionID,
-			parseTimeScan(&h.StartedAt), &endedAt, &h.DurationSec, &h.BytesRead, &h.BytesWritten); err != nil {
+			parseTimeScan(&h.StartedAt), &endedAt, &h.DurationSec, &h.BytesRead, &h.BytesWritten, &h.OfflineReason, &h.OfflineDetail, &mediaStartedAt, &mediaEndedAt); err != nil {
 			return nil, 0, err
 		}
 		if endedAt.Valid {
 			t := endedAt.Time
 			h.EndedAt = &t
+		}
+		if mediaStartedAt.Valid {
+			t := mediaStartedAt.Time
+			h.MediaStartedAt = &t
+		}
+		if mediaEndedAt.Valid {
+			t := mediaEndedAt.Time
+			h.MediaEndedAt = &t
 		}
 		items = append(items, h)
 	}

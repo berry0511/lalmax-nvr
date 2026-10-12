@@ -122,9 +122,11 @@ type Manager struct {
 }
 
 type activeTask struct {
-	task    *Task
-	session *rtmp.PushSession
-	cancel  context.CancelFunc
+	task        *Task
+	session     *rtmp.PushSession
+	pullSession *rtmp.PullSession
+	cancel      context.CancelFunc
+	done        chan struct{}
 }
 
 // NewManager creates a new relay manager.
@@ -146,6 +148,42 @@ func (m *Manager) Stop() {
 	m.stopOnce.Do(func() {
 		close(m.stopCh)
 	})
+	m.mu.RLock()
+	active := make([]*activeTask, 0, len(m.tasks))
+	for _, task := range m.tasks {
+		if task.task.Status == TaskStatusRunning {
+			active = append(active, task)
+		}
+	}
+	m.mu.RUnlock()
+	for _, task := range active {
+		m.stopActiveTask(task)
+	}
+	for _, task := range active {
+		if task.done == nil {
+			continue
+		}
+		select {
+		case <-task.done:
+		case <-time.After(6 * time.Second):
+			logger.Warn("relay task did not stop before shutdown timeout", "task_id", task.task.ID)
+		}
+	}
+}
+
+func (m *Manager) stopActiveTask(task *activeTask) {
+	if task == nil {
+		return
+	}
+	if task.cancel != nil {
+		task.cancel()
+	}
+	if task.pullSession != nil {
+		_ = task.pullSession.Dispose()
+	}
+	if task.session != nil {
+		_ = task.session.Dispose()
+	}
 }
 
 // collectStatsLoop periodically collects stats for running tasks.
@@ -271,6 +309,7 @@ func (m *Manager) CreateTask(ctx context.Context, streamID, targetURL string) (*
 func (m *Manager) GetTask(taskID string) (*Task, error) {
 	m.mu.RLock()
 	if at, ok := m.tasks[taskID]; ok {
+		m.mu.RUnlock()
 		return at.task, nil
 	}
 	m.mu.RUnlock()
@@ -313,8 +352,9 @@ func (m *Manager) DeleteTask(taskID string) error {
 	// Stop task if running
 	m.StopTask(taskID)
 
-	// Clean up memory ring buffer
+	// Clean up in-memory state after the worker has stopped.
 	m.mu.Lock()
+	delete(m.tasks, taskID)
 	delete(m.rings, taskID)
 	m.mu.Unlock()
 
@@ -328,8 +368,17 @@ func (m *Manager) StartTask(ctx context.Context, taskID string) error {
 	defer m.mu.Unlock()
 
 	// Check if already running
-	if at, ok := m.tasks[taskID]; ok && at.task.Status == TaskStatusRunning {
-		return fmt.Errorf("task %s is already running", taskID)
+	if at, ok := m.tasks[taskID]; ok {
+		if at.task.Status == TaskStatusRunning {
+			return fmt.Errorf("task %s is already running", taskID)
+		}
+		if at.done != nil {
+			select {
+			case <-at.done:
+			default:
+				return fmt.Errorf("task %s is still stopping", taskID)
+			}
+		}
 	}
 
 	// Load task
@@ -364,41 +413,78 @@ func (m *Manager) StartTask(ctx context.Context, taskID string) error {
 		option.PushTimeoutMs = 5000
 		option.WriteAvTimeoutMs = 5000
 	})
+	pullSession := rtmp.NewPullSession(func(option *rtmp.PullSessionOption) {
+		option.PullTimeoutMs = 5000
+	})
+	pullSession.WithOnReadRtmpAvMsg(func(msg base.RtmpMsg) {
+		if err := pushSession.WriteMsg(msg); err != nil {
+			logger.Error("relay push write error", "task_id", taskID, "error", err)
+		}
+	})
+
+	// Publish session handles before starting the worker so stop/shutdown can
+	// dispose both sockets even while an RTMP handshake is still in progress.
+	task.Status = TaskStatusRunning
+	now := time.Now()
+	task.StartedAt = &now
+	at := &activeTask{
+		task:        task,
+		session:     pushSession,
+		pullSession: pullSession,
+		cancel:      cancel,
+		done:        make(chan struct{}),
+	}
+	m.tasks[taskID] = at
 
 	// Start relay in goroutine
 	go func() {
+		defer close(at.done)
+		defer func() {
+			_ = pullSession.Dispose()
+			_ = pushSession.Dispose()
+			cancel()
+		}()
+
 		logger.Info("starting relay push", "task_id", taskID, "stream_id", task.StreamID,
 			"source", pullURL.URL, "target", task.TargetURL)
+		if taskCtx.Err() != nil {
+			m.updateTaskStatus(taskID, TaskStatusStopped, "")
+			stoppedAt := time.Now()
+			m.updateTaskStoppedAt(taskID, &stoppedAt)
+			return
+		}
 
 		// First, start push session
 		err := pushSession.Push(task.TargetURL)
 		if err != nil {
+			if taskCtx.Err() != nil {
+				m.updateTaskStatus(taskID, TaskStatusStopped, "")
+				return
+			}
 			logger.Error("relay push failed to connect", "task_id", taskID, "error", err)
 			m.updateTaskStatus(taskID, TaskStatusError, err.Error())
-			cancel()
+			stoppedAt := time.Now()
+			m.updateTaskStoppedAt(taskID, &stoppedAt)
 			return
 		}
-
-		// Create pull session with callback to forward messages
-		pullSession := rtmp.NewPullSession(func(option *rtmp.PullSessionOption) {
-			option.PullTimeoutMs = 5000
-		})
-
-		pullSession.WithOnReadRtmpAvMsg(func(msg base.RtmpMsg) {
-			// Forward message to push session
-			if err := pushSession.WriteMsg(msg); err != nil {
-				logger.Error("relay push write error", "task_id", taskID, "error", err)
-				// Don't cancel here, let the pull session handle the error
-			}
-		})
+		if taskCtx.Err() != nil {
+			m.updateTaskStatus(taskID, TaskStatusStopped, "")
+			stoppedAt := time.Now()
+			m.updateTaskStoppedAt(taskID, &stoppedAt)
+			return
+		}
 
 		// Start pulling
 		err = pullSession.Pull(pullURL.URL)
 		if err != nil {
+			if taskCtx.Err() != nil {
+				m.updateTaskStatus(taskID, TaskStatusStopped, "")
+				return
+			}
 			logger.Error("relay pull failed", "task_id", taskID, "error", err)
-			pushSession.Dispose()
 			m.updateTaskStatus(taskID, TaskStatusError, err.Error())
-			cancel()
+			stoppedAt := time.Now()
+			m.updateTaskStoppedAt(taskID, &stoppedAt)
 			return
 		}
 
@@ -416,7 +502,6 @@ func (m *Manager) StartTask(ctx context.Context, taskID string) error {
 				logger.Info("relay pull ended", "task_id", taskID)
 				m.updateTaskStatus(taskID, TaskStatusStopped, "")
 			}
-			pushSession.Dispose()
 			now := time.Now()
 			m.updateTaskStoppedAt(taskID, &now)
 		case err = <-pushSession.WaitChan():
@@ -427,28 +512,15 @@ func (m *Manager) StartTask(ctx context.Context, taskID string) error {
 				logger.Info("relay push ended", "task_id", taskID)
 				m.updateTaskStatus(taskID, TaskStatusStopped, "")
 			}
-			pullSession.Dispose()
 			now := time.Now()
 			m.updateTaskStoppedAt(taskID, &now)
 		case <-taskCtx.Done():
 			logger.Info("relay push cancelled", "task_id", taskID)
-			pullSession.Dispose()
-			pushSession.Dispose()
 			m.updateTaskStatus(taskID, TaskStatusStopped, "")
 			now := time.Now()
 			m.updateTaskStoppedAt(taskID, &now)
 		}
 	}()
-
-	// Store active task
-	task.Status = TaskStatusRunning
-	now := time.Now()
-	task.StartedAt = &now
-	m.tasks[taskID] = &activeTask{
-		task:    task,
-		session: pushSession,
-		cancel:  cancel,
-	}
 
 	return nil
 }
@@ -456,22 +528,26 @@ func (m *Manager) StartTask(ctx context.Context, taskID string) error {
 // StopTask stops a relay push task.
 func (m *Manager) StopTask(taskID string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	at, ok := m.tasks[taskID]
 	if !ok {
+		m.mu.Unlock()
 		return fmt.Errorf("task %s not found", taskID)
 	}
 
 	if at.task.Status != TaskStatusRunning {
+		m.mu.Unlock()
 		return fmt.Errorf("task %s is not running", taskID)
 	}
+	m.mu.Unlock()
 
-	// Cancel the context
-	at.cancel()
-
-	// Remove from active tasks
-	delete(m.tasks, taskID)
+	m.stopActiveTask(at)
+	if at.done != nil {
+		select {
+		case <-at.done:
+		case <-time.After(6 * time.Second):
+			return fmt.Errorf("task %s did not stop before timeout", taskID)
+		}
+	}
 
 	return nil
 }

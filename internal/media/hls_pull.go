@@ -35,10 +35,10 @@ var (
 
 // HLSPullManager pulls standard HLS playlists and injects frames into lal.
 type HLSPullManager struct {
-	engine     Engine
-	httpClient *http.Client
-	maxTasks   int
-	online     func(streamID string, online bool, at time.Time)
+	engine       Engine
+	httpClient   *http.Client
+	maxTasks     int
+	sessionState func(streamID string, online bool, at time.Time, offlineReason, offlineDetail string)
 
 	mu    sync.Mutex
 	tasks map[string]*hlsPullTask
@@ -82,23 +82,22 @@ func (m *HLSPullManager) SetMaxTasks(n int) {
 	m.mu.Unlock()
 }
 
-// SetOnlineCallback reports when a pull starts delivering video frames and when
-// that frame session ends. A nil callback disables lifecycle notifications.
-func (m *HLSPullManager) SetOnlineCallback(callback func(streamID string, online bool, at time.Time)) {
+// SetSessionCallback reports when a pull task is established and closed.
+func (m *HLSPullManager) SetSessionCallback(callback func(streamID string, online bool, at time.Time, offlineReason, offlineDetail string)) {
 	if m == nil {
 		return
 	}
 	m.mu.Lock()
-	m.online = callback
+	m.sessionState = callback
 	m.mu.Unlock()
 }
 
-func (m *HLSPullManager) notifyOnline(streamID string, online bool) {
+func (m *HLSPullManager) notifySession(streamID string, online bool, at time.Time, offlineReason, offlineDetail string) {
 	m.mu.Lock()
-	callback := m.online
+	callback := m.sessionState
 	m.mu.Unlock()
 	if callback != nil {
-		callback(streamID, online, time.Now())
+		callback(streamID, online, at, offlineReason, offlineDetail)
 	}
 }
 
@@ -141,6 +140,7 @@ func (m *HLSPullManager) StartHLSPull(_ context.Context, req StartHLSPullRequest
 		return nil, ErrHLSPullBusy
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	startedAt := time.Now()
 	task := &hlsPullTask{
 		streamID: streamID,
 		req:      req,
@@ -152,8 +152,9 @@ func (m *HLSPullManager) StartHLSPull(_ context.Context, req StartHLSPullRequest
 	m.tasks[streamID] = task
 	m.mu.Unlock()
 
+	m.notifySession(streamID, true, startedAt, "", "")
 	go m.runTask(ctx, task)
-	return &StreamSession{StreamID: streamID, Protocol: "hls_pull", StartedAt: time.Now()}, nil
+	return &StreamSession{StreamID: streamID, Protocol: "hls_pull", StartedAt: startedAt}, nil
 }
 
 func (m *HLSPullManager) StopHLSPull(_ context.Context, streamID string) error {
@@ -197,12 +198,15 @@ func (m *HLSPullManager) StopAllHLSPulls() {
 func (m *HLSPullManager) runTask(ctx context.Context, task *hlsPullTask) {
 	defer close(task.done)
 	var completedWith error
+	completionReason := "stopped"
+	var completionDetail string
 	defer func() {
 		m.mu.Lock()
 		if cur, ok := m.tasks[task.streamID]; ok && cur == task {
 			delete(m.tasks, task.streamID)
 		}
 		m.mu.Unlock()
+		m.notifySession(task.streamID, false, time.Now(), completionReason, completionDetail)
 		if ctx.Err() == nil && task.req.OnComplete != nil {
 			task.req.OnComplete(completedWith)
 		}
@@ -225,6 +229,8 @@ func (m *HLSPullManager) runTask(ctx context.Context, task *hlsPullTask) {
 			}
 			if err != nil {
 				if task.req.PullRetryNum >= 0 && attempts > task.req.PullRetryNum {
+					completionReason = "upstream_error"
+					completionDetail = err.Error()
 					return
 				}
 				select {
@@ -248,6 +254,7 @@ func (m *HLSPullManager) runTask(ctx context.Context, task *hlsPullTask) {
 				wait = hlsPullRetryInterval
 				continue
 			}
+			completionReason = "source_ended"
 			completedWith = nil
 			return
 		}
@@ -257,11 +264,14 @@ func (m *HLSPullManager) runTask(ctx context.Context, task *hlsPullTask) {
 				wait = hlsPullRetryInterval
 				continue
 			}
+			completionReason = "playback_completed"
 			completedWith = nil
 			return
 		}
 		completedWith = err
 		if task.req.PullRetryNum >= 0 && attempts > task.req.PullRetryNum {
+			completionReason = "upstream_error"
+			completionDetail = err.Error()
 			return
 		}
 		select {
@@ -275,7 +285,6 @@ func (m *HLSPullManager) runTask(ctx context.Context, task *hlsPullTask) {
 				wait = hlsPullMaxRetryWait
 			}
 		}
-		_ = err
 	}
 }
 
@@ -302,26 +311,12 @@ func (m *HLSPullManager) pullOnce(ctx context.Context, task *hlsPullTask) error 
 		OnDecodeError:             func(error) {},
 	}
 	var onlineOnce sync.Once
-	var onlineMu sync.Mutex
-	wasOnline := false
 	videoStarted := make(chan struct{})
 	markOnline := func() {
 		onlineOnce.Do(func() {
 			close(videoStarted)
-			onlineMu.Lock()
-			wasOnline = true
-			onlineMu.Unlock()
-			m.notifyOnline(task.streamID, true)
 		})
 	}
-	defer func() {
-		onlineMu.Lock()
-		wasOnline := wasOnline
-		onlineMu.Unlock()
-		if wasOnline {
-			m.notifyOnline(task.streamID, false)
-		}
-	}()
 	client.OnTracks = func(tracks []*gohlslib.Track) error {
 		return attachHLSTracks(client, session, tracks, markOnline)
 	}

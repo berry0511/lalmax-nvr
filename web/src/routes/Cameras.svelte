@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { listCameras, deleteCamera, permanentlyDeleteCamera, startCamera, stopCamera, updateCamera, xiaomiDevices, listProtocols, DEFAULT_PROTOCOLS, buildProtocolsMap, ApiRequestError, enableCamera, disableCamera, listArchives, restoreArchiveGroup, setArchiveRetention, deleteArchiveGroup, listArchiveRecordings, deleteArchiveRecording, getHealthStatus, getCameraRecordingStats, pauseRecording, resumeRecording, subscribeNvrEvents } from '$lib/api';
-  import type { Camera, XiaomiDevice, ProtocolInfo, ArchiveGroup, Recording, CameraHealth, HealthStatusResponse } from '$lib/api';
+  import type { Camera, XiaomiDevice, ProtocolInfo, ArchiveGroup, Recording, CameraHealth, HealthStatusResponse, DiscoveredDevice } from '$lib/api';
   import { t } from '$lib/i18n';
   import { showToast } from '$lib/toast';
   import { formatFileSize, formatDate, formatDuration } from '$lib/format';
@@ -48,6 +48,7 @@
   // Form state
   let showForm = $state(false);
   let editingCamera = $state<Camera | null>(null);
+  let addCameraInitialValues = $state<{ name: string; protocol: string; url: string } | null>(null);
 
   // Confirmation dialog state
   let confirmAction = $state<{ camera: Camera; action: 'stop' | 'restart' } | null>(null);
@@ -325,6 +326,18 @@
 
   function openAddForm() {
     editingCamera = null;
+    addCameraInitialValues = null;
+    showForm = true;
+  }
+
+  function handleONVIFDeviceSelected(device: DiscoveredDevice) {
+    editingCamera = null;
+    addCameraInitialValues = {
+      name: device.name || t('onvif.deviceName'),
+      protocol: 'onvif',
+      url: device.endpoint || device.xaddrs[0] || '',
+    };
+    activeDiscoveryProtocol = null;
     showForm = true;
   }
 
@@ -336,6 +349,7 @@
   function handleFormSave() {
     showForm = false;
     editingCamera = null;
+    addCameraInitialValues = null;
     showOnboarding = false;
     loadCameras();
   }
@@ -343,6 +357,7 @@
   function handleFormCancel() {
     showForm = false;
     editingCamera = null;
+    addCameraInitialValues = null;
   }
 
   async function executeConfirmAction() {
@@ -541,6 +556,7 @@
             protocol={activeDiscoveryProtocol}
             {cameras}
             oncameraadded={loadCameras}
+            onselectdevice={handleONVIFDeviceSelected}
           />
         {/if}
 
@@ -551,6 +567,7 @@
             {protocols}
             {protocolsMap}
             {xiaomiDeviceList}
+            initialValues={addCameraInitialValues}
             onsave={handleFormSave}
             oncancel={handleFormCancel}
           />

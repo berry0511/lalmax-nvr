@@ -80,7 +80,9 @@ type StreamBanRepository interface {
 // StreamHistoryRepository stores publisher and pull session history.
 type StreamHistoryRepository interface {
 	InsertStreamHistory(ctx context.Context, history *StreamHistory) error
-	FinishStreamHistory(ctx context.Context, sessionID string, endedAt time.Time, bytesRead, bytesWritten uint64) error
+	FinishStreamHistory(ctx context.Context, streamID, sessionID string, endedAt time.Time, reason, detail string, bytesRead, bytesWritten uint64) error
+	FinalizeOpenStreamHistories(ctx context.Context, endedAt time.Time, reason string) error
+	RecordStreamHistoryMediaState(ctx context.Context, streamID string, at time.Time, active bool) error
 }
 
 // EventRepository archives product events.

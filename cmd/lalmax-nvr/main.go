@@ -630,6 +630,10 @@ func NewApp(cfg *config.Config, configPath string) (*App, error) {
 
 	// Create stream history manager
 	a.historyMgr = streamhistory.NewManager(db, engine)
+	if err := a.historyMgr.Reconcile(context.Background()); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("reconcile stream history: %w", err)
+	}
 	if emb, ok := engine.(*media.EmbeddedLalmax); ok {
 		if _, err := a.historyMgr.RegisterAsHookPlugin(emb.Server()); err != nil {
 			slog.Warn("failed to register history hook plugin", "error", err)
@@ -847,7 +851,7 @@ func (a *App) buildRouter() http.Handler {
 		var puller media.HLSPuller
 		if a.mediaEngine != nil {
 			a.hlsPuller = media.NewHLSPullManager(a.mediaEngine)
-			a.hlsPuller.SetOnlineCallback(a.historyMgr.RecordHLSPullState)
+			a.hlsPuller.SetSessionCallback(a.historyMgr.RecordHLSPullSessionState)
 			a.hlsPuller.SetMaxTasks(a.cfg.IPTV.MaxConcurrentPulls)
 			puller = a.hlsPuller
 		}
@@ -861,7 +865,7 @@ func (a *App) buildRouter() http.Handler {
 		if a.mediaEngine != nil {
 			if a.hlsPuller == nil {
 				a.hlsPuller = media.NewHLSPullManager(a.mediaEngine)
-				a.hlsPuller.SetOnlineCallback(a.historyMgr.RecordHLSPullState)
+				a.hlsPuller.SetSessionCallback(a.historyMgr.RecordHLSPullSessionState)
 				a.hlsPuller.SetMaxTasks(a.cfg.IPTV.MaxConcurrentPulls)
 			}
 			puller = a.hlsPuller
@@ -1356,6 +1360,13 @@ func (a *App) Start() error {
 			}
 		}()
 	}
+	// Reconcile history from the previous process before starting the media
+	// engine, which may restore publishers immediately during startup.
+	if a.historyMgr != nil {
+		if err := a.historyMgr.Start(ctx); err != nil {
+			slog.Error("stream history manager", "error", err)
+		}
+	}
 	if a.mediaEngine != nil {
 		go func() {
 			if err := a.mediaEngine.Start(ctx); err != nil {
@@ -1369,13 +1380,6 @@ func (a *App) Start() error {
 				a.recSched.ReconcileNow()
 			}
 		}()
-
-		// Start stream history manager
-		if a.historyMgr != nil {
-			if err := a.historyMgr.Start(ctx); err != nil {
-				slog.Error("stream history manager", "error", err)
-			}
-		}
 
 		// Wire RTMP ingest via lalmax
 		if a.cfg.RTMP.Enabled != nil && *a.cfg.RTMP.Enabled {

@@ -358,6 +358,11 @@ func (e *LalmaxHTTP) SubscribeEvents(ctx context.Context, filter EventFilter) (<
 	if len(filter.Types) > 0 {
 		events := make([]string, 0, len(filter.Types))
 		for _, typ := range filter.Types {
+			if typ == EventStreamStopped {
+				// lalmax versions have used both names for the media-group end.
+				events = append(events, "on_group_exit", "on_group_stop")
+				continue
+			}
 			events = append(events, mediaEventToHook(typ))
 		}
 		q.Set("events", strings.Join(events, ","))
@@ -624,7 +629,7 @@ func hookToMediaEventType(name string) EventType {
 		return EventStreamStarted
 	case "on_stream_active":
 		return EventStreamActive
-	case "on_group_exit":
+	case "on_group_exit", "on_group_stop":
 		return EventStreamStopped
 	case "on_pub_start":
 		return EventPublisherStarted

@@ -20,7 +20,7 @@
     GB28181Device, StreamInfo, Camera, XiaomiDevice, ProtocolInfo, CameraHealth,
     DeviceRecordItem, GB28181Alarm, ArchiveGroup, Recording,
     GB28181Platform, AddPlatformRequest, PlatformEvent, PlatformStatus,
-    DeviceRecordResponse
+    DeviceRecordResponse, DiscoveredDevice
   } from '$lib/api';
   import { t } from '$lib/i18n';
   import { showToast } from '$lib/toast';
@@ -130,6 +130,7 @@
   // Discovery state
   let showDiscovery = $state(false);
   let discoveryPanel = $state<DiscoveryPanel | null>(null);
+  let addCameraInitialValues = $state<{ name: string; protocol: string; url: string } | null>(null);
 
   // Common state
   let loading = $state(false);
@@ -835,6 +836,18 @@
   // Camera management functions
   function openAddForm() {
     editingCamera = null;
+    addCameraInitialValues = null;
+    showForm = true;
+  }
+
+  function handleONVIFDeviceSelected(device: DiscoveredDevice) {
+    editingCamera = null;
+    addCameraInitialValues = {
+      name: device.name || t('onvif.deviceName'),
+      protocol: 'onvif',
+      url: device.endpoint || device.xaddrs[0] || '',
+    };
+    showDiscovery = false;
     showForm = true;
   }
 
@@ -846,12 +859,14 @@
   function handleFormSave() {
     showForm = false;
     editingCamera = null;
+    addCameraInitialValues = null;
     loadDevices();
   }
 
   function handleFormCancel() {
     showForm = false;
     editingCamera = null;
+    addCameraInitialValues = null;
   }
 
   async function executeConfirmAction() {
@@ -1285,6 +1300,7 @@
           protocol={activeTab === 'onvif' ? 'onvif' : 'xiaomi'}
           cameras={onvifCameras}
           oncameraadded={handleCameraAdded}
+          onselectdevice={handleONVIFDeviceSelected}
         />
       </div>
     {/if}
@@ -1312,6 +1328,7 @@
             {protocols}
             {protocolsMap}
             {xiaomiDeviceList}
+            initialValues={addCameraInitialValues}
             onsave={handleFormSave}
             oncancel={handleFormCancel}
           />

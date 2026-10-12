@@ -378,6 +378,21 @@
     return `${seconds}s`;
   }
 
+  function offlineReasonLabel(reason?: string): string {
+    if (!reason) return t('streams.offlineReason.unknown');
+    const labels: Record<string, string> = {
+      unknown: t('streams.offlineReason.unknown'),
+      publisher_stopped: t('streams.offlineReason.publisherStopped'),
+      relay_pull_stopped: t('streams.offlineReason.relayPullStopped'),
+      source_ended: t('streams.offlineReason.sourceEnded'),
+      playback_completed: t('streams.offlineReason.playbackCompleted'),
+      stopped: t('streams.offlineReason.stopped'),
+      process_restarted: t('streams.offlineReason.processRestarted'),
+      upstream_error: t('streams.offlineReason.upstreamError'),
+    };
+    return labels[reason] || reason;
+  }
+
   function formatBitrate(kbits?: number): string {
     if (!kbits || kbits <= 0) return '—';
     if (kbits >= 1000) return `${(kbits / 1000).toFixed(2)} Mbps`;
@@ -952,9 +967,12 @@
                 <table class="history-table">
                   <thead>
                     <tr>
-                      <th>{t('streams.onlineStartedAt')}</th>
-                      <th>{t('streams.onlineEndedAt')}</th>
+                      <th>{t('streams.sessionEstablishedAt')}</th>
+                      <th>{t('streams.sessionClosedAt')}</th>
+                      <th>{t('streams.mediaFirstAvailableAt')}</th>
+                      <th>{t('streams.mediaLastEndedAt')}</th>
                       <th>{t('streams.protocol')}</th>
+                      <th>{t('streams.offlineReason')}</th>
                       <th>{t('streams.duration')}</th>
                     </tr>
                   </thead>
@@ -963,7 +981,19 @@
                       <tr>
                         <td>{formatTime(session.started_at)}</td>
                         <td>{session.ended_at ? formatTime(session.ended_at) : t('streams.onlineNow')}</td>
+                        <td>{session.media_started_at ? formatTime(session.media_started_at) : '—'}</td>
+                        <td>{session.media_ended_at ? formatTime(session.media_ended_at) : '—'}</td>
                         <td>{session.protocol || '—'}</td>
+                        <td>
+                          {#if session.ended_at}
+                            <span title={session.offline_detail || undefined}>{offlineReasonLabel(session.offline_reason)}</span>
+                            {#if session.offline_detail}
+                              <small class="history-reason-detail">{session.offline_detail}</small>
+                            {/if}
+                          {:else}
+                            —
+                          {/if}
+                        </td>
                         <td>{session.ended_at ? formatElapsed(session.duration_sec) : formatDuration(session.started_at)}</td>
                       </tr>
                     {/each}
@@ -1634,6 +1664,15 @@
 
   .history-table tr:last-child td {
     border-bottom: 0;
+  }
+
+  .history-reason-detail {
+    display: block;
+    max-width: 24rem;
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    text-overflow: ellipsis;
   }
 
   .publisher-info {

@@ -665,6 +665,56 @@ func (d *DB) Init(ctx context.Context) error {
 		return err
 	}
 
+	// Migration v30 → v31: persist why a stream-history session went offline.
+	var offlineReasonColExists int
+	_ = d.queryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('stream_history') WHERE name='offline_reason'`).Scan(&offlineReasonColExists)
+	if offlineReasonColExists == 0 {
+		if _, err := d.execContext(ctx, `ALTER TABLE stream_history ADD COLUMN offline_reason TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	var offlineDetailColExists int
+	_ = d.queryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('stream_history') WHERE name='offline_detail'`).Scan(&offlineDetailColExists)
+	if offlineDetailColExists == 0 {
+		if _, err := d.execContext(ctx, `ALTER TABLE stream_history ADD COLUMN offline_detail TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	// Existing ended sessions predate reason tracking; label them honestly.
+	if _, err := d.execContext(ctx, `UPDATE stream_history SET offline_reason='unknown' WHERE ended_at IS NOT NULL AND offline_reason=''`); err != nil {
+		return err
+	}
+	// The former hook + SSE double subscription left duplicate open rows. Keep
+	// the earliest active row per stream/session without deleting completed history.
+	if _, err := d.execContext(ctx, `DELETE FROM stream_history
+		WHERE ended_at IS NULL AND session_id <> '' AND id NOT IN (
+			SELECT MIN(id) FROM stream_history WHERE ended_at IS NULL AND session_id <> '' GROUP BY stream_id, session_id, protocol
+		)`); err != nil {
+		return err
+	}
+	_, _ = d.execContext(ctx, "UPDATE schema_meta SET value='31' WHERE key='schema_version'")
+
+	// Migration v31 → v32: internal customize publishers for IPTV and Emby are
+	// already represented by their user-visible HLS_PULL sessions. Remove the
+	// duplicate implementation-detail rows from the API-backed history table.
+	if _, err := d.execContext(ctx, `DELETE FROM stream_history
+		WHERE lower(protocol) = 'customize'
+		AND (lower(substr(stream_id, 1, 5)) = 'iptv_' OR lower(substr(stream_id, 1, 5)) = 'emby_')`); err != nil {
+		return err
+	}
+	_, _ = d.execContext(ctx, "UPDATE schema_meta SET value='32' WHERE key='schema_version'")
+
+	// Migration v32 → v33: distinguish source-session time from media activity.
+	for _, column := range []string{"media_started_at", "media_ended_at"} {
+		var exists int
+		_ = d.queryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('stream_history') WHERE name=?`, column).Scan(&exists)
+		if exists == 0 {
+			if _, err := d.execContext(ctx, `ALTER TABLE stream_history ADD COLUMN `+column+` DATETIME`); err != nil {
+				return err
+			}
+		}
+	}
+	_, _ = d.execContext(ctx, "UPDATE schema_meta SET value='33' WHERE key='schema_version'")
 	return nil
 
 }
