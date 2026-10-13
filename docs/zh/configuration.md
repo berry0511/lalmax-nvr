@@ -531,7 +531,7 @@ HLS 播放与录像拉流相互独立：关闭 `hls.enabled` 或启用按需切�
 - **类型**: string
 - **默认**: `"info"`
 - **选项**: `"debug"`, `"info"`, `"warn"`, `"error"`
-- **描述**: NVR 主进程日志级别；embedded 模式下也会同步到 lal/lalmax 内部日志（`lalmax.conf.json` 的 `lal.log.level`），且默认不向 stdout 输出，避免刷屏 `logs/lalmax-nvr.log`
+- **描述**: NVR 主进程日志级别；embedded 模式下也会同步到 lal/lalmax 内部日志（`lalmax.conf.json` 的 `lal.log.level`）。lal/lalmax 的日志会转发到 NVR 服务日志，并标记为 `lal/lalmax`；lal 原始 stdout 仍关闭，避免在 `logs/lalmax-nvr.log` 中重复输出。
 - **示例**: `"debug"`, `"info"`, `"error"`
 
 ### `observability.log_format`
@@ -799,11 +799,15 @@ metrics_auth:
 
 ```yaml
 ai:
-  inference_timeout_ms: 5000     # 推理超时
-  frame_skip_rate: 5             # 每 N 帧检测一次
-  confidence_threshold: 0.5      # 置信度阈值
-  model_path: ""                 # 模型路径（默认使用内置模型）
+  enabled: false                 # 启用 AI 检测
+  backend: "browser"             # browser（浏览器端 ONNX）/ webhook（第三方检测器）/ disabled
+  model_url: "/models/yolo11n.onnx" # 浏览器端模型 URL；模型文件放到数据目录/models/
+  inference_timeout_ms: 30000    # 推理超时（默认 30000ms）
+  frame_skip_rate: 3             # 每 N 帧检测一次（默认 3）
+  confidence_threshold: 0.3      # 置信度阈值（默认 0.3）
 ```
+
+浏览器端推理在 WebCodecs 播放器中运行，优先使用 WebGPU 并回退到 WASM。第三方模式保留 `POST /api/ai/webhook` 接口，适用于独立检测服务订阅摄像头 RTSP 流。
 
 ## 摄像头协议示例
 

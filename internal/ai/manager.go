@@ -17,11 +17,12 @@ import (
 
 var logger = slog.Default().With("component", "ai-manager")
 
-// Manager coordinates AI detection via webhook and optional multimodal analysis.
+// Manager coordinates browser/third-party detection submissions via webhook and optional multimodal analysis.
 // Architecture:
-//   - External AI service (ai-detector) subscribes to NVR's RTSP streams
-//   - ai-detector runs YOLO detection and pushes results via webhook
-//   - NVR receives webhook, stores results, broadcasts via SSE
+//   - The browser can run YOLO on decoded WebCodecs frames, or an external
+//     ai-detector can subscribe to RTSP streams and run inference itself.
+//   - Both submit detection results through the webhook receiver.
+//   - NVR stores results and broadcasts them via SSE
 //   - Optionally triggers multimodal LLM analysis on detection events
 type Manager struct {
 	cfg               config.AIConfig
@@ -128,11 +129,15 @@ func (m *Manager) Status() Status {
 		return Status{Backend: "disabled", Available: false, Reason: "AI 已禁用"}
 	}
 
-	status := Status{Backend: "webhook", Available: true}
+	backend := m.cfg.Backend
+	if backend == "" || backend == "disabled" {
+		backend = "webhook" // preserve behavior for older configs that only set enabled=true
+	}
+	status := Status{Backend: backend, Available: true}
 
 	// Check if multimodal is also available
 	if m.multimodalManager != nil && m.multimodalManager.IsAvailable() {
-		status.Reason = "Webhook + 多模态分析已启用"
+		status.Reason = backend + " + 多模态分析已启用"
 	}
 
 	return status

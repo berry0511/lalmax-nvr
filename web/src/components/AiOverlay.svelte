@@ -90,7 +90,7 @@
 <!-- svelte-ignore binding_property_non_reactive -->
 <canvas
   bind:this={canvasEl}
-  class="absolute inset-0 w-full h-full pointer-events-none"
+  class="absolute inset-0 w-full h-full object-contain pointer-events-none"
   style="z-index: 5;"
   aria-hidden="true"
 ></canvas>

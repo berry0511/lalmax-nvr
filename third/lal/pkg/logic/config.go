@@ -242,8 +242,14 @@ func LoadConfAndInitLog(rawContent []byte) *Config {
 		cacheLog = append(cacheLog, fmt.Sprintf("log.assert_behavior=%s", config.LogConfig.AssertBehavior.ReadableString()))
 	}
 
+	// The hook is installed by embedders because functions cannot be provided
+	// through the JSON config. Preserve it while applying the file-backed options.
+	logHook := Log.GetOption().HookBackendOutFn
 	if err := Log.Init(func(option *nazalog.Option) {
 		*option = config.LogConfig
+		if option.HookBackendOutFn == nil {
+			option.HookBackendOutFn = logHook
+		}
 	}); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "initial log failed. err=%+v\n", err)
 		base.OsExitAndWaitPressIfWindows(1)

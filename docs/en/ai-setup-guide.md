@@ -4,16 +4,28 @@ This guide covers setting up AI-powered analysis for lalmax-nvr, including local
 
 ## Overview
 
-lalmax-nvr supports two AI analysis modes:
+lalmax-nvr supports two object-detection integrations, plus optional multimodal LLM analysis:
 
 | Mode | Use Case | Latency | Cost |
 |------|----------|---------|------|
-| **Local YOLO** | Real-time object detection (person, car, etc.) | <100ms | Free |
+| **Browser ONNX** | Run object detection on WebCodecs live frames in the current browser | Device-dependent | Free |
+| **Third-party Webhook** | An external detector analyzes camera streams and posts detections back | Service-dependent | Service-dependent |
 | **Multimodal LLM** | Scene understanding, anomaly analysis, natural language descriptions | 2-10s | API costs |
 
-**Recommended approach**: Use both together - YOLO for real-time detection, LLM for detailed analysis.
+Browser ONNX and third-party Webhook are selectable object-detection approaches. Multimodal LLM analysis can be configured independently.
 
-## Option 1: Docker Setup (Recommended)
+## Browser-side inference
+
+Browser mode uses ONNX Runtime Web in a Web Worker to analyze frames received by the WebCodecs player. It does not require a separate YOLO service; the NVR serves the ONNX model from its data directory. The browser prefers WebGPU and falls back to WASM when WebGPU is unavailable.
+
+1. Put a compatible YOLOv11-nano COCO ONNX model at `models/yolo11n.onnx` under the NVR data directory. The directory is configured by `storage.root_dir`; in Docker, use the data directory mounted into the NVR container.
+2. Open **Settings → AI Detection**, enable AI, choose **Browser inference**, and save with the model URL `/models/yolo11n.onnx`.
+3. Select **WebCodecs** for live playback. On first use, the browser downloads the model. It must be able to reach `/models/yolo11n.onnx` and the `/ort/` runtime assets on the NVR.
+4. Review results on the AI Detection or Events page. Positive detections are sent to the NVR and archived as AI events. Repeated events for the same camera and class set are suppressed for 30 seconds.
+
+Confidence threshold, frame skip, and inference timeout can be adjusted in Settings. Defaults are `0.3`, every `3` frames, and `30000` milliseconds. To use an external detector instead, select **Webhook** mode and post detections to `POST /api/ai/webhook`.
+
+## Third-party detector: Docker setup
 
 Docker provides a consistent environment across all platforms.
 

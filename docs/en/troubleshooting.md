@@ -43,3 +43,5 @@ curl -u admin:password 'http://localhost:9090/api/service-logs?level=error&limit
 ```
 
 `/api/service-logs` requires operate permission. You can also inspect the terminal or container logs where the NVR runs. See [`internal/api/handler.go`](../../internal/api/handler.go) for routes.
+
+In embedded mode, lal/lalmax internal messages are forwarded into the NVR service log and tagged with the `lal/lalmax` component. Select that component in the Web Logs page to inspect media-engine messages.

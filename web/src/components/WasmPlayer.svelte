@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, getContext } from 'svelte';
+  import { onDestroy, onMount, getContext } from 'svelte';
   import { t } from '$lib/i18n';
   import { Maximize, Minimize, AlertCircle, RefreshCw, Volume2, VolumeX } from 'lucide-svelte';
   import { getAuthHeader } from '$lib/api';
@@ -12,6 +12,8 @@
 import { WebGPURenderer } from '$lib/webgpu-renderer';
   import AiOverlay from './AiOverlay.svelte';
   import type { Detection } from '$lib/ai-detection/inference';
+import { registerBrowserDetector, detectBrowserFrame, disposeBrowserDetector } from '$lib/ai-detection/inference-client';
+import { getAiBackendConfig } from '$lib/api/ai';
 
   let {
     cameraId,
@@ -69,10 +71,66 @@ let webgpuRenderer: WebGPURenderer | null = null;
   let aiOverlayVisible = $derived(detections.length > 0);
   let canvasWidth = $state(0);
   let canvasHeight = $state(0);
+  let browserAI = $state(false);
+  let aiFrameBusy = false;
+  let aiInitError = $state('');
+  let lastAIEventAt = 0;
   // Decode error tracking for mid-stream fallback
   let decodeErrorCount = 0;
   const MAX_DECODE_ERRORS = 10;
   let decodeErrorTimer: ReturnType<typeof setTimeout> | null = null;
+
+  onMount(() => {
+    let cancelled = false;
+    void getAiBackendConfig().then(async (config) => {
+      if (cancelled || !config.enabled || config.backend !== 'browser') return;
+      try {
+        await registerBrowserDetector(cameraId, config.model_url || '/models/yolo11n.onnx', config.inference_timeout_ms, {
+          confidenceThreshold: config.confidence_threshold,
+          frameSkip: Math.max(1, config.frame_skip_rate),
+        });
+        if (!cancelled) browserAI = true;
+      } catch (error) {
+        if (!cancelled) aiInitError = error instanceof Error ? error.message : String(error);
+      }
+    }).catch((error) => {
+      if (!cancelled) aiInitError = error instanceof Error ? error.message : String(error);
+    });
+    return () => { cancelled = true; };
+  });
+
+  function analyzeFrame(frame: VideoFrame) {
+    if (!browserAI || aiFrameBusy) return;
+    aiFrameBusy = true;
+    const width = frame.displayWidth;
+    const height = frame.displayHeight;
+    try {
+      void detectBrowserFrame(cameraId, frame.clone()).then((results) => {
+        detections = results;
+        if (results.length > 0 && Date.now() - lastAIEventAt >= 30000) {
+          lastAIEventAt = Date.now();
+          const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+          const auth = getAuthHeader();
+          if (auth) headers.Authorization = auth;
+          const body = {
+            camera_id: cameraId,
+            timestamp: Date.now(),
+            detections: results.map((d) => ({
+              label: d.label,
+              confidence: d.confidence,
+              box: [d.bbox[0] / width, d.bbox[1] / height, (d.bbox[2] - d.bbox[0]) / width, (d.bbox[3] - d.bbox[1]) / height],
+            })),
+          };
+          void fetch('/api/ai/webhook', { method: 'POST', headers, body: JSON.stringify(body) }).catch(() => {});
+        }
+      }).catch((error) => {
+        if (import.meta.env.DEV) console.warn('[WasmPlayer] browser AI inference failed:', error);
+      }).finally(() => { aiFrameBusy = false; });
+    } catch {
+      frame.close();
+      aiFrameBusy = false;
+    }
+  }
 
   // ─── Freeze frame helpers ──────────────────────────────────────────────
 
@@ -286,6 +344,7 @@ function handleWebGpuLost() {
 
         if (msg.type === 'frame' && msg.data instanceof VideoFrame) {
           const frame = msg.data;
+          analyzeFrame(frame);
           // Track canvas dimensions for AI overlay
           if (canvasEl) {
             if (canvasWidth !== frame.displayWidth || canvasHeight !== frame.displayHeight) {
@@ -563,6 +622,7 @@ function handleWebGpuLost() {
 
 onDestroy(() => {
     destroyed = true;
+    if (browserAI || aiInitError) disposeBrowserDetector(cameraId);
     if (freezeClearTimer) { clearTimeout(freezeClearTimer); freezeClearTimer = null; }
     if (decodeErrorTimer) { clearTimeout(decodeErrorTimer); decodeErrorTimer = null; }
     if (frozenFrameUrl) { URL.revokeObjectURL(frozenFrameUrl); frozenFrameUrl = null; }
@@ -642,6 +702,13 @@ onDestroy(() => {
 
   <!-- AI detection overlay -->
   <AiOverlay {detections} visible={aiOverlayVisible} width={canvasWidth} height={canvasHeight} />
+  {#if aiInitError}
+    <div class="absolute top-10 left-2 right-2 z-20 rounded bg-black/75 px-2 py-1 text-xs text-amber-200" role="status">
+      浏览器 AI 未启动：{aiInitError}
+    </div>
+  {:else if browserAI}
+    <div class="absolute top-8 left-2 z-20 rounded bg-green-700/80 px-2 py-1 text-[10px] text-white">Browser AI</div>
+  {/if}
   <!-- Overlay layer with CSS transition -->
   <div
     class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 {overlayClass}"

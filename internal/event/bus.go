@@ -10,6 +10,8 @@ import (
 const (
 	TopicSegmentCompleted    = "segment.completed"
 	TopicRecorderReconnected = "recorder.reconnected"
+	TopicAIDetection         = "ai.detection"
+	TopicMQTTTrigger         = "mqtt.trigger"
 )
 
 var (

@@ -112,7 +112,7 @@ beforeEach(() => {
 
   // Default: WebGPU available
   vi.stubGlobal('navigator', {
-    gpu: { requestAdapter: vi.fn() },
+    gpu: { requestAdapter: vi.fn().mockResolvedValue({}) },
   });
 
   setupOrtMock();
@@ -142,7 +142,7 @@ afterEach(() => {
 describe('AiRuntime', () => {
   describe('constants', () => {
     it('has correct default model URL', () => {
-      expect(DEFAULT_MODEL_URL).toBe('/models/yolov11n.onnx');
+      expect(DEFAULT_MODEL_URL).toBe('/models/yolo11n.onnx');
     });
 
     it('has correct cache name', () => {
@@ -193,6 +193,23 @@ describe('AiRuntime', () => {
         expect.objectContaining({
           executionProviders: ['wasm'],
         }),
+      );
+    });
+
+    it('retries with WASM when WebGPU session creation fails', async () => {
+      mockOrtModule.InferenceSession.create
+        .mockRejectedValueOnce(new Error('WebGPU provider unavailable'))
+        .mockResolvedValueOnce(mockSession);
+
+      const rt = new AiRuntime();
+      await rt.init('/models/test.onnx');
+
+      expect(mockOrtModule.InferenceSession.create).toHaveBeenCalledTimes(2);
+      expect(mockOrtModule.InferenceSession.create.mock.calls[0][1]).toEqual(
+        expect.objectContaining({ executionProviders: ['webgpu'] }),
+      );
+      expect(mockOrtModule.InferenceSession.create.mock.calls[1][1]).toEqual(
+        expect.objectContaining({ executionProviders: ['wasm'] }),
       );
     });
 

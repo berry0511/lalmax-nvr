@@ -14,7 +14,7 @@
 export const MODEL_CACHE_NAME = 'lalmax-nvr-ai-models';
 
 /** Default YOLOv11-nano model path (served from Go HTTP server). */
-export const DEFAULT_MODEL_URL = '/models/yolov11n.onnx';
+export const DEFAULT_MODEL_URL = '/models/yolo11n.onnx';
 
 /** Session options type matching onnxruntime-web. */
 interface SessionOptions {
@@ -49,9 +49,11 @@ export interface AiRunResult {
  * Check if WebGPU is available.
  * Extracted as a function so tests can override it.
  */
-function detectWebGPUBackend(): boolean {
+async function detectWebGPUBackend(): Promise<boolean> {
   try {
-    return typeof navigator !== 'undefined' && (navigator as any).gpu !== undefined;
+    const gpu = typeof navigator !== 'undefined' ? (navigator as any).gpu : undefined;
+    if (!gpu || typeof gpu.requestAdapter !== 'function') return false;
+    return !!(await gpu.requestAdapter());
   } catch {
     return false;
   }
@@ -169,8 +171,30 @@ export class AiRuntime {
     const modelBuffer = await this._loadModel(modelUrl, options?.onProgress);
     this._abortController = null;
 
-    // 2. Dynamic import onnxruntime-web (lazy, NOT in initial bundle)
-    this._ort = await import('onnxruntime-web');
+    // 2. Load ONNX Runtime in the inference worker. Vite's bundled ESM build
+    // rewrites ORT's dynamically loaded WASM worker to a hashed asset and does
+    // not emit its sibling .mjs file. Load the upstream all-backends bundle
+    // from the stable /ort/ directory emitted by ortWasmAssetsPlugin instead.
+    const workerRuntime = typeof document === 'undefined' && typeof self !== 'undefined' && !!self.location;
+    const webgpuAvailable = workerRuntime ? await detectWebGPUBackend() : false;
+    if (workerRuntime) {
+      const bundle = webgpuAvailable ? 'ort.all.bundle.min.mjs' : 'ort.wasm.bundle.min.mjs';
+      const bundleURL = new URL(`/ort/${bundle}`, self.location.href).href;
+      const ortModule = await import(/* @vite-ignore */ bundleURL);
+      this._ort = ortModule.default ?? ortModule;
+      if (this._ort.env?.wasm) {
+        this._ort.env.wasm.wasmPaths = webgpuAvailable
+          ? {
+              mjs: new URL('/ort/ort-wasm-simd-threaded.jsep.mjs', self.location.href).href,
+              wasm: new URL('/ort/ort-wasm-simd-threaded.jsep.wasm', self.location.href).href,
+            }
+          : { wasm: new URL('/ort/ort-wasm-simd-threaded.wasm', self.location.href).href };
+        this._ort.env.wasm.numThreads = 1;
+      }
+    } else {
+      // Keep the package import path for non-worker consumers and unit tests.
+      this._ort = await import('onnxruntime-web');
+    }
 
     // 3. Dispose previous session if re-initializing
     if (this._session) {
@@ -182,16 +206,42 @@ export class AiRuntime {
       this._session = null;
     }
 
-    // 4. Determine execution provider
-    const executionProviders = detectWebGPUBackend() ? ['webgpu'] : ['wasm'];
-
-    // 5. Create session
-    const sessionOptions: SessionOptions = {
-      executionProviders,
-      graphOptimizationLevel: 'all',
-    };
-
-    this._session = await this._ort.InferenceSession.create(modelBuffer, sessionOptions);
+    // 4. Prefer WebGPU, then retry with WASM if the GPU backend cannot create
+    // a session (GPU API presence does not guarantee that this model/device is
+    // supported).
+    const providers = workerRuntime ? (webgpuAvailable ? ['webgpu'] : ['wasm']) : (await detectWebGPUBackend()) ? ['webgpu', 'wasm'] : ['wasm'];
+    let lastError: unknown;
+    for (const provider of providers) {
+      try {
+        this._session = await this._ort.InferenceSession.create(modelBuffer, {
+          executionProviders: [provider],
+          graphOptimizationLevel: 'all',
+        } satisfies SessionOptions);
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (!this._session && workerRuntime && webgpuAvailable) {
+      // Keep the fallback independent: a failed WebGPU initialization can leave
+      // ORT's shared WASM initializer aborted inside the all-backends bundle.
+      const wasmURL = new URL('/ort/ort.wasm.bundle.min.mjs', self.location.href).href;
+      const wasmModule = await import(/* @vite-ignore */ wasmURL);
+      this._ort = wasmModule.default ?? wasmModule;
+      if (this._ort.env?.wasm) {
+        this._ort.env.wasm.wasmPaths = { wasm: new URL('/ort/ort-wasm-simd-threaded.wasm', self.location.href).href };
+        this._ort.env.wasm.numThreads = 1;
+      }
+      try {
+        this._session = await this._ort.InferenceSession.create(modelBuffer, {
+          executionProviders: ['wasm'],
+          graphOptimizationLevel: 'all',
+        } satisfies SessionOptions);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (!this._session) throw lastError instanceof Error ? lastError : new Error(String(lastError));
     this._initialized = true;
   }
 

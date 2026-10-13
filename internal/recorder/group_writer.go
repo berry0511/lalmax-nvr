@@ -195,6 +195,26 @@ func (w *GroupWriter) State(cameraID string) (attached, writing bool) {
 	return true, s.writing.Load()
 }
 
+// StreamInfo exposes the live codec parameters and frame hub for a subscribed group.
+// It is used by the WebSocket endpoint when this camera is not owned by CameraManager's recorder map.
+func (w *GroupWriter) StreamInfo(cameraID string) (model.Format, []byte, []byte, []byte, *model.StreamHub, bool) {
+	if w == nil {
+		return "", nil, nil, nil, nil, false
+	}
+	w.mu.Lock()
+	s := w.sessions[cameraID]
+	w.mu.Unlock()
+	if s == nil || s.hub == nil {
+		return "", nil, nil, nil, nil, false
+	}
+	s.streamMu.RLock()
+	defer s.streamMu.RUnlock()
+	if s.liveCodec == "" || len(s.liveSPS) == 0 || len(s.livePPS) == 0 {
+		return "", nil, nil, nil, s.hub, false
+	}
+	return model.Format(s.liveCodec), append([]byte(nil), s.liveSPS...), append([]byte(nil), s.livePPS...), append([]byte(nil), s.liveVPS...), s.hub, true
+}
+
 // Attach subscribes cameraID when its lalmax group already exists.
 func (w *GroupWriter) Attach(cameraID string) {
 	if w == nil || cameraID == "" || media.IsSubStreamID(cameraID) {
@@ -237,10 +257,12 @@ func (w *GroupWriter) AttachCamera(cam config.CameraConfig) {
 		bus:       w.bus,
 		group:     group,
 		owner:     w,
+		hub:       model.NewStreamHub(),
 		queue:     make(chan base.RtmpMsg, groupQueueSize),
 		stop:      make(chan struct{}),
 		done:      make(chan struct{}),
 	}
+	s.hub.SetCameraID(cam.ID)
 	w.mu.Lock()
 	if _, exists := w.sessions[cam.ID]; exists {
 		w.mu.Unlock()

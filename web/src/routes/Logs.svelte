@@ -56,6 +56,11 @@
     return `${entry.time} ${entry.level} ${entry.msg}${attrs ? ' ' + attrs : ''}`;
   }
 
+  function componentName(entry: ServiceLogEntry): string {
+    const component = entry.attrs?.component;
+    return typeof component === 'string' && component ? component : 'NVR';
+  }
+
   function appendLog(entry: ServiceLogEntry) {
     if (paused) return;
     if (logs.length && logs[logs.length - 1].seq >= entry.seq) return;
@@ -251,6 +256,7 @@
               <div class={levelClass(entry.level)}>
                 <span class="th-text-muted">{formatDate(entry.time)}</span>
                 <span class="log-level">{entry.level}</span>
+                <span class="log-component">{componentName(entry)}</span>
                 <span>{entry.msg}</span>
                 {#if entry.attrs}
                   <span class="th-text-muted"> {formatAttrs(entry.attrs)}</span>
@@ -272,6 +278,14 @@
     display: inline-block;
     min-width: 4.5em;
     font-weight: 600;
+  }
+  .log-component {
+    display: inline-block;
+    margin-right: 0.5em;
+    padding: 0 0.35em;
+    border-radius: 0.25rem;
+    color: var(--color-text-secondary, #9ca3af);
+    background: color-mix(in srgb, var(--color-bg-primary, #111) 78%, transparent);
   }
   .log-error { color: #f87171; }
   .log-warn { color: #fbbf24; }

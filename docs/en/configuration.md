@@ -531,7 +531,7 @@ HLS playback is independent of recording pulls: disabling `hls.enabled` or using
 - **Type**: string
 - **Default**: `"info"`
 - **Options**: `"debug"`, `"info"`, `"warn"`, `"error"`
-- **Description**: NVR process log level; in embedded mode this also sets lal/lalmax internal logging (`lal.log.level` in `lalmax.conf.json`). Lal stdout logging is disabled by default to avoid flooding `logs/lalmax-nvr.log`
+- **Description**: NVR process log level; in embedded mode this also sets lal/lalmax internal logging (`lal.log.level` in `lalmax.conf.json`). Embedded lal/lalmax records are forwarded into the NVR service log with a `lal/lalmax` component tag. Lal stdout logging stays disabled to avoid duplicate output in `logs/lalmax-nvr.log`.
 - **Example**: `"debug"`, `"info"`, `"error"`
 
 ### `observability.log_format`
@@ -799,11 +799,15 @@ metrics_auth:
 
 ```yaml
 ai:
-  inference_timeout_ms: 5000     # inference timeout
-  frame_skip_rate: 5             # detect every N frames
-  confidence_threshold: 0.5      # confidence threshold
-  model_path: ""                 # model path (uses built-in model when empty)
+  enabled: false                 # enable AI detection
+  backend: "browser"             # browser (browser-side ONNX) / webhook (third-party detector) / disabled
+  model_url: "/models/yolo11n.onnx" # browser model URL; place model file in data-dir/models/
+  inference_timeout_ms: 30000    # inference timeout (default 30000ms)
+  frame_skip_rate: 3             # detect every N frames (default 3)
+  confidence_threshold: 0.3      # confidence threshold (default 0.3)
 ```
+
+Browser inference runs in the WebCodecs player, preferring WebGPU with a WASM fallback. Third-party mode keeps the `POST /api/ai/webhook` endpoint for external detectors that subscribe to camera RTSP streams.
 
 ## Camera Protocol Examples
 

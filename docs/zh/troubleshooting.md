@@ -43,3 +43,5 @@ curl -u admin:password 'http://localhost:9090/api/service-logs?level=error&limit
 ```
 
 `/api/service-logs` 需要操作权限；也可直接查看启动 NVR 的终端或容器日志。接口路由见 [`internal/api/handler.go`](../../internal/api/handler.go)。
+
+内嵌模式下，lal/lalmax 的内部日志也会转发到 NVR 服务日志，并标记组件为 `lal/lalmax`；在 Web 日志页按组件筛选即可查看媒体引擎日志。

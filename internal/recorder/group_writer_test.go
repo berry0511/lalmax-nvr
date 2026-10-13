@@ -68,6 +68,55 @@ func TestGroupWriterWritesCTTS(t *testing.T) {
 	require.True(t, found, "expected an mp4 segment with a ctts box")
 }
 
+func TestGroupWriterPublishesLiveFramesWithoutRecording(t *testing.T) {
+	store, err := storage.NewManager(t.TempDir())
+	require.NoError(t, err)
+	w := NewGroupWriter(store, nil, nil, nil, time.Hour)
+	g := &fakeGroup{}
+	w.groups = singleGroup{name: "cam1", group: g}
+	w.SetLookup(func(id string) (config.CameraConfig, bool) {
+		return config.CameraConfig{ID: id, Protocol: "rtsp", Encoding: "h264", Enabled: true}, id == "cam1"
+	})
+	w.SetShouldWrite(func(string) bool { return false })
+	w.Attach("cam1")
+
+	_, _, _, _, hub, ready := w.StreamInfo("cam1")
+	require.NotNil(t, hub)
+	require.False(t, ready)
+	frames := make(chan struct {
+		pts int64
+		au  [][]byte
+	}, 1)
+	require.NoError(t, hub.Subscribe("test", func(pts int64, au [][]byte) {
+		frames <- struct {
+			pts int64
+			au  [][]byte
+		}{pts: pts, au: au}
+	}))
+
+	seq, err := avc.BuildSeqHeaderFromSpsPps(groupTestSPS, groupTestPPS)
+	require.NoError(t, err)
+	g.push(base.RtmpMsg{
+		Header:  base.RtmpHeader{MsgTypeId: base.RtmpTypeIdVideo, MsgLen: uint32(len(seq))},
+		Payload: seq,
+	})
+	g.push(rtmpVideo(120, 0, base.RtmpAvcPacketTypeNalu, true, naluAVCC([]byte{0x65, 0x88, 0x80})))
+
+	select {
+	case frame := <-frames:
+		require.Equal(t, int64(120), frame.pts)
+		require.Len(t, frame.au, 1)
+	case <-time.After(time.Second):
+		t.Fatal("group writer did not publish the live video frame")
+	}
+	codec, sps, pps, _, _, ready := w.StreamInfo("cam1")
+	require.True(t, ready)
+	require.Equal(t, "h264", string(codec))
+	require.NotEmpty(t, sps)
+	require.NotEmpty(t, pps)
+	w.Close()
+}
+
 type singleGroup struct {
 	name  string
 	group *fakeGroup

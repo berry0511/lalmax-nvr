@@ -30,6 +30,13 @@ type recSession struct {
 	bus       *event.EventBus
 	group     subscribeGroup
 	owner     *GroupWriter
+	hub       *model.StreamHub
+
+	streamMu  sync.RWMutex
+	liveCodec string
+	liveSPS   []byte
+	livePPS   []byte
+	liveVPS   []byte
 
 	queue   chan base.RtmpMsg
 	stop    chan struct{}
@@ -92,6 +99,7 @@ func (s *recSession) drain() {
 }
 
 func (s *recSession) handle(msg base.RtmpMsg) {
+	s.publish(msg)
 	if s.rotate.Swap(false) {
 		s.closeSegment()
 		s.flushed = false
@@ -110,6 +118,44 @@ func (s *recSession) handle(msg base.RtmpMsg) {
 	}
 	s.apply(msg)
 	s.remember(msg)
+}
+
+// publish exposes group-writer frames to live consumers such as browser WebCodecs.
+// It runs on the session loop, so it does not add work to lalmax's subscriber callback.
+func (s *recSession) publish(msg base.RtmpMsg) {
+	if codec, sps, pps, vps, ok := parseVideoSeq(msg); ok {
+		s.streamMu.Lock()
+		s.liveCodec, s.liveSPS, s.livePPS, s.liveVPS = codec, sps, pps, vps
+		s.streamMu.Unlock()
+		return
+	}
+	nals, ok := videoNALUs(msg)
+	if !ok || s.hub == nil {
+		return
+	}
+	_, pts, ok := videoTimes(msg)
+	if !ok {
+		return
+	}
+	s.streamMu.RLock()
+	codec := s.liveCodec
+	s.streamMu.RUnlock()
+	if codec == "" {
+		return
+	}
+	var au [][]byte
+	key := false
+	for _, nalu := range nals {
+		vclKey, vcl := isVCL(codec, nalu)
+		if !vcl {
+			continue
+		}
+		au = append(au, nalu)
+		key = key || vclKey
+	}
+	if len(au) > 0 {
+		s.hub.Broadcast(pts.Milliseconds(), au, key)
+	}
 }
 
 func (s *recSession) flushHeld() {

@@ -100,6 +100,7 @@
   // Get backend label
   function getBackendLabel(backend: string): string {
     switch (backend) {
+      case 'browser': return '浏览器 ONNX 推理';
       case 'webhook': return 'Webhook 推送';
       case 'disabled': return '已禁用';
       default: return '未知';
@@ -109,6 +110,7 @@
   // Get backend color
   function getBackendColor(backend: string): string {
     switch (backend) {
+      case 'browser': return 'text-blue-500';
       case 'http': return 'text-blue-500';
       case 'webhook': return 'text-purple-500';
       case 'multimodal': return 'text-green-500';
@@ -195,6 +197,8 @@
               <CheckCircle size={20} class="text-blue-500" />
             {:else if aiStatus.backend === 'webhook'}
               <CheckCircle size={20} class="text-purple-500" />
+            {:else if aiStatus.backend === 'browser'}
+              <CheckCircle size={20} class="text-blue-500" />
             {:else}
               <XCircle size={20} class="text-gray-500" />
             {/if}

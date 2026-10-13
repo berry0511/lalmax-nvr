@@ -1,11 +1,35 @@
 import { defineConfig } from 'vitest/config'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 import tailwindcss from '@tailwindcss/vite'
+import fs from 'node:fs'
 import path from 'path'
+
+function ortWasmAssetsPlugin() {
+  return {
+    name: 'ort-wasm-assets',
+    apply: 'build',
+    closeBundle() {
+      const ortDist = path.resolve('node_modules/onnxruntime-web/dist')
+      const ortOut = path.resolve('dist/ort')
+      fs.mkdirSync(ortOut, { recursive: true })
+      for (const file of [
+        'ort.all.bundle.min.mjs',
+        'ort.wasm.bundle.min.mjs',
+        'ort-wasm-simd-threaded.jsep.mjs',
+        'ort-wasm-simd-threaded.jsep.wasm',
+        'ort-wasm-simd-threaded.wasm',
+      ]) {
+        const source = path.join(ortDist, file)
+        if (!fs.existsSync(source)) throw new Error(`Missing ONNX Runtime asset: ${source}`)
+        fs.copyFileSync(source, path.join(ortOut, file))
+      }
+    },
+  }
+}
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [svelte(), tailwindcss()],
+  plugins: [svelte(), tailwindcss(), ortWasmAssetsPlugin()],
   resolve: {
     alias: {
       $lib: path.resolve('./src/lib'),

@@ -162,25 +162,28 @@ type Handler struct {
 	mediaEngine        media.Engine
 	mediaProxy         *http.Client
 	wsMgr              media.WS
-	configPath         string
-	snapshotMu         sync.RWMutex
-	snapshots          map[string]*snapshotCache // cameraID -> cached snapshot
-	mergeMgr           *merge.MergeManager
-	healthMgr          HealthManager
-	stabilityProvider  StabilityProvider
-	cloudProxy         CloudAuthProxy
-	streamRegistry     *StreamRegistry
-	aiManager          *ai.Manager
-	onvifDiscover      func(ctx context.Context, timeout time.Duration) *onvif.DiscoveryResult
-	onvifProbeDevice   func(ctx context.Context, host string, port int, timeout time.Duration) (*onvif.DiscoveredDevice, error)
-	onvifNewClient     func(endpoint, username, password string) onvifDeviceClient
-	banMgr             BanManager
-	gb28181Svr         GB28181StreamStatus
-	gb28181Restarter   GB28181Restarter
-	gb28181Server      *gb28181.Server
-	jt808Server        jt808Signaling
-	snapshotMgr        *camera.SnapshotManager
-	relayMgr           *relay.Manager
+	groupStreamSource  interface {
+		StreamInfo(string) (model.Format, []byte, []byte, []byte, *model.StreamHub, bool)
+	}
+	configPath        string
+	snapshotMu        sync.RWMutex
+	snapshots         map[string]*snapshotCache // cameraID -> cached snapshot
+	mergeMgr          *merge.MergeManager
+	healthMgr         HealthManager
+	stabilityProvider StabilityProvider
+	cloudProxy        CloudAuthProxy
+	streamRegistry    *StreamRegistry
+	aiManager         *ai.Manager
+	onvifDiscover     func(ctx context.Context, timeout time.Duration) *onvif.DiscoveryResult
+	onvifProbeDevice  func(ctx context.Context, host string, port int, timeout time.Duration) (*onvif.DiscoveredDevice, error)
+	onvifNewClient    func(endpoint, username, password string) onvifDeviceClient
+	banMgr            BanManager
+	gb28181Svr        GB28181StreamStatus
+	gb28181Restarter  GB28181Restarter
+	gb28181Server     *gb28181.Server
+	jt808Server       jt808Signaling
+	snapshotMgr       *camera.SnapshotManager
+	relayMgr          *relay.Manager
 	// readyzDiskUsage overrides disk probing for /api/readyz (tests only).
 	readyzDiskUsage func() (total, used int64, err error)
 	// sysMetrics holds the in-memory ring buffer of periodic system metric samples.
@@ -348,6 +351,9 @@ func (h *Handler) Routes() http.Handler {
 		r.Get("/api/health/cameras", h.handleHealthCameras)
 		r.Get("/api/readyz", h.handleReadyz)
 		r.Get("/api/capabilities", h.handleCapabilities)
+		// ONNX models are public, immutable runtime assets; auth headers are not
+		// available to Web Workers when they fetch a model URL.
+		r.Get("/models/{filename}", h.handleServeAIModel)
 	})
 	r.Post("/api/auth/login", h.handleLogin)
 	r.Post("/api/setup", h.handleSetup)
@@ -384,7 +390,7 @@ func (h *Handler) Routes() http.Handler {
 			r.Route("/{id}", func(r chi.Router) {
 				r.Get("/", h.handleGetEvent)
 				r.With(middleware.RequireOperatePermission()).Delete("/", h.handleDeleteEvent)
-				r.Post("/ack", h.handleAcknowledgeEvent)
+				r.With(middleware.RequireOperatePermission()).Post("/ack", h.handleAcknowledgeEvent)
 			})
 		})
 		r.With(middleware.RequireOperatePermission()).Get("/api/operation-logs", h.handleListOperationLogs)
@@ -871,6 +877,13 @@ func strPtr(s string) *string {
 // SetWSManager sets the WebSocket stream manager on the handler.
 func (h *Handler) SetWSManager(mgr media.WS) {
 	h.wsMgr = mgr
+}
+
+// SetGroupStreamSource provides live frames from lalmax group subscribers.
+func (h *Handler) SetGroupStreamSource(source interface {
+	StreamInfo(string) (model.Format, []byte, []byte, []byte, *model.StreamHub, bool)
+}) {
+	h.groupStreamSource = source
 }
 
 // SetMediaEngine sets the lal/lalmax-backed media engine on the handler.

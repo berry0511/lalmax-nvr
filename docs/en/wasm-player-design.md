@@ -20,7 +20,7 @@ The system implements a sophisticated three-tier fallback architecture that auto
 ```
 ┌─ Tier 1: WebGPU (Zero-Copy Hardware) ──────────────────────────────────┐
 │  WebCodecs decode → WebGPU texture (importExternalTexture) → Render    │
-│  ONNX Runtime WebGPU execution provider (AI, 5-10ms/frame)               │
+│  AI may use ONNX Runtime WebGPU (latency depends on device and model)      │
 │  Browser Support: Chrome 113+, Edge 113+, Safari 18+                     │
 │  Performance: Decode 200+ FPS, AI 30+ FPS, Render 60 FPS                │
 ├───────────────────────────────────────────────────────────────────────────┤
@@ -28,7 +28,7 @@ The system implements a sophisticated three-tier fallback architecture that auto
 
 ┌─ Tier 2: WebGL2 + WASM SIMD (Hybrid Mode) ─────────────────────────────┐
 │  WebCodecs decode → WebGL2 Canvas (copyExternalImageToTexture) → Render  │
-│  ONNX Runtime WASM SIMD execution provider (AI, 30-50ms/frame)          │
+│  AI falls back to ONNX Runtime WASM (latency depends on device and model) │
 │  Browser Support: Firefox 130+, Safari 16.4+, Chrome 94+ (WebCodecs)    │
 │  Performance: Decode 200+ FPS, AI 10-20 FPS, Render 60 FPS            │
 ├───────────────────────────────────────────────────────────────────────────┤
@@ -293,89 +293,13 @@ device.lost.then((info: GPUDeviceLostInfo) => {
 | Safari 18+ | ✅ | ✅ | ✅ | Tier 1 support |
 | Legacy browsers | ❌ | ❌ | ✅ | Current players |
 
-## AI Detection (Frontend)
+## Browser-side AI Detection
 
-The frontend AI detection system uses ONNX Runtime Web with YOLOv11-nano for real-time object detection, running entirely in the browser with hardware acceleration.
+Browser inference is enabled on demand by the WebCodecs player. `WasmPlayer.svelte` passes decoded frames to a module Worker, which runs ONNX Runtime Web. The runtime tries WebGPU first and uses WASM if WebGPU is unavailable or session initialization fails. The browser must support WebCodecs, module workers, and the selected runtime backend. Frame skip, confidence threshold, and inference timeout come from NVR AI settings, not player localStorage.
 
-### Backend Selection
+The default model URL is `/models/yolo11n.onnx`; the NVR serves it from the data directory's `models/` folder. The frontend build copies ONNX Runtime browser assets into `/ort/` for embedding in the static app. The model, `/ort/` assets, and application must be reachable from the same NVR Web service for browser inference.
 
-The system automatically selects the optimal execution provider:
-
-```typescript
-// Runtime detection from onnxruntime-web
-if (navigator.gpu) {
-  // WebGPU execution provider (5-10ms/frame)
-  sessionOptions.executionProviders = ['webgpu'];
-} else if (detectWasmSimd()) {
-  // WASM SIMD execution provider (30-50ms/frame)
-  sessionOptions.executionProviders = ['wasm-simd'];
-} else {
-  // Fallback to plain WASM
-  sessionOptions.executionProviders = ['wasm'];
-}
-```
-
-### YOLOv11-nano Pipeline
-
-**Model Specifications:**
-- Input: `[1, 3, 640, 640]` float32 NCHW
-- Output: `[1, 84, 8400]` bounding boxes with confidence scores
-- Classes: 80 COCO categories (person, car, etc.)
-- Model size: ~4MB (quantized)
-
-**Preprocessing Pipeline:**
-
-```typescript
-async function preprocessFrame(
-  videoFrame: VideoFrame,
-  inputSize: number
-): Promise<Float32Array> {
-  // 1. Create ImageBitmap for safe drawing
-  const bitmap = await createImageBitmap(videoFrame);
-  
-  // 2. Letterbox to 640x640 with gray padding
-  const { scale, padX, padY } = letterboxParams(
-    bitmap.width, bitmap.height, inputSize
-  );
-  
-  // 3. Draw to OffscreenCanvas
-  const canvas = new OffscreenCanvas(inputSize, inputSize);
-  const ctx = canvas.getContext('2d');
-  ctx.fillStyle = `rgb(114, 114, 114)`; // Gray padding
-  ctx.fillRect(0, 0, inputSize, inputSize);
-  ctx.drawImage(bitmap, padX, padY, 
-    Math.round(bitmap.width * scale), 
-    Math.round(bitmap.height * scale)
-  );
-  
-  // 4. Extract and convert pixels to Float32 CHW
-  return convertToCHW(canvas);
-}
-```
-
-**Postprocessing Pipeline:**
-
-1. **YOLO Output Parsing:** Extract bounding boxes and confidence scores
-2. **Non-Maximum Suppression:** Remove overlapping detections (IoU threshold 0.45)
-3. **EMA Smoothing:** Apply exponential moving average for tracking (alpha 0.3)
-4. **Coordinate Mapping:** Map from input space (640x640) to original frame
-
-### Performance Optimization
-
-**Frame Skipping:**
-- Configurable frame skip (default: every 3rd frame)
-- Results in ~10 FPS detection at 30 FPS video
-- Balances detection accuracy with performance
-
-**Model Caching:**
-- Downloads and caches models via Cache API
-- Tracks download progress with percentage
-- Idempotent download with SHA-256 verification
-
-**Memory Management:**
-- OffscreenCanvas reused to prevent leaks
-- ImageBitmap objects closed after use
-- Output tensors disposed after inference
+The player draws detections above the configured confidence threshold and reports them to the NVR. AI event archival suppresses repeats for the same camera and class set for 30 seconds. With the Webhook backend selected, an external detector reports results through `POST /api/ai/webhook` instead of running a model in the browser.
 
 ### Detection Output
 
@@ -498,7 +422,7 @@ The system automatically downloads and manages ONNX Runtime binaries for the cur
 ├── tools/
 │   └── onnxruntime          # Platform-specific binary
 └── models/
-    └── yolov11n.onnx        # YOLOv11-nano model
+    └── yolo11n.onnx        # YOLOv11-nano model
 ```
 
 ## Hardware Probe
@@ -572,7 +496,7 @@ Returns AI engine availability and system status:
 {
   "available": true,
   "engine_status": "running",
-  "model": "/data/models/yolov11n.onnx",
+  "model": "/data/models/yolo11n.onnx",
   "probe": {
     "available": true,
     "reason": ""
@@ -634,30 +558,9 @@ All AI API endpoints require authentication:
 
 The AI detection system is configurable both on the frontend and backend to adapt to different hardware capabilities and requirements.
 
-### Frontend Configuration
+### AI Configuration
 
-**localStorage Settings:**
-```typescript
-interface AIConfig {
-  enabled: boolean;
-  confidenceThreshold: number; // 0.1-0.9
-  frameSkip: number; // 1-10 frames
-  emaAlpha: number; // 0.1-1.0
-}
-
-// Default values
-const defaultConfig: AIConfig = {
-  enabled: true,
-  confidenceThreshold: 0.5,
-  frameSkip: 3,
-  emaAlpha: 0.3
-};
-```
-
-**Runtime Updates:**
-- Configuration changes applied immediately
-- No page restart required
-- Changes persisted automatically
+AI settings are stored in NVR configuration and managed under **Settings → AI Detection**. Browser mode defaults to model URL `/models/yolo11n.onnx`, confidence threshold `0.3`, inference every `3` frames, and a `30000ms` timeout. The API validates confidence `0.1–1.0`, frame skip `1–30`, and timeout `1000–60000ms`. Put the model at `{storage.root_dir}/models/`.
 
 ### Backend Configuration
 
@@ -665,27 +568,9 @@ const defaultConfig: AIConfig = {
 - Minimum: 2GB RAM, 2 CPU cores, amd64/arm64
 - Recommended: 4GB RAM, 4+ CPU cores
 
-**Model Configuration:**
-- Default model: `yolov11n.onnx` (4MB, 80 classes)
-- Alternative models: `yolov8s.onnx` (~70MB, higher accuracy)
-- Model path: `{dataDir}/models/{model_name}.onnx`
-
-**StreamHub Integration:**
-- AI detection subscribes to `"ai-{camera_id}"` events
-- Frame skipping via atomic counter
-- Non-blocking processing to prevent recording stalls
-
 ### Performance Tuning
 
-**Frontend Settings:**
-- `frameSkip`: Higher values reduce CPU usage but decrease detection frequency
-- `confidenceThreshold`: Higher values reduce false positives but may miss objects
-- `emaAlpha`: Lower values create smoother tracking but slower response
-
-**Backend Settings:**
-- Frame processing rate limited to 30 FPS maximum
-- Batch processing for multiple cameras
-- Graceful degradation on resource constraints
+Increasing frame skip can reduce browser inference load but lowers detection frequency. Raising the confidence threshold filters lower-confidence results and may also miss objects. Actual throughput depends on the browser, device, and model.
 
 ## Testing
 

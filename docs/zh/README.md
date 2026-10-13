@@ -38,6 +38,7 @@
 | [录像计划](recording-plans.md) | 为流设置连续、定时或事件录像 |
 | [录制流程](recording-flow.md) | 组写入器如何订阅 lalmax group，计划如何拨写盘开关 |
 | [API 参考](api-reference.md) | REST API 使用说明；OpenAPI 规范见 [`openapi.yaml`](../../internal/docsportal/openapi.yaml) |
+| [事件中心](events.md) | 健康、录制恢复、AI 和 MQTT 事件的筛选、实时更新与确认 |
 | [MQTT](mqtt-integration.md) | 事件触发录像 |
 | [WebDAV](webdav-integration.md) / [FTP](ftp-integration.md) | 浏览存储文件；FTP 指南说明当前认证限制 |
 | [AI 检测](ai-setup-guide.md) | 检测服务的部署与配置 |

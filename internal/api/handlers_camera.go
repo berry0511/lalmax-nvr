@@ -36,6 +36,40 @@ func streamIDForCamera(row storage.CameraRow) string {
 	return strings.TrimSpace(row.StreamID)
 }
 
+// syncCameraStatusWithStream keeps the camera status aligned with the stream
+// manager for cameras backed by a lalmax stream. Recorder startup alone does
+// not mean the stream is live: the upstream may still be reconnecting or the
+// lalmax group may not exist yet.
+func (h *Handler) syncCameraStatusWithStream(ctx context.Context, row *storage.CameraRow) {
+	if h.mediaEngine == nil || row == nil || (row.Status != model.StatusRecording && row.Status != model.StatusReconnecting) {
+		return
+	}
+	streamID := streamIDForCamera(*row)
+	if streamID == "" {
+		return
+	}
+
+	streamInfo, err := h.mediaEngine.GetStream(ctx, streamID)
+	active := err == nil && streamInfo != nil && streamInfo.Active
+	if row.Protocol == "gb28181" && h.gb28181Svr != nil && h.gb28181Svr.IsStreamPlaying(streamID) {
+		active = true
+	}
+	if !active {
+		row.Status = model.StatusOffline
+		return
+	}
+
+	row.Status = model.StatusRecording
+	if streamInfo != nil {
+		if enc := encodingFromMediaCodec(streamInfo.VideoCodec); enc != "" {
+			row.Encoding = enc
+			if row.StreamEncoding == "" {
+				row.StreamEncoding = strings.ToUpper(enc)
+			}
+		}
+	}
+}
+
 // applyPlanModes sets each camera's read-only recording_mode from the plan for
 // its bound stream. Call after StreamID has been injected.
 func (h *Handler) applyPlanModes(ctx context.Context, cameras []storage.CameraRow) {
@@ -166,6 +200,27 @@ func (h *Handler) handleListCameras(w http.ResponseWriter, r *http.Request) {
 	if cameras == nil {
 		cameras = []storage.CameraRow{}
 	}
+	// Inject stream IDs before computing camera status. A camera's binding is
+	// stored separately from the camera row, and the lalmax status check needs
+	// that ID to agree with the Stream Management page.
+	if bindings, err := h.db.ListStreamBindings(r.Context()); err != nil {
+		logger.Warn("failed to list stream bindings for cameras", "error", err)
+	} else {
+		streamByCamera := make(map[string]string, len(bindings))
+		for _, b := range bindings {
+			streamByCamera[b.CameraID] = b.StreamID
+		}
+		for i := range cameras {
+			cameras[i].StreamID = streamByCamera[cameras[i].ID]
+		}
+	}
+	for i := range cameras {
+		if cameras[i].StreamID == "" && h.camMgr != nil {
+			if cam := h.camMgr.GetCameraConfig(cameras[i].ID); cam != nil {
+				cameras[i].StreamID = strings.TrimSpace(cam.StreamID)
+			}
+		}
+	}
 	// Inject recorder status from CameraManager
 	if h.camMgr != nil {
 		statusMap := h.camMgr.Status()
@@ -198,49 +253,14 @@ func (h *Handler) handleListCameras(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		// Override status/codec for cameras backed by lalmax streams.
-		// A relay can be active even while an incorrectly configured recorder is
-		// reconnecting, so expose the live stream state and codec to the UI.
-		if h.mediaEngine != nil {
-			for i := range cameras {
-				if cameras[i].Status == model.StatusRecording || cameras[i].Status == model.StatusReconnecting {
-					streamInfo, err := h.mediaEngine.GetStream(r.Context(), streamIDForCamera(cameras[i]))
-					if err == nil && streamInfo != nil {
-						if streamInfo.Active {
-							cameras[i].Status = model.StatusRecording
-						} else {
-							cameras[i].Status = model.StatusOffline
-						}
-						if enc := encodingFromMediaCodec(streamInfo.VideoCodec); enc != "" {
-							cameras[i].Encoding = enc
-							if cameras[i].StreamEncoding == "" {
-								cameras[i].StreamEncoding = strings.ToUpper(enc)
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-	// Expose the bound lalmax stream so clients play via /api/streams/{stream_id}.
-	if bindings, err := h.db.ListStreamBindings(r.Context()); err != nil {
-		logger.Warn("failed to list stream bindings for cameras", "error", err)
-	} else {
-		streamByCamera := make(map[string]string, len(bindings))
-		for _, b := range bindings {
-			streamByCamera[b.CameraID] = b.StreamID
-		}
+		// Align live status and codec with the same lalmax stream state used by
+		// Stream Management.
 		for i := range cameras {
-			cameras[i].StreamID = streamByCamera[cameras[i].ID]
+			h.syncCameraStatusWithStream(r.Context(), &cameras[i])
 		}
 	}
 	for i := range cameras {
 		h.injectCameraConfigFields(&cameras[i])
-		if cameras[i].StreamID == "" && h.camMgr != nil {
-			if cam := h.camMgr.GetCameraConfig(cameras[i].ID); cam != nil {
-				cameras[i].StreamID = strings.TrimSpace(cam.StreamID)
-			}
-		}
 		h.resolveCameraSourceType(r.Context(), &cameras[i])
 		cameraRowForAPI(&cameras[i])
 	}
@@ -480,23 +500,7 @@ func (h *Handler) handleGetCamera(w http.ResponseWriter, r *http.Request) {
 	// Inject recorder status
 	if h.camMgr != nil {
 		row.Status = h.camMgr.CameraStatus(id)
-		// Override status for cameras backed by lalmax streams that are idle
-		if h.mediaEngine != nil && row.StreamID != "" && (row.Status == model.StatusRecording || row.Status == model.StatusReconnecting) {
-			streamInfo, err := h.mediaEngine.GetStream(r.Context(), row.StreamID)
-			if err == nil && streamInfo != nil {
-				if streamInfo.Active {
-					row.Status = model.StatusRecording
-				} else {
-					row.Status = model.StatusOffline
-				}
-				if enc := encodingFromMediaCodec(streamInfo.VideoCodec); enc != "" {
-					row.Encoding = enc
-					if row.StreamEncoding == "" {
-						row.StreamEncoding = strings.ToUpper(enc)
-					}
-				}
-			}
-		}
+		h.syncCameraStatusWithStream(r.Context(), row)
 	}
 	// For GB28181 cameras, check if the stream is active in lalmax
 	if row.Protocol == "gb28181" && h.mediaEngine != nil && row.StreamID != "" {

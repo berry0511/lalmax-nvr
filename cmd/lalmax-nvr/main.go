@@ -23,6 +23,7 @@ import (
 	_ "net/http/pprof"
 
 	"github.com/lalmax-pro/lalmax-nvr/internal/ai"
+	"github.com/lalmax-pro/lalmax-nvr/internal/ai/webhook"
 	"github.com/lalmax-pro/lalmax-nvr/internal/api"
 	"github.com/lalmax-pro/lalmax-nvr/internal/autodiscover"
 	"github.com/lalmax-pro/lalmax-nvr/internal/ban"
@@ -730,6 +731,9 @@ func NewApp(cfg *config.Config, configPath string) (*App, error) {
 	// Step 9: Optional MQTT client
 	if cfg.MQTT.Enabled {
 		a.mqttClient = mqtt.NewClient(cfg.MQTT.Broker, cfg.MQTT.ClientID, cfg.MQTT.Topic, cfg.MQTT.Username, cfg.MQTT.Password, func(cameraID, action string) {
+			a.eventBus.Publish(context.Background(), event.TopicMQTTTrigger, event.MQTTTrigger{
+				CameraID: cameraID, Action: action, At: time.Now().UTC(),
+			})
 			switch strings.ToLower(strings.TrimSpace(action)) {
 			case "end", "stop", "off":
 				if a.eventMgr != nil {
@@ -895,6 +899,9 @@ func (a *App) buildRouter() http.Handler {
 	handler.SetGB28181Restarter(a)
 	handler.SetVoIPRestarter(a)
 	handler.SetWSManager(a.media.WS())
+	if a.groupWriter != nil {
+		handler.SetGroupStreamSource(a.groupWriter)
+	}
 	handler.SetHealthManager(a.healthMgr)
 	handler.SetStabilityProvider(a.healthMgr)
 	handler.SetAutoDiscoverApply(func(cfg config.AutoDiscoverConfig) {
@@ -916,6 +923,18 @@ func (a *App) buildRouter() http.Handler {
 
 	// Wire AI Manager
 	aiMgr := ai.NewManager(cfg.AI)
+	aiMgr.OnDetection(func(result webhook.DetectionResult) {
+		detections := make([]event.AIDetectionObject, 0, len(result.Detections))
+		for _, detection := range result.Detections {
+			detections = append(detections, event.AIDetectionObject{
+				Label: detection.Label, Confidence: detection.Confidence, Box: detection.Box,
+				TrackID: detection.TrackID, ZoneID: detection.ZoneID,
+			})
+		}
+		a.eventBus.Publish(context.Background(), event.TopicAIDetection, event.AIDetection{
+			CameraID: result.CameraID, PTS: result.PTS, Timestamp: result.Timestamp, Detections: detections,
+		})
+	})
 	if a.db != nil {
 		aiMgr.SetStore(a.db)
 	}

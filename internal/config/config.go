@@ -565,7 +565,8 @@ type WebSocketConfig struct {
 
 type AIConfig struct {
 	Enabled             bool                `yaml:"enabled" json:"enabled"`
-	Backend             string              `yaml:"backend" json:"backend"` // "webhook" or "disabled"
+	Backend             string              `yaml:"backend" json:"backend"` // "browser", "webhook" or "disabled"
+	ModelURL            string              `yaml:"model_url" json:"modelUrl"`
 	FrameSkipRate       int                 `yaml:"frame_skip_rate" json:"frameSkipRate"`
 	ConfidenceThreshold float64             `yaml:"confidence_threshold" json:"confidenceThreshold"`
 	InferenceTimeoutMs  int                 `yaml:"inference_timeout_ms" json:"inferenceTimeoutMs"`
@@ -1410,6 +1411,9 @@ func (cfg *Config) ApplyDefaults() {
 	// AI defaults
 	if cfg.AI.Backend == "" {
 		cfg.AI.Backend = "disabled"
+	}
+	if cfg.AI.ModelURL == "" {
+		cfg.AI.ModelURL = "/models/yolo11n.onnx"
 	}
 	if cfg.AI.FrameSkipRate <= 0 {
 		cfg.AI.FrameSkipRate = 3

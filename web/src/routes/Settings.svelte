@@ -73,9 +73,10 @@ let expandedProtocolDoc = $state<string | null>(null);
 // SRT stream configurations
 let srtStreams = $state<{streamId: string, cameraId: string, mode: string, address: string, passphrase: string}[]>([]);
 
-// AI Detection state (Webhook mode only)
+// AI detection backend selection
 let aiEnabled = $state(false);
-let aiBackend = $state<'webhook' | 'disabled'>('disabled');
+let aiBackend = $state<'browser' | 'webhook' | 'disabled'>('disabled');
+let aiModelURL = $state('/models/yolo11n.onnx');
 let aiConfidenceThreshold = $state(0.5);
 let aiFrameSkip = $state(3);
 let aiInferenceTimeout = $state(30000);
@@ -877,7 +878,8 @@ function getAffectedCameraCount(protocol: string): number {
     try {
       const config = await getAiBackendConfig();
       aiEnabled = config.enabled;
-      aiBackend = config.backend as 'webhook' | 'disabled';
+      aiBackend = config.backend as 'browser' | 'webhook' | 'disabled';
+      aiModelURL = config.model_url || '/models/yolo11n.onnx';
       aiConfidenceThreshold = config.confidence_threshold;
       aiFrameSkip = config.frame_skip_rate;
       aiInferenceTimeout = config.inference_timeout_ms;
@@ -939,6 +941,7 @@ function getAffectedCameraCount(protocol: string): number {
       const config: Partial<AiBackendConfig> = {
         enabled: aiEnabled,
         backend: aiEnabled ? aiBackend : 'disabled',
+        model_url: aiModelURL,
         frame_skip_rate: aiFrameSkip,
         confidence_threshold: aiConfidenceThreshold,
         inference_timeout_ms: aiInferenceTimeout,
@@ -1834,8 +1837,8 @@ function getAffectedCameraCount(protocol: string): number {
               id="ai-toggle" aria-label={t('settings.ai.title')}
               type="button"
               class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 {aiEnabled ? 'bg-blue-600' : 'th-bg-tertiary'}"
-              onclick={() => { aiEnabled = !aiEnabled; }}
-              onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); aiEnabled = !aiEnabled; } }}
+              onclick={() => { aiEnabled = !aiEnabled; if (aiEnabled && aiBackend === 'disabled') aiBackend = 'browser'; }}
+              onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); aiEnabled = !aiEnabled; if (aiEnabled && aiBackend === 'disabled') aiBackend = 'browser'; } }}
               role="switch"
               aria-checked={aiEnabled}
             >
@@ -1846,18 +1849,31 @@ function getAffectedCameraCount(protocol: string): number {
           {#if aiEnabled}
             <div class="mt-4 pt-4 border-t th-border space-y-6">
               <!-- Architecture Info -->
-              <div class="p-4 rounded-lg border th-border bg-blue-50 dark:bg-blue-900/20">
-                <h4 class="font-medium th-text-primary mb-2">Webhook 模式架构</h4>
-                <p class="text-sm th-text-secondary mb-2">
-                  外部 ai-detector 订阅 NVR 的 RTSP 流，运行 YOLO 检测后通过 Webhook 推送结果。
-                  检测结果可以触发大模型（LLM）进行语义分析。
-                </p>
-                <div class="text-xs th-text-tertiary">
-                  <code>ai-detector → YOLO/ByteTrack → POST /api/ai/webhook → NVR → (可选) LLM 分析</code>
-                </div>
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <button type="button" class="p-4 rounded-lg border-2 text-left transition-colors {aiBackend === 'browser' ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'th-border th-bg-hover'}" onclick={() => aiBackend = 'browser'}>
+                  <div class="font-medium th-text-primary">浏览器端推理</div>
+                  <p class="text-sm th-text-secondary mt-1">浏览器使用 ONNX Runtime 推理正在播放的 WebCodecs 视频帧。</p>
+                </button>
+                <button type="button" class="p-4 rounded-lg border-2 text-left transition-colors {aiBackend === 'webhook' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : 'th-border th-bg-hover'}" onclick={() => aiBackend = 'webhook'}>
+                  <div class="font-medium th-text-primary">第三方检测器</div>
+                  <p class="text-sm th-text-secondary mt-1">外部检测器订阅 RTSP，检测后推送到本机 Webhook。</p>
+                </button>
               </div>
 
+              {#if aiBackend === 'browser'}
+                <div class="p-4 rounded-lg border th-border bg-blue-50 dark:bg-blue-900/20 space-y-3">
+                  <h4 class="font-medium th-text-primary">浏览器模型</h4>
+                  <label class="block">
+                    <span class="input-label">模型路径</span>
+                    <input class="input w-full mt-1" bind:value={aiModelURL} placeholder="/models/yolo11n.onnx" />
+                  </label>
+                  <p class="text-sm th-text-secondary">将 ONNX 模型放到数据目录的 <code>models/</code> 文件夹。当前默认模型地址：<code>{aiModelURL}</code>。实时推理需要选择 WebCodecs 播放协议；浏览器优先使用 WebGPU，自动回退 WASM。</p>
+                  <p class="text-xs th-text-tertiary">模型文件不随程序打包。模型缺失或浏览器不支持 WebCodecs 时，播放器会显示明确状态；Webhook 模式不受影响。</p>
+                </div>
+              {/if}
+
               <!-- Webhook Config -->
+              {#if aiBackend === 'webhook'}
               <div class="p-4 rounded-lg border th-border bg-gray-50 dark:bg-gray-800/50 space-y-4">
                 <h4 class="font-medium th-text-primary">Webhook 配置</h4>
                 <div class="flex items-center justify-between">
@@ -1889,8 +1905,10 @@ function getAffectedCameraCount(protocol: string): number {
                   </div>
                 </div>
               </div>
+              {/if}
 
               <!-- Multimodal LLM Config -->
+              {#if aiBackend === 'webhook'}
                 <div class="p-4 rounded-lg border th-border bg-gray-50 dark:bg-gray-800/50 space-y-6">
                   <div class="flex items-center justify-between">
                     <div>
@@ -2208,6 +2226,7 @@ function getAffectedCameraCount(protocol: string): number {
                     </div>
                   {/if}
                 </div>
+              {/if}
 
               <!-- Common Settings -->
               <div class="grid grid-cols-1 md:grid-cols-2 gap-6">

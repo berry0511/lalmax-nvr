@@ -20,7 +20,7 @@ WASM + WebCodecs 统一播放器与 AI 检测系统是一个现代的、分层�
 ```
 ┌─ 第1级：WebGPU（零拷贝硬件） ──────────────────────────────────┐
 │  WebCodecs 解码 → WebGPU 纹理（importExternalTexture）→ 渲染   │
-│  ONNX Runtime WebGPU 执行提供商（AI，5-10ms/帧）               │
+│  AI 可尝试 ONNX Runtime WebGPU（耗时取决于设备和模型）          │
 │  浏览器支持：Chrome 113+、Edge 113+、Safari 18+                 │
 │  性能：解码 200+ FPS，AI 30+ FPS，渲染 60 FPS                   │
 ├───────────────────────────────────────────────────────────────────────────┤
@@ -28,7 +28,7 @@ WASM + WebCodecs 统一播放器与 AI 检测系统是一个现代的、分层�
 
 ┌─ 第2级：WebGL2 + WASM SIMD（混合模式） ─────────────────────────────┐
 │  WebCodecs 解码 → WebGL2 Canvas（copyExternalImageToTexture）→ 渲染 │
-│  ONNX Runtime WASM SIMD 执行提供商（AI，30-50ms/帧）              │
+│  AI 回退到 ONNX Runtime WASM（耗时取决于设备和模型）             │
 │  浏览器支持：Firefox 130+、Safari 16.4+、Chrome 94+（WebCodecs）  │
 │  性能：解码 200+ FPS，AI 10-20 FPS，渲染 60 FPS                   │
 ├───────────────────────────────────────────────────────────────────────────┤
@@ -293,89 +293,13 @@ device.lost.then((info: GPUDeviceLostInfo) => {
 | Safari 18+ | ✅ | ✅ | ✅ | 第1级支持 |
 | 传统浏览器 | ❌ | ❌ | ✅ | 当前播放器 |
 
-## AI 检测（前端）
+## 浏览器端 AI 检测
 
-前端 AI 检测系统使用 ONNX Runtime Web 和 YOLOv11-nano 进行实时对象检测，完全在浏览器中运行，具有硬件加速。
+浏览器推理由 WebCodecs 播放器按需启用。`WasmPlayer.svelte` 将解码帧交给模块 Worker；Worker 使用 ONNX Runtime Web 执行推理，优先尝试 WebGPU，初始化失败或不可用时使用 WASM。浏览器需支持 WebCodecs、模块 Worker 和所选运行时后端。当前帧跳过、置信度阈值和推理超时来自 NVR 的 AI 设置，不保存在播放器的 localStorage 中。
 
-### 后端选择
+模型默认地址为 `/models/yolo11n.onnx`，由 NVR 从数据目录 `models/` 提供。ONNX Runtime 的浏览器资源会在前端构建时复制到 `/ort/` 并嵌入静态资源。部署浏览器推理时，模型文件、`/ort/` 资源和应用需通过同源 NVR Web 服务访问。
 
-系统自动选择最佳执行提供商：
-
-```typescript
-// 来自 onnxruntime-web 的运行时检测
-if (navigator.gpu) {
-  // WebGPU 执行提供商（5-10ms/帧）
-  sessionOptions.executionProviders = ['webgpu'];
-} else if (detectWasmSimd()) {
-  // WASM SIMD 执行提供商（30-50ms/帧）
-  sessionOptions.executionProviders = ['wasm-simd'];
-} else {
-  // 回退到普通 WASM
-  sessionOptions.executionProviders = ['wasm'];
-}
-```
-
-### YOLOv11-nano 管线
-
-**模型规格：**
-- 输入：`[1, 3, 640, 640]` float32 NCHW
-- 输出：`[1, 84, 8400]` 带置信度分数的边界框
-- 类别：80 个 COCO 类别（人、车等）
-- 模型大小：~4MB（量化）
-
-**预处理管线：**
-
-```typescript
-async function preprocessFrame(
-  videoFrame: VideoFrame,
-  inputSize: number
-): Promise<Float32Array> {
-  // 1. 创建 ImageBitmap 用于安全绘制
-  const bitmap = await createImageBitmap(videoFrame);
-  
-  // 2. 字母框到 640x640，灰色填充
-  const { scale, padX, padY } = letterboxParams(
-    bitmap.width, bitmap.height, inputSize
-  );
-  
-  // 3. 绘制到离屏画布
-  const canvas = new OffscreenCanvas(inputSize, inputSize);
-  const ctx = canvas.getContext('2d');
-  ctx.fillStyle = `rgb(114, 114, 114)`; // 灰色填充
-  ctx.fillRect(0, 0, inputSize, inputSize);
-  ctx.drawImage(bitmap, padX, padY, 
-    Math.round(bitmap.width * scale), 
-    Math.round(bitmap.height * scale)
-  );
-  
-  // 4. 提取并转换像素为 Float32 CHW
-  return convertToCHW(canvas);
-}
-```
-
-**后处理管线：**
-
-1. **YOLO 输出解析**：提取边界框和置信度分数
-2. **非极大值抑制**：移除重叠检测（IoU 阈值 0.45）
-3. **EMA 平滑**：应用指数移动平均进行跟踪（alpha 0.3）
-4. **坐标映射**：从输入空间（640x640）映射到原始帧
-
-### 性能优化
-
-**帧跳过：**
-- 可配置帧跳过（默认：每 3 帧）
-- 在 30 FPS 视频中产生约 10 FPS 检测
-- 平衡检测精度和性能
-
-**模型缓存：**
-- 通过 Cache API 下载并缓存模型
-- 跟踪带百分比的下载进度
-- 使用 SHA-256 验证的幂等下载
-
-**内存管理：**
-- 重用离屏画布防止泄漏
-- 使用后关闭 ImageBitmap 对象
-- 推理后输出张量清理
+播放器把满足置信度阈值的检测结果显示在画面覆盖层，并上报 NVR；NVR 的 AI 事件归档按摄像头和类别组合做 30 秒去重。若用户选择 Webhook 后端，则由外部检测器通过 `POST /api/ai/webhook` 上报，不在浏览器中运行模型。
 
 ### 检测输出
 
@@ -498,7 +422,7 @@ func backoffDuration(crashes int) time.Duration {
 ├── tools/
 │   └── onnxruntime          # 平台特定二进制文件
 └── models/
-    └── yolov11n.onnx        # YOLOv11-nano 模型
+    └── yolo11n.onnx        # YOLOv11-nano 模型
 ```
 
 ## 硬件检测
@@ -572,7 +496,7 @@ func (p *Probe) Probe() ProbeInfo {
 {
   "available": true,
   "engine_status": "running",
-  "model": "/data/models/yolov11n.onnx",
+  "model": "/data/models/yolo11n.onnx",
   "probe": {
     "available": true,
     "reason": ""
@@ -634,30 +558,9 @@ func (p *Probe) Probe() ProbeInfo {
 
 AI 检测系统在前端和后端都可配置，以适应不同的硬件能力和需求。
 
-### 前端配置
+### AI 配置
 
-**localStorage 设置：**
-```typescript
-interface AIConfig {
-  enabled: boolean;
-  confidenceThreshold: number; // 0.1-0.9
-  frameSkip: number; // 1-10 帧
-  emaAlpha: number; // 0.1-1.0
-}
-
-// 默认值
-const defaultConfig: AIConfig = {
-  enabled: true,
-  confidenceThreshold: 0.5,
-  frameSkip: 3,
-  emaAlpha: 0.3
-};
-```
-
-**运行时更新：**
-- 配置更改立即应用
-- 无需页面重启
-- 更改自动持久化
+AI 设置存储在 NVR 配置中，可在 **设置 → AI 检测** 中修改。浏览器模式的默认值为模型地址 `/models/yolo11n.onnx`、置信度阈值 `0.3`、每 `3` 帧检测一次、推理超时 `30000ms`。后端校验范围分别为置信度 `0.1–1.0`、抽帧间隔 `1–30`、超时 `1000–60000ms`。模型文件放在 `{storage.root_dir}/models/`。
 
 ### 后端配置
 
@@ -665,27 +568,9 @@ const defaultConfig: AIConfig = {
 - 最低：2GB RAM，2 CPU 核心，amd64/arm64
 - 推荐：4GB RAM，4+ CPU 核心
 
-**模型配置：**
-- 默认模型：`yolov11n.onnx`（4MB，80 个类别）
-- 替代模型：`yolov8s.onnx`（~70MB，更高精度）
-- 模型路径：`{dataDir}/models/{model_name}.onnx`
-
-**StreamHub 集成：**
-- AI 检测订阅 `"ai-{camera_id}"` 事件
-- 通过原子计数器进行帧跳过
-- 非阻塞处理，防止录制停滞
-
 ### 性能调优
 
-**前端设置：**
-- `frameSkip`：较高值减少 CPU 使用但降低检测频率
-- `confidenceThreshold`：较高值减少假阳性但可能漏检对象
-- `emaAlpha`：较低值创建更平滑的跟踪但响应更慢
-
-**后端设置：**
-- 帧处理率限制为最大 30 FPS
-- 多摄像头批处理
-- 资源约束时的优雅降级
+增大抽帧间隔可减少浏览器推理占用，但会降低检测频率；提高置信度阈值可减少低置信度结果，也可能漏掉目标。实际速度取决于浏览器、设备和模型。
 
 ## 测试
 

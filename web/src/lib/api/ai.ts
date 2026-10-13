@@ -98,7 +98,7 @@ import { apiRequest, getAuthToken } from './client';
 /** AI engine status response from GET /api/ai/status. */
 export interface AiStatusResponse {
   available: boolean;
-  backend: 'webhook' | 'disabled';
+  backend: 'browser' | 'webhook' | 'disabled';
   reason: string;
 }
 
@@ -157,7 +157,8 @@ export function subscribeAiEvents(
 /** AI backend configuration from GET /api/settings/ai. */
 export interface AiBackendConfig {
   enabled: boolean;
-  backend: 'webhook' | 'disabled';
+  backend: 'browser' | 'webhook' | 'disabled';
+  model_url: string;
   frame_skip_rate: number;
   confidence_threshold: number;
   inference_timeout_ms: number;

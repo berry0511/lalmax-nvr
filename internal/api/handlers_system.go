@@ -606,7 +606,6 @@ func (h *Handler) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-
 	// Update cleanup settings
 	if body.Cleanup != nil {
 		if body.Cleanup.RetentionDays != nil {
@@ -967,6 +966,7 @@ func (h *Handler) handleGetAISettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"enabled":              ai.Enabled,
 		"backend":              ai.Backend,
+		"model_url":            ai.ModelURL,
 		"frame_skip_rate":      ai.FrameSkipRate,
 		"confidence_threshold": ai.ConfidenceThreshold,
 		"inference_timeout_ms": ai.InferenceTimeoutMs,
@@ -984,6 +984,7 @@ func (h *Handler) handleUpdateAISettings(w http.ResponseWriter, r *http.Request)
 	var body struct {
 		Enabled             *bool                      `json:"enabled"`
 		Backend             *string                    `json:"backend"`
+		ModelURL            *string                    `json:"model_url"`
 		FrameSkipRate       *int                       `json:"frame_skip_rate"`
 		ConfidenceThreshold *float64                   `json:"confidence_threshold"`
 		InferenceTimeoutMs  *int                       `json:"inference_timeout_ms"`
@@ -995,21 +996,31 @@ func (h *Handler) handleUpdateAISettings(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if body.Backend != nil && *body.Backend != "browser" && *body.Backend != "webhook" && *body.Backend != "disabled" {
+		writeError(w, http.StatusBadRequest, "backend must be 'browser', 'webhook' or 'disabled'")
+		return
+	}
+	validatedModelURL := ""
+	if body.ModelURL != nil {
+		validatedModelURL = strings.TrimSpace(*body.ModelURL)
+		filename := strings.TrimPrefix(validatedModelURL, "/models/")
+		if !strings.HasPrefix(validatedModelURL, "/models/") || !aiModelFilenameRE.MatchString(filename) {
+			writeError(w, http.StatusBadRequest, "model_url must point to a local .onnx file under /models/")
+			return
+		}
+	}
 
 	// Update enabled
 	if body.Enabled != nil {
 		h.config.AI.Enabled = *body.Enabled
 	}
 
-	// Update backend (webhook mode only)
+	// Update inference backend.
 	if body.Backend != nil {
-		switch *body.Backend {
-		case "webhook", "disabled":
-			h.config.AI.Backend = *body.Backend
-		default:
-			writeError(w, http.StatusBadRequest, "backend must be 'webhook' or 'disabled'")
-			return
-		}
+		h.config.AI.Backend = *body.Backend
+	}
+	if body.ModelURL != nil {
+		h.config.AI.ModelURL = validatedModelURL
 	}
 
 	// Update frame skip rate

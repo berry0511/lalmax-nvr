@@ -14,6 +14,7 @@
   let total = $state(0);
   let loading = $state(true);
   let error = $state('');
+  let eventsRequestId = 0;
   let cameraFilter = $state(untrack(() => initialCameraId));
   let sourceFilter = $state('');
   let statusFilter = $state('');
@@ -21,6 +22,7 @@
   const pageSize = 20;
   let rules = $state<AlarmRule[]>([]);
   let ruleName = $state('');
+  let ruleCamera = $state('');
   let ruleAction = $state<'record' | 'webhook' | 'goto_preset'>('record');
   let ruleTarget = $state('');
   let ruleSource = $state('');
@@ -91,17 +93,15 @@
     if (event.status === 'acknowledged') return;
     try {
       await acknowledgeEvent(event.id);
-      events = events.map((item) =>
-        item.id === event.id
-          ? { ...item, status: 'acknowledged', acknowledged_at: new Date().toISOString() }
-          : item
-      );
+      // Reload from the server so status filters and the total remain correct.
+      await loadEvents();
     } catch (e) {
       error = e instanceof Error ? e.message : t('common.error');
     }
   }
 
   async function loadEvents() {
+    const requestId = ++eventsRequestId;
     loading = true;
     error = '';
     try {
@@ -112,12 +112,14 @@
         limit: pageSize,
         offset: page * pageSize,
       });
+      if (requestId !== eventsRequestId) return;
       events = response.events;
       total = response.total;
     } catch (e) {
+      if (requestId !== eventsRequestId) return;
       error = e instanceof Error ? e.message : t('common.error');
     } finally {
-      loading = false;
+      if (requestId === eventsRequestId) loading = false;
     }
   }
 
@@ -165,14 +167,27 @@
   });
 
   async function loadRules() {
-    try { rules = await listAlarmRules(); } catch { rules = []; }
+    try {
+      rules = await listAlarmRules();
+    } catch (e) {
+      error = e instanceof Error ? e.message : t('common.error');
+    }
+  }
+
+  async function removeRule(ruleId: number) {
+    try {
+      await deleteAlarmRule(ruleId);
+      await loadRules();
+    } catch (e) {
+      error = e instanceof Error ? e.message : t('common.error');
+    }
   }
 
   async function addRule() {
     try {
       await createAlarmRule({
         name: ruleName || ruleAction,
-        camera_id: cameraFilter,
+        camera_id: ruleCamera,
         source: ruleSource,
         action: ruleAction,
         action_target: ruleTarget,
@@ -239,6 +254,13 @@
       <h2 class="text-sm font-semibold th-text-primary mb-3">{t('events.rules.title')}</h2>
       <div class="flex flex-wrap gap-2 mb-3">
         <input class="input" style="max-width:10rem" placeholder={t('events.rules.name')} bind:value={ruleName} />
+        <label class="sr-only" for="event-rule-camera">{t('events.rules.camera')}</label>
+        <select id="event-rule-camera" class="input" style="max-width:12rem" bind:value={ruleCamera}>
+          <option value="">{t('events.rules.allCameras')}</option>
+          {#each cameras as camera}
+            <option value={camera.id}>{camera.name}</option>
+          {/each}
+        </select>
         <select class="input" style="max-width:8rem" bind:value={ruleSource}>
           <option value="">{t('events.filters.allSources')}</option>
           <option value="health">health</option>
@@ -257,7 +279,7 @@
       {#each rules as rule (rule.id)}
         <div class="flex items-center justify-between py-2 border-t th-border text-sm">
           <span>{rule.name} · {rule.action} {rule.action_target} · {rule.source || '*'} / {rule.camera_id || '*'}</span>
-          <button class="btn btn-ghost btn-sm" onclick={async () => { await deleteAlarmRule(rule.id); await loadRules(); }}>{t('recordings.page.delete')}</button>
+          <button class="btn btn-ghost btn-sm" onclick={() => removeRule(rule.id)}>{t('recordings.page.delete')}</button>
         </div>
       {/each}
     </div>

@@ -12,7 +12,9 @@ func SecurityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(self), geolocation=()")
 		// CSP: web players need cross-port media fetches/WebSockets to the local media server.
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src blob: data: 'self' https:; media-src blob: data: 'self' http: https:; connect-src 'self' http: https: ws: wss:")
+		// ONNX Runtime Web compiles WebAssembly in the browser. Keep eval-based
+		// JavaScript disabled while granting the narrower wasm compilation token.
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src blob: data: 'self' https:; media-src blob: data: 'self' http: https:; connect-src 'self' http: https: ws: wss:")
 		next.ServeHTTP(w, r)
 	})
 }

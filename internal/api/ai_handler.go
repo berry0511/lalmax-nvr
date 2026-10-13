@@ -4,20 +4,49 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/lalmax-pro/lalmax-nvr/internal/ai"
 	"github.com/lalmax-pro/lalmax-nvr/internal/ai/multimodal"
 	"github.com/lalmax-pro/lalmax-nvr/internal/ai/webhook"
 	"github.com/lalmax-pro/lalmax-nvr/internal/storage"
 )
 
+var aiModelFilenameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.onnx$`)
+
+// handleServeAIModel serves an operator-provided ONNX model from the data dir.
+func (h *Handler) handleServeAIModel(w http.ResponseWriter, r *http.Request) {
+	filename := chi.URLParam(r, "filename")
+	if !aiModelFilenameRE.MatchString(filename) || filepath.Base(filename) != filename {
+		http.NotFound(w, r)
+		return
+	}
+	if h.config == nil || strings.TrimSpace(h.config.Storage.RootDir) == "" {
+		http.NotFound(w, r)
+		return
+	}
+	modelPath := filepath.Join(h.config.Storage.RootDir, "models", filename)
+	info, err := os.Stat(modelPath)
+	if err != nil || !info.Mode().IsRegular() {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	http.ServeFile(w, r, modelPath)
+}
+
 // --- AI Manager interface for testability ---
 
 // AIManagerInterface abstracts the AI Manager for the handler.
-// Webhook mode: external ai-detector pushes detection results via POST /api/ai/webhook.
+// Browser and third-party detector results are accepted via POST /api/ai/webhook.
 type AIManagerInterface interface {
 	Status() ai.Status
 	OnDetection(cb webhook.CallbackFunc) string
@@ -50,6 +79,20 @@ func (h *Handler) handleGetAIStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	status := h.aiManager.Status()
+	if status.Backend == "browser" && status.Available && h.config != nil {
+		modelURL := strings.TrimSpace(h.config.AI.ModelURL)
+		filename := strings.TrimPrefix(modelURL, "/models/")
+		if !strings.HasPrefix(modelURL, "/models/") || !aiModelFilenameRE.MatchString(filename) {
+			status.Available = false
+			status.Reason = "浏览器 ONNX 模型路径无效"
+		} else {
+			modelPath := filepath.Join(h.config.Storage.RootDir, "models", filename)
+			if info, err := os.Stat(modelPath); err != nil || !info.Mode().IsRegular() {
+				status.Available = false
+				status.Reason = "浏览器 ONNX 模型未安装，请将模型放入数据目录/models/"
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, aiStatusResponse{
 		Available: status.Available,
 		Backend:   status.Backend,

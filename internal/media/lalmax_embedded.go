@@ -18,6 +18,7 @@ import (
 	lalmaxconfig "github.com/q191201771/lalmax/config"
 	"github.com/q191201771/lalmax/jt1078"
 	lalmaxserver "github.com/q191201771/lalmax/server"
+	"github.com/q191201771/naza/pkg/nazalog"
 
 	"github.com/lalmax-pro/lalmax-nvr/internal/config"
 )
@@ -96,6 +97,7 @@ func lalmaxListenAddr(httpAddr string) string {
 }
 
 func NewEmbeddedLalmax(cfg EmbeddedLalmaxConfig, svrOpts ...lalmaxserver.LalMaxServerOption) (*EmbeddedLalmax, error) {
+	installLalLogBridge()
 	if cfg.HTTPAddr == "" {
 		cfg.HTTPAddr = config.DefaultLalmaxHTTPAddr
 	}
@@ -125,6 +127,34 @@ func NewEmbeddedLalmax(cfg EmbeddedLalmaxConfig, svrOpts ...lalmaxserver.LalMaxS
 		return nil, err
 	}
 	return &EmbeddedLalmax{LalmaxHTTP: httpEngine, cfg: cfg, server: svr, httpEngine: httpEngine, svrOpts: svrOpts}, nil
+}
+
+// installLalLogBridge routes embedded lal/lalmax logs through the NVR logger,
+// so they share the service-log file and in-memory ring exposed by the API.
+func installLalLogBridge() {
+	option := base.Log.GetOption()
+	option.HookBackendOutFn = lalLogHook()
+	_ = base.Log.Init(func(current *nazalog.Option) { *current = option })
+}
+
+func lalLogHook() nazalog.HookBackendOutFn {
+	return func(level nazalog.Level, line []byte) {
+		var slogLevel slog.Level
+		switch level {
+		case nazalog.LevelTrace, nazalog.LevelDebug:
+			slogLevel = slog.LevelDebug
+		case nazalog.LevelWarn:
+			slogLevel = slog.LevelWarn
+		case nazalog.LevelError, nazalog.LevelFatal, nazalog.LevelPanic:
+			slogLevel = slog.LevelError
+		default:
+			slogLevel = slog.LevelInfo
+		}
+		slog.Log(context.Background(), slogLevel, "lal/lalmax",
+			"component", "lal/lalmax",
+			"lal_level", level.ReadableString(),
+			"lal_message", strings.TrimSpace(string(line)))
+	}
 }
 
 // RegisterHookPlugin registers a hook plugin with the embedded lalmax server.

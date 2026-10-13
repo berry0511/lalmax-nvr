@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -73,6 +75,78 @@ func TestGetAIStatus_WebhookBackend(t *testing.T) {
 	parseJSON(t, rr, &resp)
 	require.True(t, resp.Available)
 	require.Equal(t, "webhook", resp.Backend)
+}
+
+func TestGetAIStatus_BrowserBackend(t *testing.T) {
+	t.Parallel()
+	h := setupAIHandlerWithManager(t, config.AIConfig{Enabled: true, Backend: "browser"})
+	dataDir := t.TempDir()
+	h.config = &config.Config{
+		Storage: config.StorageConfig{RootDir: dataDir},
+		AI:      config.AIConfig{Enabled: true, Backend: "browser", ModelURL: "/models/yolo11n.onnx"},
+	}
+	modelDir := filepath.Join(dataDir, "models")
+	require.NoError(t, os.MkdirAll(modelDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(modelDir, "yolo11n.onnx"), []byte("model"), 0o644))
+	rr := doJSONRequest(t, h.Routes(), http.MethodGet, "/api/ai/status", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var resp aiStatusResponse
+	parseJSON(t, rr, &resp)
+	require.True(t, resp.Available)
+	require.Equal(t, "browser", resp.Backend)
+
+	require.NoError(t, os.Remove(filepath.Join(modelDir, "yolo11n.onnx")))
+	rr = doJSONRequest(t, h.Routes(), http.MethodGet, "/api/ai/status", nil)
+	parseJSON(t, rr, &resp)
+	require.False(t, resp.Available)
+	require.Contains(t, resp.Reason, "模型未安装")
+}
+
+func TestServeAIModel(t *testing.T) {
+	t.Parallel()
+	db, store := setupTestDB(t)
+	h := TestHandler(db, store)
+	dataDir := t.TempDir()
+	h.config = &config.Config{Storage: config.StorageConfig{RootDir: dataDir}}
+	modelDir := filepath.Join(dataDir, "models")
+	require.NoError(t, os.MkdirAll(modelDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(modelDir, "test.onnx"), []byte("onnx-model"), 0o644))
+
+	rr := doJSONRequest(t, h.Routes(), http.MethodGet, "/models/test.onnx", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, "onnx-model", rr.Body.String())
+	require.Equal(t, "application/octet-stream", rr.Header().Get("Content-Type"))
+
+	missing := doJSONRequest(t, h.Routes(), http.MethodGet, "/models/missing.onnx", nil)
+	require.Equal(t, http.StatusNotFound, missing.Code)
+	invalid := doJSONRequest(t, h.Routes(), http.MethodGet, "/models/../test.onnx", nil)
+	require.NotEqual(t, http.StatusOK, invalid.Code)
+}
+
+func TestUpdateAISettings_BrowserModeAndModelURL(t *testing.T) {
+	t.Parallel()
+	db, store := setupTestDB(t)
+	h := TestHandler(db, store)
+	dataDir := t.TempDir()
+	h.config = &config.Config{Storage: config.StorageConfig{RootDir: dataDir}}
+	h.configPath = filepath.Join(dataDir, "lalmax-nvr.yaml")
+
+	rr := doJSONRequest(t, h.Routes(), http.MethodPut, "/api/settings/ai", map[string]any{
+		"enabled":         true,
+		"backend":         "browser",
+		"model_url":       "/models/custom-yolo.onnx",
+		"frame_skip_rate": 4,
+	})
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.True(t, h.config.AI.Enabled)
+	require.Equal(t, "browser", h.config.AI.Backend)
+	require.Equal(t, "/models/custom-yolo.onnx", h.config.AI.ModelURL)
+	require.Equal(t, 4, h.config.AI.FrameSkipRate)
+
+	invalid := doJSONRequest(t, h.Routes(), http.MethodPut, "/api/settings/ai", map[string]any{
+		"model_url": "https://example.com/model.onnx",
+	})
+	require.Equal(t, http.StatusBadRequest, invalid.Code)
 }
 
 func TestGetAIStatus_NoManager(t *testing.T) {

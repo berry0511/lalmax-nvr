@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -191,6 +192,10 @@ func (h *Handler) handleCreateAlarmRule(w http.ResponseWriter, r *http.Request) 
 	}
 	if rule.Name == "" {
 		rule.Name = rule.Action
+	}
+	if (rule.Action == model.AlarmActionWebhook || rule.Action == model.AlarmActionGotoPreset) && strings.TrimSpace(rule.ActionTarget) == "" {
+		writeError(w, http.StatusBadRequest, "action_target is required for this action")
+		return
 	}
 	rule.Enabled = true
 	if err := h.db.InsertAlarmRule(r.Context(), &rule); err != nil {

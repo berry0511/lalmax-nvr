@@ -486,6 +486,38 @@ func TestCameraList_IncludeArchivedForRecordings(t *testing.T) {
 	require.True(t, all[0].Archived)
 }
 
+func TestSyncCameraStatusWithStream(t *testing.T) {
+	t.Parallel()
+
+	t.Run("idle or missing stream is offline", func(t *testing.T) {
+		t.Parallel()
+		h := &Handler{mediaEngine: &stubMediaEngine{
+			streamsByID: map[string]*media.StreamInfo{"cam-stream": nil},
+		}}
+		row := &storage.CameraRow{ID: "cam-1", StreamID: "cam-stream", Protocol: "onvif", Status: "recording"}
+
+		h.syncCameraStatusWithStream(context.Background(), row)
+
+		require.Equal(t, "offline", string(row.Status))
+	})
+
+	t.Run("active stream stays recording and supplies codec", func(t *testing.T) {
+		t.Parallel()
+		h := &Handler{mediaEngine: &stubMediaEngine{
+			streamsByID: map[string]*media.StreamInfo{
+				"cam-stream": {StreamID: "cam-stream", Active: true, VideoCodec: "h264"},
+			},
+		}}
+		row := &storage.CameraRow{ID: "cam-1", StreamID: "cam-stream", Protocol: "onvif", Status: "reconnecting"}
+
+		h.syncCameraStatusWithStream(context.Background(), row)
+
+		require.Equal(t, "recording", string(row.Status))
+		require.Equal(t, "h264", row.Encoding)
+		require.Equal(t, "H264", row.StreamEncoding)
+	})
+}
+
 // --- handleGetCamera tests ---
 
 func TestGetCamera_NotFound(t *testing.T) {
