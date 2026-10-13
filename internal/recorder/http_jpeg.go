@@ -20,6 +20,8 @@ import (
 	"github.com/lalmax-pro/lalmax-nvr/internal/event"
 	"github.com/lalmax-pro/lalmax-nvr/internal/metrics"
 	"github.com/lalmax-pro/lalmax-nvr/internal/model"
+	"github.com/lalmax-pro/lalmax-nvr/internal/observability"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 var httpJpegLogger = slog.Default().With("component", "http-jpeg-recorder")
@@ -140,7 +142,7 @@ func (r *HTTPJPEGRecorder) Start(ctx context.Context) error {
 	if r.status == model.StatusRecording || r.status == model.StatusReconnecting {
 		return fmt.Errorf("recorder for %q already running", r.cfg.CameraID)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(observability.DetachedContext(ctx))
 	r.cancel = cancel
 	r.done = make(chan struct{})
 	r.watchdogDone = make(chan struct{})
@@ -190,6 +192,7 @@ func (r *HTTPJPEGRecorder) run(ctx context.Context) {
 		r.mu.Lock()
 		r.cancelStream = streamCancel
 		r.mu.Unlock()
+		r.retryCount = retryCount
 		err, connected := r.connectAndStream(streamCtx)
 		r.mu.Lock()
 		r.cancelStream = nil
@@ -204,7 +207,7 @@ func (r *HTTPJPEGRecorder) run(ctx context.Context) {
 		}
 		retryCount++
 		backoff := TieredBackoffWithJitter(retryCount)
-		httpJpegLogger.Error("stream error, reconnecting", "camera_id", r.cfg.CameraID, "error", err, "backoff", backoff, "attempt", retryCount)
+		httpJpegLogger.ErrorContext(streamCtx, "stream error, reconnecting", "camera_id", r.cfg.CameraID, "error", err, "backoff", backoff, "attempt", retryCount)
 		r.recordError("connection")
 
 		// Track disconnect info for the first segment after recovery.
@@ -272,7 +275,18 @@ func (r *HTTPJPEGRecorder) connectAndStream(ctx context.Context) (error, bool) {
 	}
 
 	httpJpegLogger.Info("connecting to MJPEG stream", "camera_id", r.cfg.CameraID, "url", r.cfg.URL)
-	resp, err := r.client.Do(req)
+	var resp *http.Response
+	_, err = observability.RunBusinessOperation(ctx, "recorder.http.connect", func(context.Context) error {
+		var requestErr error
+		resp, requestErr = r.client.Do(req)
+		return requestErr
+	},
+		attribute.String("nvr.camera.id", r.cfg.CameraID),
+		attribute.String("nvr.stream.id", r.cfg.CameraID),
+		attribute.String("nvr.media.protocol", "http"),
+		attribute.String("nvr.media.encoding", "jpeg"),
+		attribute.Int("nvr.connection.retry_count", r.retryCount),
+	)
 	if err != nil {
 		return fmt.Errorf("http connect: %w", err), false
 	}

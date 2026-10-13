@@ -3,18 +3,19 @@
   import {
     getStats, listCameras, healthCheck, getSystemStats, getMergeStatus, getMergePending,
     getLocalNetworkInterfaces, getStatsTrends,
-    getSystemMetricsHistory, getHourlyStats, getCameraUptimeStats, getAPIObservability,
+    getSystemMetricsHistory, getHourlyStats, getCameraUptimeStats, getAPIObservability, getRecentTraces, getTrace,
   } from '$lib/api';
   import type {
     StorageStats, Camera, HealthResponse, SystemStats, MergeStatus, MergePending,
     NetworkInterface, SystemMetricSample, HourlyStats, CameraUptimeStat, APIObservabilityResponse,
+    TraceListResponse, TraceDetailResponse,
   } from '$lib/api';
   import { t } from '$lib/i18n';
   import { formatFileSize, formatDate } from '$lib/format';
 
   import {
     HardDrive, BarChart3, Video, CameraIcon, Cpu, MemoryStick, Wifi,
-    ChevronDown, ChevronUp, GitMerge, Activity, Clock, Server, Gauge,
+    ChevronDown, ChevronUp, GitMerge, Activity, Clock, Server, Gauge, ExternalLink, X,
   } from 'lucide-svelte';
   import {
     loadChart, createTrendChart, createCameraChart, aggregateCameraTotals, BAR_COLORS,
@@ -76,6 +77,11 @@
   let apiLatencyChart: any = null;
   let apiAbortController: AbortController | null = null;
   let apiRefreshInterval: number;
+  let traceList = $state<TraceListResponse | null>(null);
+  let selectedTrace = $state<TraceDetailResponse | null>(null);
+  let traceDialogOpen = $state(false);
+  let traceLoading = $state(false);
+  let traceError = $state('');
 
   // ── Recordings tab ────────────────────────────────────────────────────────
 
@@ -222,6 +228,7 @@
     apiError = '';
     try {
       apiObservability = await getAPIObservability(apiWindow, controller.signal);
+      traceList = await getRecentTraces(50);
       if (!ChartJs) ChartJs = await loadChart();
       window.setTimeout(() => buildAPICharts(), 30);
     } catch (e) {
@@ -233,6 +240,37 @@
         apiAbortController = null;
       }
     }
+  }
+
+  async function openTrace(traceID: string) {
+    traceDialogOpen = true;
+    traceLoading = true;
+    traceError = '';
+    selectedTrace = null;
+    try { selectedTrace = await getTrace(traceID); }
+    catch (e) { traceError = e instanceof Error ? e.message : t('stats.traceLoadFailed'); }
+    finally { traceLoading = false; }
+  }
+
+  function closeTrace() {
+    traceDialogOpen = false;
+  }
+
+  function handleTraceDialogKeydown(event: KeyboardEvent) {
+    if (traceDialogOpen && event.key === 'Escape') closeTrace();
+  }
+
+  function externalTraceURL(traceID: string): string {
+    const template = traceList?.external_trace_url_template;
+    return template ? template.replaceAll('{trace_id}', encodeURIComponent(traceID)) : '';
+  }
+
+  function traceTime(unixNano: number): string {
+    return new Date(unixNano).toLocaleString();
+  }
+
+  function traceDuration(start: number, end: number): string {
+    return formatLatency(Math.max(0, end - start));
   }
 
   async function loadHourlyStats() {
@@ -499,6 +537,8 @@
     if (hourlyChart) { hourlyChart.destroy(); hourlyChart = null; }
   });
 </script>
+
+<svelte:window onkeydown={handleTraceDialogKeydown} />
 
 <div class="min-h-screen th-bg-primary">
   <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -950,7 +990,9 @@
                           <td class="font-mono text-xs th-text-primary whitespace-nowrap">{item.route}</td>
                           <td><span class="badge badge-error">{item.status}</span></td>
                           <td class="th-text-secondary whitespace-nowrap">{formatLatency(item.duration_ms)}</td>
-                          <td class="font-mono text-xs th-text-muted" title={item.trace_id || ''}>{item.trace_id ? item.trace_id.slice(0, 16) : '—'}</td>
+                          <td class="font-mono text-xs th-text-muted" title={item.trace_id || ''}>
+                            {#if item.trace_id}<button class="hover:underline th-text-primary" onclick={() => openTrace(item.trace_id!)}>{item.trace_id.slice(0, 16)}</button>{:else}—{/if}
+                          </td>
                         </tr>
                       {/each}
                     </tbody>
@@ -958,12 +1000,106 @@
                 </div>
               </div>
             {/if}
+
+            <div class="card border th-border overflow-hidden">
+              <div class="p-5 border-b th-border flex items-center justify-between gap-3 flex-wrap">
+                <div>
+                  <h3 class="text-lg font-semibold th-text-primary">{t('stats.tracesTitle')}</h3>
+                  <p class="text-xs th-text-muted mt-0.5">{t('stats.tracesHint')}</p>
+                </div>
+              </div>
+              {#if traceList && traceList.traces.length > 0}
+                <div class="table-container border-0 rounded-none overflow-x-auto">
+                  <table class="table">
+                    <thead><tr><th>{t('stats.apiTime')}</th><th>Trace ID</th><th>{t('stats.traceSpans')}</th><th>{t('stats.traceErrors')}</th><th>{t('stats.apiDuration')}</th><th></th></tr></thead>
+                    <tbody>
+                      {#each traceList.traces as trace}
+                        <tr class="hover:th-bg-hover">
+                          <td class="text-xs th-text-muted whitespace-nowrap">{traceTime(trace.end_time)}</td>
+                          <td class="font-mono text-xs th-text-primary">{trace.trace_id.slice(0, 16)}…</td>
+                          <td class="th-text-secondary">{trace.span_count}</td>
+                          <td class={trace.error_count > 0 ? 'text-[var(--color-danger)] font-semibold' : 'th-text-muted'}>{trace.error_count}</td>
+                          <td class="th-text-secondary">{traceDuration(trace.start_time, trace.end_time)}</td>
+                          <td><button class="text-sm text-[var(--color-primary)] hover:underline" onclick={() => openTrace(trace.trace_id)}>{t('stats.viewTrace')}</button></td>
+                        </tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                </div>
+              {:else if !apiLoading}
+                <div class="p-8 text-center th-text-muted">{t('stats.tracesEmpty')}</div>
+              {/if}
+            </div>
           {:else if apiLoading}
             <div class="card p-12 text-center border th-border">
               <div class="spinner spinner-lg mx-auto mb-3"></div>
               <p class="th-text-muted">{t('common.loading')}</p>
             </div>
           {/if}
+        </div>
+      {/if}
+
+      {#if traceDialogOpen}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-3 sm:p-6"
+          role="presentation"
+          onclick={(event) => { if (event.target === event.currentTarget) closeTrace(); }}
+        >
+          <!-- svelte-ignore a11y_click_events_have_key_events -->
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="card w-full max-w-6xl max-h-[92vh] overflow-hidden border th-border shadow-2xl flex flex-col"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="trace-dialog-title"
+            tabindex="-1"
+            onclick={(event) => event.stopPropagation()}
+          >
+            <header class="flex items-start justify-between gap-4 p-5 border-b th-border">
+              <div class="min-w-0">
+                <h2 id="trace-dialog-title" class="text-lg font-semibold th-text-primary">{t('stats.tracesTitle')}</h2>
+                {#if selectedTrace}
+                  <p class="mt-1 font-mono text-xs th-text-muted break-all">{selectedTrace.trace_id}</p>
+                {/if}
+              </div>
+              <div class="flex items-center gap-2 shrink-0">
+                {#if selectedTrace && externalTraceURL(selectedTrace.trace_id)}
+                  <a class="inline-flex items-center gap-2 px-3 py-2 rounded-md border th-border th-text-secondary hover:th-text-primary text-sm"
+                    href={externalTraceURL(selectedTrace.trace_id)} target="_blank" rel="noopener noreferrer">
+                    {t('stats.openExternalTrace')} <ExternalLink size={15} />
+                  </a>
+                {/if}
+                <button class="btn btn-ghost" onclick={closeTrace} aria-label={t('stats.closeTrace')}><X size={18} /></button>
+              </div>
+            </header>
+
+            <div class="overflow-auto">
+              {#if traceLoading}
+                <div class="p-10 flex items-center justify-center gap-3 th-text-muted"><span class="spinner"></span>{t('common.loading')}</div>
+              {:else if traceError}
+                <div class="p-6 text-sm text-[var(--color-danger)]" role="alert">{traceError}</div>
+              {:else if selectedTrace}
+                <div class="table-container border-0 rounded-none overflow-x-auto">
+                  <table class="table">
+                    <thead><tr><th>Service</th><th>{t('stats.traceSpan')}</th><th>{t('stats.traceParent')}</th><th>{t('stats.apiDuration')}</th><th>{t('stats.apiStatus')}</th><th>{t('stats.traceAttributes')}</th></tr></thead>
+                    <tbody>
+                      {#each selectedTrace.spans as span}
+                        <tr>
+                          <td class="text-xs th-text-secondary">{span.service || '—'}</td>
+                          <td class="font-mono text-xs th-text-primary">{span.name}<div class="th-text-muted">{span.kind}</div></td>
+                          <td class="font-mono text-xs th-text-muted">{span.parent_span_id ? span.parent_span_id.slice(0, 8) : t('stats.traceRoot')}</td>
+                          <td class="text-xs th-text-secondary whitespace-nowrap">{traceDuration(span.start_time, span.end_time)}</td>
+                          <td class="text-xs {span.status_code === 2 ? 'text-[var(--color-danger)]' : 'th-text-muted'}">{span.status || t('stats.traceStatusOK')}</td>
+                          <td><details><summary class="cursor-pointer text-xs th-text-secondary">{t('stats.traceDetails')}</summary><pre class="mt-2 max-w-lg whitespace-pre-wrap break-all text-xs th-text-muted">{t('stats.traceAttributes')}: {span.attributes}\n{t('stats.traceEvents')}: {span.events}\n{t('stats.traceLinks')}: {span.links}</pre></details></td>
+                        </tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                </div>
+              {/if}
+            </div>
+          </div>
         </div>
       {/if}
 

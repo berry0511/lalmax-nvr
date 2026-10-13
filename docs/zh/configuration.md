@@ -91,14 +91,20 @@ observability:
   log_level: "info"              # 日志级别: debug, info, warn, error
   log_format: "text"             # 日志格式: json 或 text
   enable_pprof: false            # 启用 pprof 调试端点
+  trace_retention: "24h"         # 本地调用链保留时长
+  max_local_traces: 10000        # 本地最多保留的调用链条数
+  local_trace_enabled: true      # 是否保存本地调用链；也可在 Web 设置中切换
+  trace_ui_url_template: ""      # 第三方 Jaeger/Tempo 地址模板，需包含 {trace_id}
   otlp:
-    enabled: false               # 是否导出到外部 OTLP/HTTP Collector
+    enabled: false               # 是否导出 traces、metrics 和 logs 到 OTLP/HTTP Collector
     endpoint: "http://127.0.0.1:4318"
     service_name: "lalmax-nvr"
     traces_enabled: true
     metrics_enabled: true
+    logs_enabled: true
     timeout: "10s"
     metrics_export_interval: "30s"
+    logs_export_interval: "1s"
 version: "1.0"
 ```
 
@@ -550,13 +556,25 @@ HLS 播放与录像拉流相互独立：关闭 `hls.enabled` 或启用按需切�
 ### `observability.otlp`
 
 - **描述**: 可选的外部 OTLP/HTTP 导出配置。应用仅从本配置读取，不需要也不读取 `OTEL_*` 环境变量
+- 本地调用链会写入应用数据库，默认保留 24 小时、最多 10000 条；超过任一限制后定时清理。写入通过异步队列执行，队列满时会丢弃新 span 并记录警告
+- **`local_trace_enabled`**: 控制是否将新 span 保存到本地数据库，默认 `true`；可在 Web 设置的“调用链”页签中即时切换。关闭后已保存的调用链不会删除
+- **`trace_ui_url_template`**: 可选的第三方 UI URL 模板，必须是 HTTP(S) URL 并包含 `{trace_id}`。例如 `http://localhost:16686/trace/{trace_id}`；内部页面可同时查看本地 span 和跳转到第三方 Trace UI
 - **`enabled`**: 是否启用外部导出，默认 `false`；关闭时前端观测 API 仍正常工作
-- **`endpoint`**: Collector 基础 URL，默认 `http://127.0.0.1:4318`。应用会自动追加 `/v1/traces` 和 `/v1/metrics`
+- **`endpoint`**: Collector 基础 URL，默认 `http://127.0.0.1:4318`。应用会自动追加 `/v1/traces`、`/v1/metrics` 和 `/v1/logs`
 - **`service_name`**: OTel 服务名，默认 `lalmax-nvr`
-- **`traces_enabled` / `metrics_enabled`**: 分别控制链路与指标导出，默认均为 `true`；启用 OTLP 时至少开启一项
+- 每次进程启动会生成唯一的 `service.instance.id`，用于区分同一服务的不同实例和重启周期
+- **`traces_enabled` / `metrics_enabled` / `logs_enabled`**: 分别控制链路、指标与结构化日志导出，默认均为 `true`；启用 OTLP 时至少开启一项
 - **`timeout`**: 单次导出超时，默认 `10s`
 - **`metrics_export_interval`**: 指标批量导出周期，默认 `30s`
+- **`logs_export_interval`**: 日志批量导出周期，默认 `1s`
 - **`headers`**: 可选的 HTTP 请求头映射，可用于 Collector 鉴权。请将包含令牌的配置文件按敏感文件保护
+- traces 和 logs 共用 W3C Trace Context；请求日志会包含对应的 trace/span ID，便于把错误日志关联到请求链路
+- 业务 span 覆盖摄像头新增、更新、启动和 ONVIF 准备，媒体拉流启动，录像计划协调、录像任务创建、连接重试与录像分段落库；后台录像器会保留启动时的 trace 上下文，但不受 HTTP 请求取消影响
+- 业务 span 使用 `nvr.*` 属性关联 `camera.id`、`stream.id`、协议、编码、重试次数和停止原因。不会导出完整流地址、用户名或密码
+- 使用 HTTP 模式调用外置 lalmax 时会创建客户端 span，并传播 `traceparent` / `tracestate`；只记录请求方法、主机、路径和状态码，不记录查询参数或 baggage。外置 lalmax 也需启用 OpenTelemetry HTTP 服务端埋点，才能把两端 span 合并为同一条 trace
+- `embedded` 模式下，内置 lalmax 的控制 API、HLS/FMP4 和 WebRTC HTTP 请求会创建服务端 span；发布、订阅、拉流等生命周期事件会携带短事件 span 的 trace context，经内部 SSE 回到 NVR。长连接型 SSE 和 FLV 请求不创建覆盖整个连接的长 span
+- 指标包含 API 请求延迟、状态码和响应大小，以及 Go goroutine、内存、GC 和调度指标
+- Go OTLP logs SDK 仍处于实验阶段，升级 OpenTelemetry Go 依赖时需留意兼容性变化
 
 ## 媒体引擎配置
 
@@ -986,10 +1004,16 @@ hls:
   max_streams: 4
 observability:
   log_level: "info"
+  trace_retention: "24h"
+  max_local_traces: 10000
+  trace_ui_url_template: "http://localhost:16686/trace/{trace_id}"
   otlp:
     enabled: true
     endpoint: "http://otel-collector:4318"
     service_name: "lalmax-nvr"
     traces_enabled: true
     metrics_enabled: true
+    logs_enabled: true
+    metrics_export_interval: "30s"
+    logs_export_interval: "1s"
 ```

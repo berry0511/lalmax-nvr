@@ -302,7 +302,11 @@ func quoteMySQLKeyIdentifier(query string) string {
 				i++
 			}
 			word := query[start : i+1]
-			if strings.EqualFold(word, "key") {
+			if strings.EqualFold(word, "loop") {
+				out.WriteByte('`')
+				out.WriteString(word)
+				out.WriteByte('`')
+			} else if strings.EqualFold(word, "key") {
 				if strings.EqualFold(previousWord, "primary") || strings.EqualFold(previousWord, "foreign") || strings.EqualFold(previousWord, "duplicate") {
 					out.WriteString(word)
 				} else {

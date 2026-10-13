@@ -244,15 +244,21 @@ hls:
 observability:
   log_level: "info"                # Log level: debug, info, warn, error (default: info)
   log_format: "text"               # Log format: json or text (default: text)
+  trace_retention: "24h"           # Retain local searchable traces for this duration
+  max_local_traces: 10000          # Maximum number of traces retained in the application database
+  local_trace_enabled: true        # Store spans locally; can also be toggled in Web Settings
+  trace_ui_url_template: ""        # Optional Jaeger/Tempo URL with {trace_id}, e.g. http://localhost:16686/trace/{trace_id}
   # enable_pprof: false            # Enable pprof debug endpoints (default: false)
   otlp:
-    enabled: false                 # Export traces/metrics to an external collector
-    endpoint: "http://127.0.0.1:4318" # OTLP/HTTP base URL; /v1/traces and /v1/metrics are appended
+    enabled: false                 # Export traces, metrics, and logs to an external collector
+    endpoint: "http://127.0.0.1:4318" # OTLP/HTTP base URL; signal paths are appended
     service_name: "lalmax-nvr"
     traces_enabled: true
     metrics_enabled: true
+    logs_enabled: true
     timeout: "10s"
     metrics_export_interval: "30s"
+    logs_export_interval: "1s"
     # headers:                     # Optional collector authentication headers
     #   Authorization: "Bearer replace-me"
 

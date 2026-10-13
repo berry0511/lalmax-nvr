@@ -25,6 +25,8 @@ export {
   getHourlyStats,
   getCameraUptimeStats,
   getAPIObservability,
+  getRecentTraces,
+  getTrace,
 } from './client';
 
 export type {
@@ -47,6 +49,10 @@ export type {
   APIObservabilityRoute,
   APIObservabilityError,
   APIObservabilityResponse,
+  TraceSummary,
+  TraceSpan,
+  TraceListResponse,
+  TraceDetailResponse,
 } from './client';
 
 export { getDLNASettings, updateDLNASettings } from './dlna';

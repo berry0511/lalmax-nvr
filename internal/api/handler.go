@@ -198,6 +198,7 @@ type Handler struct {
 	logRing           *middleware.LogRing
 	serviceLogPath    string
 	dlnaApply         func(context.Context) error
+	localTraceApply   func(bool)
 	iptvSvc           *iptv.Service
 	embySvc           *emby.Service
 }
@@ -236,6 +237,7 @@ func (h *Handler) SetServiceLogPath(path string) {
 
 // SetDLNAApply registers the callback used when the web UI toggles DLNA.
 func (h *Handler) SetDLNAApply(fn func(context.Context) error) { h.dlnaApply = fn }
+func (h *Handler) SetLocalTraceEnabled(fn func(bool))          { h.localTraceApply = fn }
 
 // SetIPTVService attaches the independent IPTV module.
 func (h *Handler) SetIPTVService(svc *iptv.Service) { h.iptvSvc = svc }
@@ -476,6 +478,8 @@ func (h *Handler) Routes() http.Handler {
 		r.Get("/api/stats/hourly", h.handleHourlyStats)
 		r.Get("/api/stats/camera-uptime", h.handleCameraUptimeStats)
 		r.Get("/api/observability/api", h.handleAPIObservability)
+		r.Get("/api/observability/traces", h.handleListObservabilityTraces)
+		r.Get("/api/observability/traces/{traceID}", h.handleGetObservabilityTrace)
 		r.Get("/api/network", h.handleGetNetworkInterfaces)
 		r.Get("/api/recording-plans", h.handleListRecordingPlans)
 		r.With(middleware.RequireOperatePermission()).Post("/api/recording-plans", h.handleCreateRecordingPlan)

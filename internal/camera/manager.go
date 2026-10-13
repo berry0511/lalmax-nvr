@@ -17,10 +17,12 @@ import (
 	"github.com/lalmax-pro/lalmax-nvr/internal/merge"
 	"github.com/lalmax-pro/lalmax-nvr/internal/metrics"
 	"github.com/lalmax-pro/lalmax-nvr/internal/model"
+	"github.com/lalmax-pro/lalmax-nvr/internal/observability"
 	"github.com/lalmax-pro/lalmax-nvr/internal/onvif"
 	"github.com/lalmax-pro/lalmax-nvr/internal/recorder"
 	"github.com/lalmax-pro/lalmax-nvr/internal/storage"
 	"github.com/lalmax-pro/lalmax-nvr/internal/xiaomi"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 var logger = slog.Default().With("component", "camera-manager")
@@ -991,8 +993,21 @@ func (cm *CameraManager) startRecorder(ctx context.Context, cam config.CameraCon
 }
 
 // startRecorderHeld is startRecorder with the per-camera lifecycle lock already held.
-func (cm *CameraManager) startRecorderHeld(ctx context.Context, cam config.CameraConfig, segDur time.Duration) error {
-	preparedCam, err := cm.prepareCameraForStart(ctx, cam)
+func (cm *CameraManager) startRecorderHeld(ctx context.Context, cam config.CameraConfig, segDur time.Duration) (retErr error) {
+	ctx, span := observability.StartBusinessSpan(ctx, "camera.start",
+		attribute.String("nvr.camera.id", cam.ID),
+		attribute.String("nvr.stream.id", cm.ingestStreamID(cam)),
+		attribute.String("nvr.media.protocol", string(cam.Protocol)),
+		attribute.String("nvr.media.encoding", strings.ToLower(cam.Encoding)),
+	)
+	defer func() { observability.EndBusinessSpan(span, retErr) }()
+
+	prepareCtx, prepareSpan := observability.StartBusinessSpan(ctx, "camera.prepare",
+		attribute.String("nvr.camera.id", cam.ID),
+		attribute.String("nvr.media.protocol", string(cam.Protocol)),
+	)
+	preparedCam, err := cm.prepareCameraForStart(prepareCtx, cam)
+	observability.EndBusinessSpan(prepareSpan, err)
 	if err != nil {
 		return fmt.Errorf("camera %q: failed to prepare camera: %w", cam.ID, err)
 	}
@@ -1001,11 +1016,24 @@ func (cm *CameraManager) startRecorderHeld(ctx context.Context, cam config.Camer
 		return fmt.Errorf("camera %q: failed to persist prepared camera state: %w", cam.ID, err)
 	}
 
-	if err := cm.startMediaPullLocked(ctx, cam); err != nil {
+	pullCtx, pullSpan := observability.StartBusinessSpan(ctx, "media.pull.start",
+		attribute.String("nvr.camera.id", cam.ID),
+		attribute.String("nvr.stream.id", cm.ingestStreamID(cam)),
+		attribute.String("nvr.media.protocol", string(cam.Protocol)),
+	)
+	err = cm.startMediaPullLocked(pullCtx, cam)
+	observability.EndBusinessSpan(pullSpan, err)
+	if err != nil {
 		return fmt.Errorf("camera %q: failed to start media pull: %w", cam.ID, err)
 	}
 	if cm.groupCovers(cam) {
-		return cm.startGroupRecording(cam)
+		_, groupSpan := observability.StartBusinessSpan(ctx, "recording.group.attach",
+			attribute.String("nvr.camera.id", cam.ID),
+			attribute.String("nvr.stream.id", cm.ingestStreamID(cam)),
+		)
+		retErr = cm.startGroupRecording(ctx, cam)
+		observability.EndBusinessSpan(groupSpan, retErr)
+		return retErr
 	}
 	if cm.RecordsViaTask(cam) {
 		logger.Info("camera ingest ready; recording follows the stream plan", "camera_id", cam.ID, "stream_id", cm.ingestStreamID(cam))
@@ -1022,9 +1050,17 @@ func (cm *CameraManager) startRecorderHeld(ctx context.Context, cam config.Camer
 		return fmt.Errorf("camera %q: protocol %q does not support recording", cam.ID, cam.Protocol)
 	}
 
-	// Recorders derive their run context from context.Background() internally,
-	// so their lifecycle is independent of this ctx (e.g. HTTP request context).
-	if err := rec.Start(ctx); err != nil {
+	// Recorders detach cancellation from this operation context but retain its
+	// trace and baggage, so their lifecycle is independent of an HTTP request.
+	recorderCtx, recorderSpan := observability.StartBusinessSpan(ctx, "recorder.start",
+		attribute.String("nvr.camera.id", cam.ID),
+		attribute.String("nvr.stream.id", cm.ingestStreamID(cam)),
+		attribute.String("nvr.media.protocol", string(cam.Protocol)),
+		attribute.String("nvr.media.encoding", strings.ToLower(cam.Encoding)),
+	)
+	err = rec.Start(recorderCtx)
+	observability.EndBusinessSpan(recorderSpan, err)
+	if err != nil {
 		_ = cm.stopMediaPullLocked(ctx, cam.ID)
 		if cm.metrics != nil {
 			cm.metrics.CameraConnectionErrorsTotal.WithLabelValues(cam.ID, classifyError(err)).Inc()
@@ -1054,7 +1090,7 @@ func (cm *CameraManager) startRecorderHeld(ctx context.Context, cam config.Camer
 
 // startGroupRecording keeps the ingest session and lets the group writer own the file.
 // Xiaomi still needs its device session so frames reach the engine.
-func (cm *CameraManager) startGroupRecording(cam config.CameraConfig) error {
+func (cm *CameraManager) startGroupRecording(ctx context.Context, cam config.CameraConfig) error {
 	if cam.Protocol == string(model.ProtoXiaomi) {
 		segDur, err := time.ParseDuration(cm.cfg.Storage.SegmentDuration)
 		if err != nil {
@@ -1064,7 +1100,7 @@ func (cm *CameraManager) startGroupRecording(cam config.CameraConfig) error {
 		if rec == nil {
 			return fmt.Errorf("camera %q: protocol %q does not support recording", cam.ID, cam.Protocol)
 		}
-		if err := rec.Start(context.Background()); err != nil {
+		if err := rec.Start(ctx); err != nil {
 			return fmt.Errorf("camera %q: failed to start xiaomi session: %w", cam.ID, err)
 		}
 		cm.mu.Lock()
@@ -1074,7 +1110,7 @@ func (cm *CameraManager) startGroupRecording(cam config.CameraConfig) error {
 	writing := cm.shouldRecordCamera(cam.ID)
 	if cm.groupWriter != nil {
 		cm.groupWriter.SetWriting(cam.ID, writing)
-		cm.groupWriter.AttachCamera(cam)
+		cm.groupWriter.AttachCameraContext(ctx, cam)
 	}
 	logger.Info("camera ingest ready, recording follows the group", "camera_id", cam.ID, "writing", writing)
 	return nil
@@ -1082,11 +1118,15 @@ func (cm *CameraManager) startGroupRecording(cam config.CameraConfig) error {
 
 // StartStreamRecording records a lalmax stream that has a recording plan but no
 // camera/device behind it. Frames come from the stream group directly.
-func (cm *CameraManager) StartStreamRecording(ctx context.Context, streamID string) error {
+func (cm *CameraManager) StartStreamRecording(ctx context.Context, streamID string) (retErr error) {
+	streamID = strings.TrimSpace(streamID)
+	ctx, span := observability.StartBusinessSpan(ctx, "recording.stream.start",
+		attribute.String("nvr.stream.id", streamID),
+	)
+	defer func() { observability.EndBusinessSpan(span, retErr) }()
 	if cm.mediaEngine == nil {
 		return fmt.Errorf("media engine not available")
 	}
-	streamID = strings.TrimSpace(streamID)
 	if streamID == "" {
 		return fmt.Errorf("stream ID is required")
 	}
@@ -1541,7 +1581,7 @@ func (cm *CameraManager) GetCameraConfig(cameraID string) *config.CameraConfig {
 // AddCamera adds a new camera to the manager and starts its recorder if enabled.
 // If cam.ID is empty, a new ID is generated automatically.
 // Returns the camera ID.
-func (cm *CameraManager) AddCamera(ctx context.Context, cam config.CameraConfig) (string, error) {
+func (cm *CameraManager) AddCamera(ctx context.Context, cam config.CameraConfig) (cameraID string, retErr error) {
 	if cam.ID == "" {
 		cam.ID = GenerateCameraID()
 	}
@@ -1549,6 +1589,14 @@ func (cm *CameraManager) AddCamera(ctx context.Context, cam config.CameraConfig)
 		cam.StreamID = cam.ID
 	}
 	cam.RTSPTransport = cameraRTSPTransport(cam)
+	ctx, span := observability.StartBusinessSpan(ctx, "camera.add",
+		attribute.String("nvr.camera.id", cam.ID),
+		attribute.String("nvr.stream.id", cam.StreamID),
+		attribute.String("nvr.media.protocol", string(cam.Protocol)),
+		attribute.String("nvr.media.encoding", strings.ToLower(cam.Encoding)),
+		attribute.String("nvr.camera.activation_state", cam.ActivationState),
+	)
+	defer func() { observability.EndBusinessSpan(span, retErr) }()
 
 	unlockCam := cm.lockCamera(cam.ID)
 	defer unlockCam()
@@ -1647,7 +1695,11 @@ func (cm *CameraManager) getONVIFProfileName(ctx context.Context, cam config.Cam
 
 // RemoveCamera removes a camera from the manager, stops its recorder, and removes it from config.
 // Does NOT delete the camera record from the database.
-func (cm *CameraManager) RemoveCamera(ctx context.Context, cameraID string) error {
+func (cm *CameraManager) RemoveCamera(ctx context.Context, cameraID string) (retErr error) {
+	ctx, span := observability.StartBusinessSpan(ctx, "camera.remove",
+		attribute.String("nvr.camera.id", cameraID),
+	)
+	defer func() { observability.EndBusinessSpan(span, retErr) }()
 	unlockCam := cm.lockCamera(cameraID)
 	defer unlockCam()
 
@@ -1829,7 +1881,11 @@ func (cm *CameraManager) RestoreArchivedCamera(ctx context.Context, row *storage
 
 // UpdateCamera applies partial updates to an existing camera.
 // Returns the updated CameraConfig.
-func (cm *CameraManager) UpdateCamera(ctx context.Context, cameraID string, updates CameraUpdate) (*config.CameraConfig, error) {
+func (cm *CameraManager) UpdateCamera(ctx context.Context, cameraID string, updates CameraUpdate) (updatedCam *config.CameraConfig, retErr error) {
+	ctx, span := observability.StartBusinessSpan(ctx, "camera.update",
+		attribute.String("nvr.camera.id", cameraID),
+	)
+	defer func() { observability.EndBusinessSpan(span, retErr) }()
 	unlockCam := cm.lockCamera(cameraID)
 	defer unlockCam()
 
@@ -2037,7 +2093,11 @@ func (cm *CameraManager) UpdateCamera(ctx context.Context, cameraID string, upda
 
 // RestartRecorder stops and recreates the recorder for the given camera.
 // The camera must be enabled.
-func (cm *CameraManager) RestartRecorder(ctx context.Context, cameraID string) error {
+func (cm *CameraManager) RestartRecorder(ctx context.Context, cameraID string) (retErr error) {
+	ctx, span := observability.StartBusinessSpan(ctx, "camera.recorder.restart",
+		attribute.String("nvr.camera.id", cameraID),
+	)
+	defer func() { observability.EndBusinessSpan(span, retErr) }()
 	unlockCam := cm.lockCamera(cameraID)
 	defer unlockCam()
 
@@ -2077,7 +2137,11 @@ func (cm *CameraManager) RestartRecorder(ctx context.Context, cameraID string) e
 }
 
 // StartCamera manually starts the recorder for the given camera.
-func (cm *CameraManager) StartCamera(ctx context.Context, cameraID string) error {
+func (cm *CameraManager) StartCamera(ctx context.Context, cameraID string) (retErr error) {
+	ctx, span := observability.StartBusinessSpan(ctx, "camera.start_manual",
+		attribute.String("nvr.camera.id", cameraID),
+	)
+	defer func() { observability.EndBusinessSpan(span, retErr) }()
 	unlockCam := cm.lockCamera(cameraID)
 	defer unlockCam()
 
@@ -2128,7 +2192,11 @@ func (cm *CameraManager) StartCamera(ctx context.Context, cameraID string) error
 }
 
 // StopCamera manually stops ingest and any record task for the given camera.
-func (cm *CameraManager) StopCamera(ctx context.Context, cameraID string) error {
+func (cm *CameraManager) StopCamera(ctx context.Context, cameraID string) (retErr error) {
+	ctx, span := observability.StartBusinessSpan(ctx, "camera.stop",
+		attribute.String("nvr.camera.id", cameraID),
+	)
+	defer func() { observability.EndBusinessSpan(span, retErr) }()
 	unlockCam := cm.lockCamera(cameraID)
 	defer unlockCam()
 
@@ -2262,7 +2330,7 @@ func (cm *CameraManager) ResumeRecording(ctx context.Context, cameraID string) e
 		cm.mu.Unlock()
 		if cm.groupWriter != nil {
 			cm.groupWriter.SetWriting(cameraID, true)
-			cm.groupWriter.AttachCamera(camCopy)
+			cm.groupWriter.AttachCameraContext(ctx, camCopy)
 		}
 		logger.Info("resumed recording for camera", "camera_id", cameraID)
 		return nil
@@ -2897,6 +2965,11 @@ func (cm *CameraManager) MonitorStreamEvents(ctx context.Context) {
 }
 
 func (cm *CameraManager) handleStreamEvent(ctx context.Context, ev media.Event) {
+	ctx, span := observability.StartBusinessSpan(ctx, "media.stream.lifecycle",
+		attribute.String("nvr.stream.id", ev.StreamID),
+		attribute.String("nvr.media.event.type", string(ev.Type)),
+	)
+	defer span.End()
 	// Sub-stream idle stops must not tear down the main camera recorder.
 	if media.IsSubStreamID(ev.StreamID) {
 		return

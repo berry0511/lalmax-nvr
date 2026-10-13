@@ -21,8 +21,10 @@ import (
 	"github.com/lalmax-pro/lalmax-nvr/internal/media"
 	"github.com/lalmax-pro/lalmax-nvr/internal/metrics"
 	"github.com/lalmax-pro/lalmax-nvr/internal/model"
+	"github.com/lalmax-pro/lalmax-nvr/internal/observability"
 	"github.com/lalmax-pro/lalmax-nvr/internal/recorder"
 	"github.com/q191201771/lal/pkg/base"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 var xiaomiLogger = slog.Default().With("component", "xiaomi-recorder")
@@ -81,10 +83,11 @@ type XiaomiRecorder struct {
 	store   SegmentStore
 	metrics *metrics.Metrics
 
-	mu     sync.Mutex
-	status model.RecorderStatus
-	cancel context.CancelFunc
-	done   chan struct{}
+	mu         sync.Mutex
+	status     model.RecorderStatus
+	cancel     context.CancelFunc
+	done       chan struct{}
+	retryCount int
 
 	// lal custom pub session
 	pubSession media.CustomizePubSession
@@ -147,7 +150,7 @@ func (r *XiaomiRecorder) Start(ctx context.Context) error {
 		r.mu.Unlock()
 		return fmt.Errorf("recorder for %q already running", r.cfg.CameraID)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(observability.DetachedContext(ctx))
 	r.cancel = cancel
 	r.done = make(chan struct{})
 	r.status = model.StatusRecording
@@ -370,7 +373,12 @@ func (r *XiaomiRecorder) run(ctx context.Context) {
 	var retryCount int
 	for {
 		// Resolve xiaomi://deviceID to miss://... URL via cloud API.
+		resolveCtx, resolveSpan := observability.StartBusinessSpan(ctx, "camera.xiaomi.resolve_stream",
+			attribute.String("nvr.camera.id", r.cfg.CameraID),
+			attribute.String("nvr.media.protocol", "xiaomi"),
+		)
 		missURL, err := ResolveMISSURL(r.cfg.CloudCfg, r.cfg.DID, r.cfg.Model)
+		observability.EndBusinessSpan(resolveSpan, err)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -378,7 +386,7 @@ func (r *XiaomiRecorder) run(ctx context.Context) {
 			retryCount++
 			backoff := recorder.TieredBackoffWithJitter(retryCount)
 			r.reportVendorError(err)
-			xiaomiLogger.Error("failed to resolve MISS URL, retrying", "camera_id", r.cfg.CameraID, "error", err, "backoff", backoff, "attempt", retryCount)
+			xiaomiLogger.ErrorContext(resolveCtx, "failed to resolve MISS URL, retrying", "camera_id", r.cfg.CameraID, "error", err, "backoff", backoff, "attempt", retryCount)
 			r.recordError("cloud_resolve")
 			r.recordXiaomiDisconnect("cloud_resolve")
 			r.setStatus(model.StatusReconnecting)
@@ -390,7 +398,8 @@ func (r *XiaomiRecorder) run(ctx context.Context) {
 			continue
 		}
 
-		err, connected := r.connectAndRecord(ctx, missURL)
+		r.retryCount = retryCount
+		err, connected := r.connectAndRecord(resolveCtx, missURL)
 		if ctx.Err() != nil {
 			return
 		}
@@ -400,7 +409,7 @@ func (r *XiaomiRecorder) run(ctx context.Context) {
 		}
 		retryCount++
 		backoff := recorder.TieredBackoffWithJitter(retryCount)
-		xiaomiLogger.Error("connection error, reconnecting", "camera_id", r.cfg.CameraID, "error", err, "backoff", backoff, "attempt", retryCount)
+		xiaomiLogger.ErrorContext(resolveCtx, "connection error, reconnecting", "camera_id", r.cfg.CameraID, "error", err, "backoff", backoff, "attempt", retryCount)
 		r.recordError("connection")
 		r.recordXiaomiDisconnect(classifyDisconnectReason(err))
 		r.setStatus(model.StatusReconnecting)
@@ -427,7 +436,16 @@ func (r *XiaomiRecorder) connectAndRecordWithQuality(ctx context.Context, missUR
 	}
 	defer client.Conn.Close()
 
-	if err := client.StartMedia("", quality); err != nil {
+	ctx, err = observability.RunBusinessOperation(ctx, "recorder.xiaomi.start_media", func(context.Context) error {
+		return client.StartMedia("", quality)
+	},
+		attribute.String("nvr.camera.id", r.cfg.CameraID),
+		attribute.String("nvr.stream.id", r.cfg.CameraID),
+		attribute.String("nvr.media.protocol", "xiaomi"),
+		attribute.String("nvr.media.quality", quality),
+		attribute.Int("nvr.connection.retry_count", r.retryCount),
+	)
+	if err != nil {
 		return fmt.Errorf("miss start media: %w", err), false
 	}
 	defer func() {

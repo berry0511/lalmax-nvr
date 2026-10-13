@@ -9,9 +9,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lalmax-pro/lalmax-nvr/internal/observability"
 	"github.com/q191201771/lal/pkg/base"
 	"github.com/q191201771/lal/pkg/logic"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 func TestGroupToStreamInfoAudioOnlyCustomizePublisherActive(t *testing.T) {
@@ -351,6 +355,46 @@ func TestLalmaxHTTP_GetStream_GroupNotFound(t *testing.T) {
 	info, err := engine.GetStream(context.Background(), "34020000001320000001:34020000001320000001")
 	require.NoError(t, err)
 	require.Nil(t, info)
+}
+
+func TestLalmaxHTTPClientPropagatesTraceAndDoesNotRecordQuery(t *testing.T) {
+	previous := otel.GetTracerProvider()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		_ = provider.Shutdown(context.Background())
+		otel.SetTracerProvider(previous)
+	})
+
+	var traceparent string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		traceparent = r.Header.Get("traceparent")
+		_, _ = w.Write([]byte(`{"error_code":1001,"desp":"group not found","data":{}}`))
+	}))
+	defer server.Close()
+
+	engine, err := NewLalmaxHTTP(LalmaxHTTPConfig{BaseURL: server.URL})
+	require.NoError(t, err)
+	ctx, parent := observability.StartBusinessSpan(context.Background(), "media.lookup")
+	_, err = engine.GetStream(ctx, "private-stream-name")
+	require.NoError(t, err)
+	parent.End()
+
+	spans := recorder.Ended()
+	require.GreaterOrEqual(t, len(spans), 2)
+	var clientSpan sdktrace.ReadOnlySpan
+	for _, span := range spans {
+		if span.Name() == "HTTP GET" {
+			clientSpan = span
+			break
+		}
+	}
+	require.Equal(t, parent.SpanContext().TraceID().String(), clientSpan.SpanContext().TraceID().String())
+	require.Contains(t, traceparent, parent.SpanContext().TraceID().String())
+	for _, attr := range clientSpan.Attributes() {
+		require.NotEqual(t, "private-stream-name", attr.Value.AsString(), "client spans must not capture query values")
+	}
 }
 
 func TestIsLalGroupNotFound(t *testing.T) {

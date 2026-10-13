@@ -1,8 +1,15 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"sync"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const defaultHookPluginBufferSize = 64
@@ -67,9 +74,29 @@ func (h *HttpNotify) RegisterPlugin(plugin HookPlugin, options HookPluginOptions
 
 func (h *HttpNotify) runPlugin(entry *hookPluginEntry) {
 	for event := range entry.queue {
-		if err := entry.plugin.OnHookEvent(event); err != nil {
-			Log.Errorf("hook plugin handle error. plugin=%s, event=%s, err=%+v", entry.plugin.Name(), event.Event, err)
-		}
+		func() {
+			carrier := propagation.MapCarrier{}
+			if event.Traceparent != "" {
+				carrier.Set("traceparent", event.Traceparent)
+			}
+			if event.Tracestate != "" {
+				carrier.Set("tracestate", event.Tracestate)
+			}
+			ctx := propagation.TraceContext{}.Extract(context.Background(), carrier)
+			_, span := otel.Tracer(tracerName).Start(ctx, "lalmax.hook_plugin.process",
+				trace.WithAttributes(
+					attribute.String("nvr.media.hook.plugin", entry.plugin.Name()),
+					attribute.String("nvr.media.event.type", event.Event),
+					attribute.Int64("nvr.media.event.id", event.ID),
+				),
+			)
+			defer span.End()
+			if err := entry.plugin.OnHookEvent(event); err != nil {
+				span.SetAttributes(attribute.String("error.type", fmt.Sprintf("%T", err)))
+				span.SetStatus(codes.Error, "hook plugin failed")
+				Log.Errorf("hook plugin handle error. plugin=%s, event=%s, err=%+v", entry.plugin.Name(), event.Event, err)
+			}
+		}()
 	}
 }
 

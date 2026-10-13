@@ -13,7 +13,9 @@ import (
 
 	"github.com/bluenviron/gohlslib"
 	"github.com/bluenviron/gohlslib/pkg/codecs"
+	"github.com/lalmax-pro/lalmax-nvr/internal/observability"
 	"github.com/q191201771/lal/pkg/base"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const (
@@ -114,7 +116,12 @@ func (m *HLSPullManager) PullingStreamIDs() []string {
 	return ids
 }
 
-func (m *HLSPullManager) StartHLSPull(_ context.Context, req StartHLSPullRequest) (*StreamSession, error) {
+func (m *HLSPullManager) StartHLSPull(ctx context.Context, req StartHLSPullRequest) (result *StreamSession, retErr error) {
+	ctx, span := observability.StartBusinessSpan(ctx, "media.hls_pull.start",
+		attribute.String("nvr.stream.id", strings.TrimSpace(req.StreamID)),
+		attribute.String("nvr.media.source.kind", "hls"),
+	)
+	defer func() { observability.EndBusinessSpan(span, retErr) }()
 	if m == nil || m.engine == nil {
 		return nil, ErrHLSPullEmbeddedOnly
 	}
@@ -139,7 +146,7 @@ func (m *HLSPullManager) StartHLSPull(_ context.Context, req StartHLSPullRequest
 		m.mu.Unlock()
 		return nil, ErrHLSPullBusy
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(observability.DetachedContext(ctx))
 	startedAt := time.Now()
 	task := &hlsPullTask{
 		streamID: streamID,
@@ -289,7 +296,16 @@ func (m *HLSPullManager) runTask(ctx context.Context, task *hlsPullTask) {
 }
 
 func (m *HLSPullManager) pullOnce(ctx context.Context, task *hlsPullTask) error {
-	session, err := m.engine.AddCustomizePubSession(ctx, task.streamID)
+	attrs := []attribute.KeyValue{
+		attribute.String("nvr.stream.id", task.streamID),
+		attribute.String("nvr.media.source.kind", "hls"),
+	}
+	var session CustomizePubSession
+	ctx, err := observability.RunBusinessOperation(ctx, "media.hls_pull.open_session", func(opCtx context.Context) error {
+		var err error
+		session, err = m.engine.AddCustomizePubSession(opCtx, task.streamID)
+		return err
+	}, attrs...)
 	if err != nil {
 		return err
 	}
@@ -298,7 +314,9 @@ func (m *HLSPullManager) pullOnce(ctx context.Context, task *hlsPullTask) error 
 		option.AudioFormat = base.AvPacketStreamAudioFormatRawAac
 	})
 	defer func() {
-		_ = m.engine.DelCustomizePubSession(context.Background(), session)
+		opCtx, span := observability.StartBusinessSpan(observability.DetachedContext(ctx), "media.hls_pull.close_session", attrs...)
+		closeErr := m.engine.DelCustomizePubSession(opCtx, session)
+		observability.EndBusinessSpan(span, closeErr)
 	}()
 
 	client := &gohlslib.Client{
@@ -320,7 +338,10 @@ func (m *HLSPullManager) pullOnce(ctx context.Context, task *hlsPullTask) error 
 	client.OnTracks = func(tracks []*gohlslib.Track) error {
 		return attachHLSTracks(client, session, tracks, markOnline)
 	}
-	if err := client.Start(); err != nil {
+	ctx, err = observability.RunBusinessOperation(ctx, "media.hls_pull.start_client", func(context.Context) error {
+		return client.Start()
+	}, attrs...)
+	if err != nil {
 		return err
 	}
 	defer client.Close()

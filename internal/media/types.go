@@ -96,26 +96,35 @@ type StartHLSPullRequest struct {
 
 // RTMPEvent represents an RTMP stream event for the ingest handler.
 type RTMPEvent struct {
-	StreamID string
-	AppName  string
-	Protocol string
-	Type     string // "pub_start", "pub_stop", "stream_active", "stream_stopped"
+	StreamID    string
+	AppName     string
+	SessionID   string
+	Protocol    string
+	Type        string // "pub_start", "pub_stop", "stream_active", "stream_stopped"
+	Traceparent string
+	Tracestate  string
 }
 
 // SRTEvent represents an SRT stream event for the ingest handler.
 type SRTEvent struct {
-	StreamID string
-	AppName  string
-	Protocol string
-	Type     string // "pub_start", "pub_stop", "stream_active", "stream_stopped"
+	StreamID    string
+	AppName     string
+	SessionID   string
+	Protocol    string
+	Type        string // "pub_start", "pub_stop", "stream_active", "stream_stopped"
+	Traceparent string
+	Tracestate  string
 }
 
 // WHIPEvent represents a WHIP / customize-session ingest event.
 type WHIPEvent struct {
-	StreamID string
-	AppName  string
-	Protocol string
-	Type     string
+	StreamID    string
+	AppName     string
+	SessionID   string
+	Protocol    string
+	Type        string
+	Traceparent string
+	Tracestate  string
 }
 
 type StartPullRequest struct {
@@ -211,14 +220,16 @@ const (
 )
 
 type Event struct {
-	ID        int64
-	Type      EventType
-	StreamID  string
-	AppName   string
-	SessionID string
-	Protocol  string
-	At        time.Time
-	Raw       []byte
+	ID          int64
+	Type        EventType
+	StreamID    string
+	AppName     string
+	SessionID   string
+	Protocol    string
+	Traceparent string
+	Tracestate  string
+	At          time.Time
+	Raw         []byte
 }
 
 type EventFilter struct {

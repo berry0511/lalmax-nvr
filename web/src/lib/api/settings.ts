@@ -77,6 +77,10 @@ export interface SettingsConfig {
   webdav: WebDAVConfig;
   dlna?: DLNAConfig;
   streaming?: StreamingConfig;
+  observability?: {
+    local_trace_enabled: boolean;
+    trace_ui_url_template: string;
+  };
 }
 
 export interface DatabaseMigrationSettings {

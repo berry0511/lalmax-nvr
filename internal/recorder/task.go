@@ -12,7 +12,9 @@ import (
 	"github.com/lalmax-pro/lalmax-nvr/internal/media"
 	"github.com/lalmax-pro/lalmax-nvr/internal/metrics"
 	"github.com/lalmax-pro/lalmax-nvr/internal/model"
+	"github.com/lalmax-pro/lalmax-nvr/internal/observability"
 	"github.com/lalmax-pro/lalmax-nvr/internal/storage"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 var taskLogger = slog.Default().With("component", "record-task")
@@ -124,11 +126,15 @@ func (m *TaskManager) SetLifecycleHooks(onStart, onStop func(streamID string, re
 }
 
 // Ensure starts a record task for streamID if one is not already running.
-func (m *TaskManager) Ensure(ctx context.Context, streamID string) error {
+func (m *TaskManager) Ensure(ctx context.Context, streamID string) (retErr error) {
 	if m == nil {
 		return fmt.Errorf("record task manager not configured")
 	}
 	streamID = strings.TrimSpace(streamID)
+	ctx, span := observability.StartBusinessSpan(ctx, "recording.task.ensure",
+		attribute.String("nvr.stream.id", streamID),
+	)
+	defer func() { observability.EndBusinessSpan(span, retErr) }()
 	if streamID == "" {
 		return fmt.Errorf("stream ID is required")
 	}
@@ -151,7 +157,12 @@ func (m *TaskManager) Ensure(ctx context.Context, streamID string) error {
 	if err != nil {
 		return err
 	}
-	if err := rec.Start(ctx); err != nil {
+	recorderCtx, recorderSpan := observability.StartBusinessSpan(ctx, "recorder.start",
+		attribute.String("nvr.stream.id", streamID),
+	)
+	err = rec.Start(recorderCtx)
+	observability.EndBusinessSpan(recorderSpan, err)
+	if err != nil {
 		return fmt.Errorf("start record task %q: %w", streamID, err)
 	}
 
@@ -170,16 +181,21 @@ func (m *TaskManager) Ensure(ctx context.Context, streamID string) error {
 	if onStart != nil {
 		onStart(streamID, rec)
 	}
-	taskLogger.Info("record task started", "stream_id", streamID)
+	taskLogger.InfoContext(ctx, "record task started", "stream_id", streamID)
 	return nil
 }
 
 // Stop tears down the record task and closes the in-process frame subscription.
-func (m *TaskManager) Stop(_ context.Context, streamID, reason string) error {
+func (m *TaskManager) Stop(ctx context.Context, streamID, reason string) (retErr error) {
 	if m == nil {
 		return nil
 	}
 	streamID = strings.TrimSpace(streamID)
+	ctx, span := observability.StartBusinessSpan(ctx, "recording.task.stop",
+		attribute.String("nvr.stream.id", streamID),
+		attribute.String("nvr.recording.stop_reason", reason),
+	)
+	defer func() { observability.EndBusinessSpan(span, retErr) }()
 	if streamID == "" {
 		return nil
 	}
@@ -201,7 +217,7 @@ func (m *TaskManager) Stop(_ context.Context, streamID, reason string) error {
 		taskLogger.Warn("record task stop failed", "stream_id", streamID, "reason", reason, "error", err)
 		return err
 	}
-	taskLogger.Info("record task stopped", "stream_id", streamID, "reason", reason)
+	taskLogger.InfoContext(ctx, "record task stopped", "stream_id", streamID, "reason", reason)
 	return nil
 }
 

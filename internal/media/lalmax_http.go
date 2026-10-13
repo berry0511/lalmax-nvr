@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/lalmax-pro/lalmax-nvr/internal/config"
+	"github.com/lalmax-pro/lalmax-nvr/internal/observability"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // lal ErrorCodeGroupNotFound — group not in lalmax yet (e.g. GB28181 RTP port open, no packets).
@@ -89,7 +91,12 @@ func (e *LalmaxHTTP) Ready(ctx context.Context) error {
 	var resp lalResp[json.RawMessage]
 	return e.getJSON(ctx, "/api/stat/lal_info", nil, &resp)
 }
-func (e *LalmaxHTTP) StopPull(ctx context.Context, streamID string) error {
+func (e *LalmaxHTTP) StopPull(ctx context.Context, streamID string) (retErr error) {
+	ctx, span := observability.StartBusinessSpan(ctx, "media.relay_pull.stop",
+		attribute.String("nvr.stream.id", streamID),
+		attribute.String("nvr.media.engine.mode", "http"),
+	)
+	defer func() { observability.EndBusinessSpan(span, retErr) }()
 	if streamID == "" {
 		return errors.New("stream ID is required")
 	}
@@ -98,7 +105,14 @@ func (e *LalmaxHTTP) StopPull(ctx context.Context, streamID string) error {
 	return e.postJSON(ctx, "/api/ctrl/stop_relay_pull", q, nil, &resp)
 }
 
-func (e *LalmaxHTTP) StartPull(ctx context.Context, req StartPullRequest) (*StreamSession, error) {
+func (e *LalmaxHTTP) StartPull(ctx context.Context, req StartPullRequest) (session *StreamSession, retErr error) {
+	ctx, span := observability.StartBusinessSpan(ctx, "media.relay_pull.start",
+		attribute.String("nvr.stream.id", req.StreamID),
+		attribute.String("nvr.media.source.kind", "relay_pull"),
+		attribute.String("nvr.media.engine.mode", "http"),
+		attribute.String("nvr.media.transport", strings.ToLower(req.Transport)),
+	)
+	defer func() { observability.EndBusinessSpan(span, retErr) }()
 	if req.StreamID == "" {
 		return nil, errors.New("stream ID is required")
 	}
@@ -189,7 +203,12 @@ func (e *LalmaxHTTP) KickSession(ctx context.Context, sessionID string) error {
 	return e.postJSON(ctx, "/api/ctrl/kick_session", nil, map[string]any{"session_id": sessionID, "stream_name": streamID}, &resp)
 }
 
-func (e *LalmaxHTTP) GetStream(ctx context.Context, streamID string) (*StreamInfo, error) {
+func (e *LalmaxHTTP) GetStream(ctx context.Context, streamID string) (info *StreamInfo, retErr error) {
+	ctx, span := observability.StartBusinessSpan(ctx, "media.stream.get",
+		attribute.String("nvr.stream.id", streamID),
+		attribute.String("nvr.media.engine.mode", "http"),
+	)
+	defer func() { observability.EndBusinessSpan(span, retErr) }()
 	if streamID == "" {
 		return nil, errors.New("stream ID is required")
 	}
@@ -201,8 +220,8 @@ func (e *LalmaxHTTP) GetStream(ctx context.Context, streamID string) (*StreamInf
 		}
 		return nil, err
 	}
-	info := groupToStreamInfo(resp.Data)
-	return &info, nil
+	streamInfo := groupToStreamInfo(resp.Data)
+	return &streamInfo, nil
 }
 
 func isLalGroupNotFound(err error) bool {
@@ -230,7 +249,13 @@ func (e *LalmaxHTTP) ListStreams(ctx context.Context) ([]StreamInfo, error) {
 	return out, nil
 }
 
-func (e *LalmaxHTTP) BuildPlayURL(ctx context.Context, req PlayURLRequest) (*PlayURL, error) {
+func (e *LalmaxHTTP) BuildPlayURL(ctx context.Context, req PlayURLRequest) (playURL *PlayURL, retErr error) {
+	ctx, span := observability.StartBusinessSpan(ctx, "media.play_url.build",
+		attribute.String("nvr.stream.id", req.StreamID),
+		attribute.String("nvr.media.protocol", strings.ToLower(req.Protocol)),
+		attribute.String("nvr.media.engine.mode", "http"),
+	)
+	defer func() { observability.EndBusinessSpan(span, retErr) }()
 	if req.StreamID == "" {
 		return nil, errors.New("stream ID is required")
 	}
@@ -416,12 +441,16 @@ func (e *LalmaxHTTP) postJSON(ctx context.Context, path string, q url.Values, bo
 	return e.doJSON(req, out)
 }
 
-func (e *LalmaxHTTP) doJSON(req *http.Request, out any) error {
+func (e *LalmaxHTTP) doJSON(req *http.Request, out any) (retErr error) {
+	ctx, span := observability.StartHTTPClientSpan(req.Context(), req)
+	defer func() { observability.EndBusinessSpan(span, retErr) }()
+	req = req.WithContext(ctx)
 	resp, err := e.client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	span.SetAttributes(attribute.Int("http.response.status_code", resp.StatusCode))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("lalmax returned HTTP %d", resp.StatusCode)
 	}
@@ -571,16 +600,20 @@ func scanSSE(ctx context.Context, r io.Reader, out chan<- Event) {
 	scanner := bufio.NewScanner(r)
 	var id int64
 	var name string
+	var traceparent string
+	var tracestate string
 	var data []byte
 	flush := func() bool {
 		if name == "" && len(data) == 0 {
 			return true
 		}
-		ev := hookToMediaEvent(id, name, data)
+		ev := hookToMediaEvent(id, name, traceparent, tracestate, data)
 		select {
 		case out <- ev:
 			id = 0
 			name = ""
+			traceparent = ""
+			tracestate = ""
 			data = nil
 			return true
 		case <-ctx.Done():
@@ -605,6 +638,10 @@ func scanSSE(ctx context.Context, r io.Reader, out chan<- Event) {
 			id, _ = strconv.ParseInt(val, 10, 64)
 		case "event":
 			name = val
+		case "traceparent":
+			traceparent = val
+		case "tracestate":
+			tracestate = val
 		case "data":
 			data = append(data, val...)
 		}
@@ -612,7 +649,7 @@ func scanSSE(ctx context.Context, r io.Reader, out chan<- Event) {
 	_ = flush()
 }
 
-func hookToMediaEvent(id int64, hookName string, raw []byte) Event {
+func hookToMediaEvent(id int64, hookName, traceparent, tracestate string, raw []byte) Event {
 	var payload struct {
 		AppName    string `json:"app_name"`
 		StreamName string `json:"stream_name"`
@@ -620,7 +657,7 @@ func hookToMediaEvent(id int64, hookName string, raw []byte) Event {
 		Protocol   string `json:"protocol"`
 	}
 	_ = json.Unmarshal(raw, &payload)
-	return Event{ID: id, Type: hookToMediaEventType(hookName), StreamID: payload.StreamName, AppName: payload.AppName, SessionID: payload.SessionID, Protocol: payload.Protocol, At: time.Now(), Raw: append([]byte(nil), raw...)}
+	return Event{ID: id, Type: hookToMediaEventType(hookName), StreamID: payload.StreamName, AppName: payload.AppName, SessionID: payload.SessionID, Protocol: payload.Protocol, Traceparent: traceparent, Tracestate: tracestate, At: time.Now(), Raw: append([]byte(nil), raw...)}
 }
 
 func hookToMediaEventType(name string) EventType {
@@ -726,10 +763,13 @@ func (e *LalmaxHTTP) SubscribeRTMPEvents(ctx context.Context) (<-chan RTMPEvent,
 				continue
 			}
 			out <- RTMPEvent{
-				StreamID: ev.StreamID,
-				AppName:  ev.AppName,
-				Protocol: ev.Protocol,
-				Type:     typ,
+				StreamID:    ev.StreamID,
+				AppName:     ev.AppName,
+				SessionID:   ev.SessionID,
+				Protocol:    ev.Protocol,
+				Type:        typ,
+				Traceparent: ev.Traceparent,
+				Tracestate:  ev.Tracestate,
 			}
 		}
 	}()
@@ -738,13 +778,13 @@ func (e *LalmaxHTTP) SubscribeRTMPEvents(ctx context.Context) (<-chan RTMPEvent,
 
 func (e *LalmaxHTTP) SubscribeSRTEvents(ctx context.Context) (<-chan SRTEvent, error) {
 	return subscribeTypedEvents(e, ctx, func(ev Event, typ string) SRTEvent {
-		return SRTEvent{StreamID: ev.StreamID, AppName: ev.AppName, Protocol: ev.Protocol, Type: typ}
+		return SRTEvent{StreamID: ev.StreamID, AppName: ev.AppName, SessionID: ev.SessionID, Protocol: ev.Protocol, Type: typ, Traceparent: ev.Traceparent, Tracestate: ev.Tracestate}
 	})
 }
 
 func (e *LalmaxHTTP) SubscribeWHIPEvents(ctx context.Context) (<-chan WHIPEvent, error) {
 	return subscribeTypedEvents(e, ctx, func(ev Event, typ string) WHIPEvent {
-		return WHIPEvent{StreamID: ev.StreamID, AppName: ev.AppName, Protocol: ev.Protocol, Type: typ}
+		return WHIPEvent{StreamID: ev.StreamID, AppName: ev.AppName, SessionID: ev.SessionID, Protocol: ev.Protocol, Type: typ, Traceparent: ev.Traceparent, Tracestate: ev.Tracestate}
 	})
 }
 

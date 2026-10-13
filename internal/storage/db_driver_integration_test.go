@@ -62,8 +62,49 @@ func TestExternalDriverSchemaInitialization(t *testing.T) {
 			runCameraRecordingRepositoryContract(t, db, db)
 			runFeatureAndVoIPRepositoryContract(t, db)
 			runGeneratedIDRepositoryContract(t, db)
+			runTraceStoreRepositoryContract(t, db)
 		})
 	}
+}
+
+func runTraceStoreRepositoryContract(t *testing.T, db TraceRepository) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	traceID := "trace-contract-" + now.Format("150405.000000000")
+	root := TraceSpanRecord{
+		TraceID: traceID, SpanID: "root-" + now.Format("150405.000000000"), Name: "GET /api/cameras/{id}",
+		Service: "lalmax-nvr", StartUnixNS: now.Add(-time.Second).UnixNano(), EndUnixNS: now.UnixNano(),
+		Attributes: `{"http.route":"/api/cameras/{id}"}`, Events: `[]`, Links: `[]`,
+	}
+	require.NoError(t, db.StoreTraceSpan(ctx, root))
+	child := root
+	child.SpanID = "child-" + now.Format("150405.000000000")
+	child.ParentSpanID = root.SpanID
+	child.Name = "camera.start"
+	child.StatusCode = 2
+	child.StartUnixNS = now.Add(-500 * time.Millisecond).UnixNano()
+	require.NoError(t, db.StoreTraceSpan(ctx, child))
+
+	traces, err := db.ListTraces(ctx, 10, 0)
+	require.NoError(t, err)
+	var found *TraceSummary
+	for i := range traces {
+		if traces[i].TraceID == traceID {
+			found = &traces[i]
+			break
+		}
+	}
+	require.NotNil(t, found)
+	require.Equal(t, 2, found.SpanCount)
+	require.Equal(t, 1, found.ErrorCount)
+
+	spans, err := db.GetTraceSpans(ctx, traceID)
+	require.NoError(t, err)
+	require.Len(t, spans, 2)
+	require.Equal(t, root.SpanID, spans[1].ParentSpanID)
+	require.JSONEq(t, root.Attributes, spans[0].Attributes)
+	require.NoError(t, db.PruneTraceSpans(ctx, now.Add(-24*time.Hour), 100))
 }
 
 func TestSQLiteMigrationToExternalDriver(t *testing.T) {
@@ -151,6 +192,15 @@ func runGeneratedIDRepositoryContract(t *testing.T, db *DB) {
 	history := &StreamHistory{StreamID: "contract-stream-" + suffix, SessionID: "contract-session-" + suffix, StartedAt: time.Now().UTC()}
 	require.NoError(t, db.InsertStreamHistory(ctx, history))
 	require.Positive(t, history.ID)
+	mediaStartedAt := history.StartedAt.Add(time.Second)
+	mediaEndedAt := mediaStartedAt.Add(time.Second)
+	require.NoError(t, db.RecordStreamHistoryMediaState(ctx, history.StreamID, mediaStartedAt, true))
+	require.NoError(t, db.RecordStreamHistoryMediaState(ctx, history.StreamID, mediaEndedAt, false))
+	historyRows, _, err := db.ListStreamHistory(ctx, history.StreamID, 10, 0)
+	require.NoError(t, err)
+	require.Len(t, historyRows, 1)
+	require.NotNil(t, historyRows[0].MediaStartedAt)
+	require.NotNil(t, historyRows[0].MediaEndedAt)
 
 	ban := &StreamBan{StreamID: "contract-banned-" + suffix, Reason: "test", CreatedAt: time.Now().UTC()}
 	require.NoError(t, db.InsertStreamBan(ctx, ban))

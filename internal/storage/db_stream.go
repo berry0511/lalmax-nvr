@@ -79,12 +79,12 @@ func (d *DB) RecordStreamHistoryMediaState(ctx context.Context, streamID string,
 	var q string
 	if active {
 		q = `UPDATE stream_history SET media_started_at = COALESCE(media_started_at, ?), media_ended_at = NULL
-			WHERE id = (SELECT id FROM stream_history WHERE stream_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1)`
+			WHERE id = (SELECT id FROM (SELECT id FROM stream_history WHERE stream_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1) AS current_session)`
 		_, err := d.execContext(ctx, q, timeToDB(at), streamID)
 		return err
 	}
 	q = `UPDATE stream_history SET media_ended_at = ?
-		WHERE id = (SELECT id FROM stream_history WHERE stream_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1)
+		WHERE id = (SELECT id FROM (SELECT id FROM stream_history WHERE stream_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1) AS current_session)
 		AND media_started_at IS NOT NULL`
 	_, err := d.execContext(ctx, q, timeToDB(at), streamID)
 	return err

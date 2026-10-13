@@ -567,6 +567,10 @@ func (h *Handler) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 			"username":        h.config.Auth.Username,
 			"auth_configured": h.config.Auth.PasswordHash != "" || h.config.Auth.Password != "",
 		},
+		"observability": map[string]any{
+			"local_trace_enabled":   h.config.Observability.LocalTracesEnabled(),
+			"trace_ui_url_template": strings.TrimSpace(h.config.Observability.TraceUIURLTemplate),
+		},
 	})
 }
 
@@ -600,11 +604,26 @@ func (h *Handler) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			MaxMediaViewers   *int      `json:"max_media_viewers"`
 			GopCache          *int      `json:"gop_cache"`
 		} `json:"dlna"`
+		Observability *struct {
+			LocalTraceEnabled  *bool   `json:"local_trace_enabled"`
+			TraceUIURLTemplate *string `json:"trace_ui_url_template"`
+		} `json:"observability"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
+	}
+	if body.Observability != nil && body.Observability.TraceUIURLTemplate != nil {
+		template := strings.TrimSpace(*body.Observability.TraceUIURLTemplate)
+		if template != "" {
+			candidate := strings.ReplaceAll(template, "{trace_id}", strings.Repeat("0", 32))
+			parsed, err := url.Parse(candidate)
+			if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || !strings.Contains(template, "{trace_id}") {
+				writeError(w, http.StatusBadRequest, "trace_ui_url_template must be an http(s) URL containing {trace_id}")
+				return
+			}
+		}
 	}
 	// Update cleanup settings
 	if body.Cleanup != nil {
@@ -705,10 +724,24 @@ func (h *Handler) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			h.config.WebDAV.ReadWrite = *body.WebDAV.ReadWrite
 		}
 	}
+	if body.Observability != nil {
+		if body.Observability.LocalTraceEnabled != nil {
+			if h.config.Observability.LocalTraceEnabled == nil {
+				h.config.Observability.LocalTraceEnabled = new(bool)
+			}
+			*h.config.Observability.LocalTraceEnabled = *body.Observability.LocalTraceEnabled
+		}
+		if body.Observability.TraceUIURLTemplate != nil {
+			h.config.Observability.TraceUIURLTemplate = strings.TrimSpace(*body.Observability.TraceUIURLTemplate)
+		}
+	}
 
 	// Persist config to disk (with conflict detection)
 	if !h.saveConfig(w) {
 		return
+	}
+	if body.Observability != nil && body.Observability.LocalTraceEnabled != nil && h.localTraceApply != nil {
+		h.localTraceApply(*body.Observability.LocalTraceEnabled)
 	}
 	if h.dlnaApply != nil {
 		if err := h.dlnaApply(r.Context()); err != nil {

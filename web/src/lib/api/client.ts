@@ -341,6 +341,48 @@ export async function getAPIObservability(
   return apiRequest<APIObservabilityResponse>(`/observability/api?window=${window}&series=1h&limit=50`, { signal });
 }
 
+export interface TraceSummary {
+  trace_id: string;
+  start_time: number;
+  end_time: number;
+  span_count: number;
+  error_count: number;
+}
+
+export interface TraceSpan {
+  trace_id: string;
+  span_id: string;
+  parent_span_id?: string;
+  name: string;
+  service: string;
+  kind: string;
+  status: string;
+  status_code: number;
+  start_time: number;
+  end_time: number;
+  attributes: string;
+  events: string;
+  links: string;
+}
+
+export interface TraceListResponse {
+  traces: TraceSummary[];
+  external_trace_url_template: string;
+}
+
+export interface TraceDetailResponse {
+  trace_id: string;
+  spans: TraceSpan[];
+}
+
+export async function getRecentTraces(limit = 50): Promise<TraceListResponse> {
+  return apiRequest<TraceListResponse>(`/observability/traces?limit=${limit}`);
+}
+
+export async function getTrace(traceID: string): Promise<TraceDetailResponse> {
+  return apiRequest<TraceDetailResponse>(`/observability/traces/${encodeURIComponent(traceID)}`);
+}
+
 // Setup response
 export interface SetupResponse {
   status: string;

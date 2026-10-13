@@ -664,6 +664,10 @@ func (d *DB) Init(ctx context.Context) error {
 	if err := d.migrateEmby(ctx); err != nil {
 		return err
 	}
+	if err := d.migrateTraceSpans(ctx); err != nil {
+		return err
+	}
+	_, _ = d.execContext(ctx, "UPDATE schema_meta SET value='34' WHERE key='schema_version'")
 
 	// Migration v30 → v31: persist why a stream-history session went offline.
 	var offlineReasonColExists int
@@ -688,7 +692,7 @@ func (d *DB) Init(ctx context.Context) error {
 	// the earliest active row per stream/session without deleting completed history.
 	if _, err := d.execContext(ctx, `DELETE FROM stream_history
 		WHERE ended_at IS NULL AND session_id <> '' AND id NOT IN (
-			SELECT MIN(id) FROM stream_history WHERE ended_at IS NULL AND session_id <> '' GROUP BY stream_id, session_id, protocol
+			SELECT id FROM (SELECT MIN(id) AS id FROM stream_history WHERE ended_at IS NULL AND session_id <> '' GROUP BY stream_id, session_id, protocol) AS retained_sessions
 		)`); err != nil {
 		return err
 	}

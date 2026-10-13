@@ -23,6 +23,8 @@ let itemsPerPage = $state(getItemsPerPage());
 let webdavEnabled = $state(false);
 let webdavPathPrefix = $state('/dav');
 let webdavReadWrite = $state(false);
+let localTraceEnabled = $state(true);
+let traceUIURLTemplate = $state('');
 let dlnaEnabled = $state(false);
 let dlnaFriendlyName = $state('Lalmax NVR');
 let dlnaPort = $state(8200);
@@ -157,6 +159,7 @@ let originalFeatureFlags = $state<Record<string, boolean>>({});
 let activeSettingsTab = $state('general');
 let settingsTabs = $derived([
   { id: 'general', label: t('settings.tabs.general') },
+  { id: 'traces', label: t('settings.tabs.traces') },
   { id: 'advanced', label: t('settings.tabs.advanced') },
   { id: 'database', label: t('settings.tabs.database') },
   { id: 'security', label: t('settings.tabs.security') },
@@ -181,6 +184,7 @@ let isDirty = $derived(() => {
     const current = JSON.stringify({
       retentionDays, diskThresholdPercent, checkInterval,
       webdavEnabled, webdavPathPrefix, webdavReadWrite,
+      localTraceEnabled, traceUIURLTemplate,
       dlnaEnabled, dlnaFriendlyName, dlnaPort, dlnaInterface,
       dlnaIncludeLive, dlnaIncludeRecordings, dlnaMaxViewers, dlnaGopCache, dlnaMaxBrowseCount, dlnaAllowedCIDRs,
       mergeEnabled, mergeCheckInterval, mergeWindowSize,
@@ -286,6 +290,7 @@ function getAffectedCameraCount(protocol: string): number {
     originalSnapshot = JSON.stringify({
       retentionDays, diskThresholdPercent, checkInterval,
       webdavEnabled, webdavPathPrefix, webdavReadWrite,
+      localTraceEnabled, traceUIURLTemplate,
       dlnaEnabled, dlnaFriendlyName, dlnaPort, dlnaInterface,
       dlnaIncludeLive, dlnaIncludeRecordings, dlnaMaxViewers, dlnaGopCache, dlnaMaxBrowseCount, dlnaAllowedCIDRs,
       mergeEnabled, mergeCheckInterval, mergeWindowSize,
@@ -357,6 +362,8 @@ function getAffectedCameraCount(protocol: string): number {
       webdavEnabled = settings.webdav?.enabled ?? false;
       webdavPathPrefix = settings.webdav?.path_prefix ?? '/dav';
       webdavReadWrite = settings.webdav?.read_write ?? false;
+      localTraceEnabled = settings.observability?.local_trace_enabled ?? true;
+      traceUIURLTemplate = settings.observability?.trace_ui_url_template ?? '';
       const dlna = settings.dlna;
       dlnaEnabled = dlna?.enabled ?? false;
       dlnaFriendlyName = dlna?.friendly_name || 'Lalmax NVR';
@@ -472,6 +479,10 @@ function getAffectedCameraCount(protocol: string): number {
           enabled: webdavEnabled,
           path_prefix: webdavPathPrefix,
           read_write: webdavReadWrite,
+        },
+        observability: {
+          local_trace_enabled: localTraceEnabled,
+          trace_ui_url_template: traceUIURLTemplate.trim(),
         },
       };
 
@@ -1280,6 +1291,45 @@ function getAffectedCameraCount(protocol: string): number {
                 {/if}
               </div>
             {/each}
+          </div>
+        </div>
+      {:else if activeSettingsTab === 'traces'}
+        <div class="card p-8 border th-border space-y-8">
+          <div>
+            <h3 class="text-lg font-semibold th-text-primary mb-1">{t('settings.traces.title')}</h3>
+            <p class="text-sm th-text-secondary mt-1">{t('settings.traces.description')}</p>
+          </div>
+
+          <div class="space-y-2">
+            <div class="flex items-center gap-3">
+              <button
+                id="local-trace-toggle"
+                type="button"
+                role="switch"
+                aria-checked={localTraceEnabled}
+                aria-label={t('settings.traces.localEnabled')}
+                class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 {localTraceEnabled ? 'bg-blue-600' : 'th-bg-tertiary'}"
+                onclick={() => { localTraceEnabled = !localTraceEnabled; }}
+              >
+                <span class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform {localTraceEnabled ? 'translate-x-6' : 'translate-x-1'}"></span>
+              </button>
+              <span class="input-label mb-0">{t('settings.traces.localEnabled')}</span>
+              <span class="text-sm th-text-secondary">{localTraceEnabled ? t('settings.traces.enabled') : t('settings.traces.disabled')}</span>
+            </div>
+            <p class="text-sm th-text-tertiary">{t('settings.traces.localEnabledHint')}</p>
+          </div>
+
+          <div>
+            <label for="trace-ui-url-template" class="input-label">{t('settings.traces.externalURL')}</label>
+            <input
+              id="trace-ui-url-template"
+              type="text"
+              class="input font-mono"
+              bind:value={traceUIURLTemplate}
+              placeholder={'http://localhost:16686/trace/{trace_id}'}
+              spellcheck="false"
+            />
+            <p class="text-sm th-text-tertiary mt-2">{t('settings.traces.externalURLHint')}</p>
           </div>
         </div>
       {:else if activeSettingsTab === 'advanced'}

@@ -9,6 +9,7 @@ import (
 	"github.com/q191201771/naza/pkg/nazalog"
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -18,7 +19,7 @@ var ps2 []byte = []byte{0x00, 0x00, 0x01, 0xBA, 0x40, 0x01, 0x00, 0x01, 0x33, 0x
 var ps3 []byte = []byte{0x00, 0x00, 0x01, 0xBA, 0x40, 0x01, 0x00, 0x01, 0x33, 0x44, 0xFF, 0xFF, 0xFF, 0xF0, 0x00, 0x00, 0x01, 0xBB}
 var ps4 []byte = []byte{0x00, 0x00, 0x01, 0xBA, 0x40, 0x01, 0x00, 0x01, 0x33, 0x44, 0xFF, 0xFF, 0xFF, 0xF1, 0x34, 0x00, 0x00, 0x01, 0xBB, 0x00, 0x01, 0x00, 0x01, 0x33, 0x44, 0xFF, 0x34}
 var ps5 []byte = []byte{0x00, 0x00, 0x01, 0xBA, 0x40, 0x01, 0x00, 0x01, 0x33, 0x44, 0xFF, 0xFF, 0xFF, 0xF1, 0x34, 0x00, 0x00, 0x01, 0xBB, 0x00, 0x09, 0x00, 0x01, 0x33, 0x44, 0xFF, 0x34, 0x81, 0x00, 0x00}
-var ps6 []byte = []byte{0x00, 0x00, 0x01, 0xBC, 0x40, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x34, 0x81, 0x00, 0x00}
+var ps6 []byte = []byte{0x00, 0x00, 0x01, 0xBC, 0x00, 0x0E, 0x80, 0xFF, 0x00, 0x00, 0x00, 0x04, 0x1B, 0xE0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 var ps7 []byte = []byte{0x00, 0x00, 0x01, 0xBA, 0x20, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03}
 
 func TestPSDemuxer_Input(t *testing.T) {
@@ -87,20 +88,22 @@ func TestPSDemuxer_Input(t *testing.T) {
 	}
 }
 func TestPSDemuxer(t *testing.T) {
-	var psUnpacker *PsDemuxer
-	os.Remove("h.ps")
-	os.Remove("h.h264")
-	os.Remove("ps_demux_result")
-	dumpFile := base.NewDumpFile()
-	err := dumpFile.OpenToRead("C:\\Users\\Administrator\\Desktop\\dump_37060000001320000001001.raw")
-	if err != nil {
-		fmt.Println(err)
-		return
+	samplePath := os.Getenv("LALMAX_PS_DEMUXER_SAMPLE")
+	if samplePath == "" {
+		t.Skip("set LALMAX_PS_DEMUXER_SAMPLE to a local RTP dump file to run this sample-based test")
 	}
-	psUnpacker = NewPsDemuxer()
+
+	dumpFile := base.NewDumpFile()
+	if err := dumpFile.OpenToRead(samplePath); err != nil {
+		t.Fatalf("open PS demuxer sample %q: %v", samplePath, err)
+	}
+	psUnpacker := NewPsDemuxer()
+	outputDir := t.TempDir()
 	psUnpacker.OnFrame = func(frame []byte, cid PsStreamType, pts uint64, dts uint64) {
 		if cid == PsStreamH264 || cid == PsStreamH265 {
-			writeFile("h.h264", frame)
+			if err := writeFile(filepath.Join(outputDir, "h.h264"), frame); err != nil {
+				t.Errorf("write decoded frame: %v", err)
+			}
 		} else {
 			if cid == PsStreamG711A {
 				nazalog.Infof("存在音频g711A 大小：%d  dts:%d", len(frame), dts)
@@ -112,10 +115,9 @@ func TestPSDemuxer(t *testing.T) {
 		}
 
 	}
-	fd3, err := os.OpenFile("ps_demux_result", os.O_CREATE|os.O_RDWR, 0666)
+	fd3, err := os.OpenFile(filepath.Join(outputDir, "ps_demux_result"), os.O_CREATE|os.O_RDWR, 0666)
 	if err != nil {
-		fmt.Println(err)
-		return
+		t.Fatalf("create demux result file: %v", err)
 	}
 	defer fd3.Close()
 	psUnpacker.OnPacket = func(pkg Display, decodeResult error) {
@@ -151,15 +153,15 @@ func TestPSDemuxer(t *testing.T) {
 		}
 	}
 
-	if err != nil {
-		return
-	}
 	packe := 0
 	Seq := 0
 	for {
 		m, err := dumpFile.ReadOneMessage()
 		if err == io.EOF {
 			break
+		}
+		if err != nil {
+			t.Fatalf("read PS demuxer sample: %v", err)
 		}
 		ipkt, err := rtprtcp.ParseRtpPacket(m.Body)
 		if err != nil {
@@ -173,40 +175,19 @@ func TestPSDemuxer(t *testing.T) {
 		}
 		Seq = int(ipkt.Header.Seq)
 		body := ipkt.Body()
-		writeFile("h.ps", body)
+		if err := writeFile(filepath.Join(outputDir, "h.ps"), body); err != nil {
+			t.Fatalf("write PS packet: %v", err)
+		}
 		fmt.Println(psUnpacker.Input(body))
 	}
 
 }
-func fileExists(fileName string) (bool, error) {
-	_, err := os.Stat(fileName)
-	if err == nil {
-		return true, nil
-	}
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	return false, err
-}
 func writeFile(filename string, buffer []byte) (err error) {
-	var fp *os.File
-	b, err := fileExists(filename)
+	fp, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o666)
 	if err != nil {
-		return
-	}
-	if !b {
-		fp, err = os.Create(filename)
-		if err != nil {
-			return
-		}
-	} else {
-		fp, err = os.OpenFile(filename, os.O_CREATE|os.O_APPEND, 6)
-		if err != nil {
-			return
-		}
+		return err
 	}
 	defer fp.Close()
 	_, err = fp.Write(buffer)
-
-	return
+	return err
 }

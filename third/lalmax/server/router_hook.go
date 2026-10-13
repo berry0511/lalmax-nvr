@@ -116,6 +116,16 @@ func writeHookEventSSE(w http.ResponseWriter, event HookEvent) error {
 	if _, err := fmt.Fprintf(w, "id: %d\n", event.ID); err != nil {
 		return err
 	}
+	if event.Traceparent != "" {
+		if _, err := fmt.Fprintf(w, "traceparent: %s\n", event.Traceparent); err != nil {
+			return err
+		}
+	}
+	if event.Tracestate != "" {
+		if _, err := fmt.Fprintf(w, "tracestate: %s\n", event.Tracestate); err != nil {
+			return err
+		}
+	}
 	if _, err := fmt.Fprintf(w, "event: %s\n", event.Event); err != nil {
 		return err
 	}

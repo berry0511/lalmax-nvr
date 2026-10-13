@@ -6,6 +6,7 @@ func (s *LalMaxServer) InitRouter(router *gin.Engine) {
 	if router == nil {
 		return
 	}
+	router.Use(otelMiddleware())
 	router.Use(s.Cors())
 
 	s.initRtcRouter(router)

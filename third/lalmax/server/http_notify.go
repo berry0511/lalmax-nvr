@@ -10,6 +10,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,6 +26,10 @@ import (
 	"github.com/q191201771/lal/pkg/base"
 	"github.com/q191201771/naza/pkg/nazahttp"
 	"github.com/q191201771/naza/pkg/nazalog"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // TODO(chef): refactor 配置参数供外部传入
@@ -57,10 +62,12 @@ type HookGroupInfo struct {
 }
 
 type HookEvent struct {
-	ID        int64           `json:"id"`
-	Event     string          `json:"event"`
-	Timestamp string          `json:"timestamp"`
-	Payload   json.RawMessage `json:"payload"`
+	ID          int64           `json:"id"`
+	Event       string          `json:"event"`
+	Timestamp   string          `json:"timestamp"`
+	Payload     json.RawMessage `json:"payload"`
+	Traceparent string          `json:"traceparent,omitempty"`
+	Tracestate  string          `json:"tracestate,omitempty"`
 
 	sessionID  string
 	streamName string
@@ -620,6 +627,30 @@ func (h *HttpNotify) publish(event string, info interface{}) {
 		Payload:   payload,
 	}
 	populateHookEventMeta(&hookEvent, info)
+	if isTraceableLifecycleEvent(event) {
+		attrs := []attribute.KeyValue{
+			attribute.String("nvr.media.event.type", event),
+		}
+		if h.serverId != "" {
+			attrs = append(attrs, attribute.String("nvr.media.server.id", h.serverId))
+		}
+		if hookEvent.appName != "" {
+			attrs = append(attrs, attribute.String("nvr.media.app", hookEvent.appName))
+		}
+		if hookEvent.streamName != "" {
+			attrs = append(attrs, attribute.String("nvr.stream.id", hookEvent.streamName))
+		}
+		if hookEvent.sessionID != "" {
+			attrs = append(attrs, attribute.String("nvr.media.session.id", hookEvent.sessionID))
+		}
+		ctx, span := otel.Tracer(tracerName).Start(context.Background(), "lalmax."+event,
+			trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attrs...))
+		carrier := propagation.MapCarrier{}
+		propagation.TraceContext{}.Inject(ctx, carrier)
+		hookEvent.Traceparent = carrier.Get("traceparent")
+		hookEvent.Tracestate = carrier.Get("tracestate")
+		defer span.End()
+	}
 
 	h.historyMux.Lock()
 	h.history = append(h.history, hookEvent)
@@ -653,6 +684,20 @@ func (h *HttpNotify) publish(event string, info interface{}) {
 		}
 	}
 	h.subscriberM.Unlock()
+}
+
+func isTraceableLifecycleEvent(event string) bool {
+	switch event {
+	case HookEventGroupStart, HookEventGroupStop, HookEventStreamActive,
+		HookEventPubStart, HookEventPubStop, HookEventSubStart, HookEventSubStop,
+		HookEventRelayPullStart, HookEventRelayPullStop, HookEventStreamNoneReader,
+		HookEventRtpServerTimeout, HookEventStreamNotFound:
+		return true
+	default:
+		// Periodic stats and per-segment HLS notifications are intentionally
+		// excluded to avoid high-volume, repetitive spans.
+		return false
+	}
 }
 
 func populateHookEventMeta(event *HookEvent, info interface{}) {

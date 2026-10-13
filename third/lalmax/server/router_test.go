@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -58,8 +59,6 @@ var onUpdateHook func(base.UpdateInfo)
 var onUpdateHookMu sync.RWMutex
 var testSeq atomic.Int64
 
-const httpNotifyAddr = ":55559"
-
 func uniqueTestName(prefix string) string {
 	return fmt.Sprintf("%s_%d", prefix, testSeq.Add(1))
 }
@@ -74,26 +73,14 @@ func findTestGroup(groups []LalmaxStatGroup, streamName string) *LalmaxStatGroup
 }
 
 func TestMain(m *testing.M) {
-	var err error
-	max, err = NewLalMaxServer(&config.Config{
-		Fmp4Config: config.Fmp4Config{
-			Http: config.Fmp4HttpConfig{Enable: true},
-		},
-		LalRawContent: []byte(`{"rtmp":{"enable":false},"rtsp":{"enable":false},"http_api":{"enable":false},"pprof":{"enable":false}}`),
-		HttpConfig: config.HttpConfig{
-			ListenAddr: ":52349",
-		},
-		HttpNotifyConfig: config.HttpNotifyConfig{
-			Enable:            true,
-			UpdateIntervalSec: 2,
-			OnUpdate:          fmt.Sprintf("http://127.0.0.1%s/on_update", httpNotifyAddr),
-		},
-	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		panic(err)
+		fmt.Fprintf(os.Stderr, "start HTTP notify test server: %v\n", err)
+		os.Exit(1)
 	}
 
-	http.HandleFunc("/on_update", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/on_update", func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 
 		var out base.UpdateInfo
@@ -111,17 +98,49 @@ func TestMain(m *testing.M) {
 
 		w.WriteHeader(http.StatusOK)
 	})
-
-	ln, err := net.Listen("tcp", httpNotifyAddr)
-	if err != nil {
-		panic(err)
-	}
 	go func() {
-		_ = http.Serve(ln, nil)
+		_ = http.Serve(ln, mux)
 	}()
 
-	go max.Run()
-	os.Exit(m.Run())
+	max, err = NewLalMaxServer(&config.Config{
+		Fmp4Config: config.Fmp4Config{
+			Http: config.Fmp4HttpConfig{Enable: true},
+		},
+		LalRawContent: []byte(`{"rtmp":{"enable":false},"rtsp":{"enable":false},"http_api":{"enable":false},"pprof":{"enable":false}}`),
+		HttpConfig: config.HttpConfig{
+			ListenAddr: "127.0.0.1:0",
+		},
+		HttpNotifyConfig: config.HttpNotifyConfig{
+			Enable:            true,
+			UpdateIntervalSec: 2,
+			OnUpdate:          fmt.Sprintf("http://%s/on_update", ln.Addr().String()),
+		},
+	})
+	if err != nil {
+		_ = ln.Close()
+		fmt.Fprintf(os.Stderr, "create lalmax test server: %v\n", err)
+		os.Exit(1)
+	}
+	if err := max.Start(context.Background()); err != nil {
+		_ = ln.Close()
+		fmt.Fprintf(os.Stderr, "start lalmax test server: %v\n", err)
+		os.Exit(1)
+	}
+
+	code := m.Run()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := max.Shutdown(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "shutdown lalmax test server: %v\n", err)
+		if code == 0 {
+			code = 1
+		}
+	}
+	if err := ln.Close(); err != nil && code == 0 {
+		fmt.Fprintf(os.Stderr, "close HTTP notify test server: %v\n", err)
+		code = 1
+	}
+	os.Exit(code)
 }
 
 func TestAllGroup(t *testing.T) {

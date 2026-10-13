@@ -7,6 +7,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/lalmax-pro/lalmax-nvr/internal/observability"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 var ingestLogger = slog.Default().With("component", "media-ingest")
@@ -46,9 +50,12 @@ func (s rtmpSubscriber) subscribe(ctx context.Context) (<-chan ingestEvent, erro
 		defer close(out)
 		for ev := range events {
 			out <- ingestEvent{
-				Protocol: ev.Protocol,
-				StreamID: ev.StreamID,
-				Type:     ev.Type,
+				Protocol:    ev.Protocol,
+				StreamID:    ev.StreamID,
+				Type:        ev.Type,
+				SessionID:   ev.SessionID,
+				Traceparent: ev.Traceparent,
+				Tracestate:  ev.Tracestate,
 			}
 		}
 	}()
@@ -72,9 +79,12 @@ func (s srtSubscriber) subscribe(ctx context.Context) (<-chan ingestEvent, error
 		defer close(out)
 		for ev := range events {
 			out <- ingestEvent{
-				Protocol: ev.Protocol,
-				StreamID: ev.StreamID,
-				Type:     ev.Type,
+				Protocol:    ev.Protocol,
+				StreamID:    ev.StreamID,
+				Type:        ev.Type,
+				SessionID:   ev.SessionID,
+				Traceparent: ev.Traceparent,
+				Tracestate:  ev.Tracestate,
 			}
 		}
 	}()
@@ -98,9 +108,12 @@ func (s whipSubscriber) subscribe(ctx context.Context) (<-chan ingestEvent, erro
 		defer close(out)
 		for ev := range events {
 			out <- ingestEvent{
-				Protocol: ev.Protocol,
-				StreamID: ev.StreamID,
-				Type:     ev.Type,
+				Protocol:    ev.Protocol,
+				StreamID:    ev.StreamID,
+				Type:        ev.Type,
+				SessionID:   ev.SessionID,
+				Traceparent: ev.Traceparent,
+				Tracestate:  ev.Tracestate,
 			}
 		}
 	}()
@@ -108,9 +121,12 @@ func (s whipSubscriber) subscribe(ctx context.Context) (<-chan ingestEvent, erro
 }
 
 type ingestEvent struct {
-	Protocol string
-	StreamID string
-	Type     string
+	Protocol    string
+	StreamID    string
+	SessionID   string
+	Traceparent string
+	Tracestate  string
+	Type        string
 }
 
 // OnIngestStart is called when a push stream is detected and mapped to a camera.
@@ -212,6 +228,13 @@ func (h *IngestHandler) run(ctx context.Context, events <-chan ingestEvent) {
 }
 
 func (h *IngestHandler) handleEvent(ctx context.Context, ev ingestEvent) {
+	if ev.Traceparent != "" {
+		carrier := propagation.MapCarrier{"traceparent": ev.Traceparent}
+		if ev.Tracestate != "" {
+			carrier["tracestate"] = ev.Tracestate
+		}
+		ctx = propagation.TraceContext{}.Extract(ctx, carrier)
+	}
 	protocol := h.subscriber.protocol()
 	if !ingestProtocolMatch(protocol, ev.Protocol) {
 		return
@@ -221,12 +244,21 @@ func (h *IngestHandler) handleEvent(ctx context.Context, ev ingestEvent) {
 	if streamName == "" {
 		return
 	}
+	ctx, span := observability.StartBusinessSpan(ctx, "media.ingest.event",
+		attribute.String("nvr.stream.id", streamName),
+		attribute.String("nvr.media.protocol", protocol),
+		attribute.String("nvr.media.event.type", ev.Type),
+	)
+	if ev.SessionID != "" {
+		span.SetAttributes(attribute.String("nvr.media.session.id", ev.SessionID))
+	}
+	defer span.End()
 
 	switch ev.Type {
 	case "pub_start", "stream_active":
 		h.handleStreamStart(ctx, streamName)
 	case "pub_stop", "stream_stopped":
-		h.handleStreamStop(streamName)
+		h.handleStreamStop(ctx, streamName)
 	}
 }
 
@@ -240,7 +272,7 @@ func (h *IngestHandler) handleStreamStart(ctx context.Context, streamName string
 
 	cameraID, ok := h.resolv(streamName)
 	if !ok {
-		ingestLogger.Debug("push stream not mapped to camera", "protocol", h.subscriber.protocol(), "stream", streamName)
+		ingestLogger.DebugContext(ctx, "push stream not mapped to camera", "protocol", h.subscriber.protocol(), "stream", streamName)
 		return
 	}
 
@@ -248,14 +280,14 @@ func (h *IngestHandler) handleStreamStart(ctx context.Context, streamName string
 	h.active[streamName] = cameraID
 	h.mu.Unlock()
 
-	ingestLogger.Info("ingest detected", "protocol", h.subscriber.protocol(), "camera_id", cameraID, "stream", streamName)
+	ingestLogger.InfoContext(ctx, "ingest detected", "protocol", h.subscriber.protocol(), "camera_id", cameraID, "stream", streamName)
 
 	if h.onStart != nil {
 		h.onStart(cameraID, streamName)
 	}
 }
 
-func (h *IngestHandler) handleStreamStop(streamName string) {
+func (h *IngestHandler) handleStreamStop(ctx context.Context, streamName string) {
 	h.mu.Lock()
 	cameraID, exists := h.active[streamName]
 	if !exists {
@@ -265,7 +297,7 @@ func (h *IngestHandler) handleStreamStop(streamName string) {
 	delete(h.active, streamName)
 	h.mu.Unlock()
 
-	ingestLogger.Info("ingest stopped", "protocol", h.subscriber.protocol(), "camera_id", cameraID, "stream", streamName)
+	ingestLogger.InfoContext(ctx, "ingest stopped", "protocol", h.subscriber.protocol(), "camera_id", cameraID, "stream", streamName)
 
 	if h.onStop != nil {
 		h.onStop(cameraID, streamName)

@@ -760,15 +760,23 @@ func NewApp(cfg *config.Config, configPath string) (*App, error) {
 	// an exporter; external OTLP/HTTP export is configured only through YAML.
 	otlpTimeout, _ := time.ParseDuration(cfg.Observability.OTLP.Timeout)
 	otlpMetricsInterval, _ := time.ParseDuration(cfg.Observability.OTLP.MetricsExportInterval)
+	otlpLogsInterval, _ := time.ParseDuration(cfg.Observability.OTLP.LogsExportInterval)
+	traceRetention, _ := time.ParseDuration(cfg.Observability.TraceRetention)
 	a.otelProvider, err = observability.NewProvider(context.Background(), appVersion, observability.ProviderConfig{
 		Enabled:               cfg.Observability.OTLP.Enabled,
 		Endpoint:              cfg.Observability.OTLP.Endpoint,
 		ServiceName:           cfg.Observability.OTLP.ServiceName,
 		TracesEnabled:         cfg.Observability.OTLP.ExportTraces(),
 		MetricsEnabled:        cfg.Observability.OTLP.ExportMetrics(),
+		LogsEnabled:           cfg.Observability.OTLP.ExportLogs(),
 		Headers:               cfg.Observability.OTLP.Headers,
 		Timeout:               otlpTimeout,
 		MetricsExportInterval: otlpMetricsInterval,
+		LogsExportInterval:    otlpLogsInterval,
+		LocalTraceStore:       db,
+		LocalTraceEnabled:     cfg.Observability.LocalTraceEnabled,
+		TraceRetention:        traceRetention,
+		MaxLocalTraces:        cfg.Observability.MaxLocalTraces,
 	})
 	if err != nil {
 		db.Close()
@@ -884,6 +892,11 @@ func (a *App) buildRouter() http.Handler {
 	handler.SetMultiUserAuthMW(a.multiUserMW)
 	handler.SetRestartFunc(func() {
 		go a.restartProcess()
+	})
+	handler.SetLocalTraceEnabled(func(enabled bool) {
+		if a.otelProvider != nil {
+			a.otelProvider.SetLocalTraceEnabled(enabled)
+		}
 	})
 
 	// Wire streaming managers
@@ -1631,7 +1644,6 @@ func (a *App) Stop() error {
 		if err := a.camMgr.Stop(); err != nil {
 			log.Warn("camera manager stop error", "error", err)
 		}
-
 		if a.otelProvider != nil {
 			log.Info("flushing OpenTelemetry providers")
 			if err := a.otelProvider.Shutdown(shutdownCtx); err != nil {
@@ -1642,18 +1654,18 @@ func (a *App) Stop() error {
 		// 9. Storage (DB)
 		log.Info("closing database")
 		a.db.Close()
+		log.Info("shutdown complete")
+		log.Info("lalmax-nvr stopped")
 
 		close(done)
 	}()
 
 	select {
 	case <-done:
-		authmw.ComponentLogger("server").Info("shutdown complete")
 	case <-shutdownCtx.Done():
 		authmw.ComponentLogger("server").Warn("shutdown timed out, forcing exit")
 	}
 
-	slog.Info("lalmax-nvr stopped")
 	return nil
 }
 

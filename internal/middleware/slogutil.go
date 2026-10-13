@@ -1,9 +1,12 @@
 package middleware
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"strings"
+
+	"go.opentelemetry.io/contrib/bridges/otelslog"
 )
 
 // SetupLogger creates and configures a logger with the specified level and format.
@@ -36,7 +39,39 @@ func SetupLogger(level, format string) *slog.Logger {
 		stdout = slog.NewTextHandler(os.Stdout, opts)
 	}
 
-	return slog.New(newTeeHandler(stdout, NewRingHandler(DefaultLogRing(), logLevel)))
+	otelHandler := newLevelFilterHandler(otelslog.NewHandler(
+		"github.com/lalmax-pro/lalmax-nvr",
+		otelslog.WithSource(true),
+	), logLevel)
+	return slog.New(newTeeHandler(stdout, NewRingHandler(DefaultLogRing(), logLevel), otelHandler))
+}
+
+type levelFilterHandler struct {
+	handler slog.Handler
+	level   slog.Level
+}
+
+func newLevelFilterHandler(handler slog.Handler, level slog.Level) slog.Handler {
+	return &levelFilterHandler{handler: handler, level: level}
+}
+
+func (h *levelFilterHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return level >= h.level && h.handler.Enabled(ctx, level)
+}
+
+func (h *levelFilterHandler) Handle(ctx context.Context, record slog.Record) error {
+	if record.Level < h.level {
+		return nil
+	}
+	return h.handler.Handle(ctx, record)
+}
+
+func (h *levelFilterHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &levelFilterHandler{handler: h.handler.WithAttrs(attrs), level: h.level}
+}
+
+func (h *levelFilterHandler) WithGroup(name string) slog.Handler {
+	return &levelFilterHandler{handler: h.handler.WithGroup(name), level: h.level}
 }
 
 // ComponentLogger creates a logger with a component attribute.

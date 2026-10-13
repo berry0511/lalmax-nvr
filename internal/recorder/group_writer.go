@@ -10,9 +10,11 @@ import (
 	"github.com/lalmax-pro/lalmax-nvr/internal/event"
 	"github.com/lalmax-pro/lalmax-nvr/internal/media"
 	"github.com/lalmax-pro/lalmax-nvr/internal/model"
+	"github.com/lalmax-pro/lalmax-nvr/internal/observability"
 	"github.com/lalmax-pro/lalmax-nvr/internal/storage"
 	"github.com/q191201771/lal/pkg/base"
 	maxlogic "github.com/q191201771/lalmax/logic"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const groupQueueSize = 2048
@@ -217,6 +219,12 @@ func (w *GroupWriter) StreamInfo(cameraID string) (model.Format, []byte, []byte,
 
 // Attach subscribes cameraID when its lalmax group already exists.
 func (w *GroupWriter) Attach(cameraID string) {
+	w.AttachContext(context.Background(), cameraID)
+}
+
+// AttachContext subscribes cameraID and carries the caller trace into the
+// asynchronous group writer session.
+func (w *GroupWriter) AttachContext(ctx context.Context, cameraID string) {
 	if w == nil || cameraID == "" || media.IsSubStreamID(cameraID) {
 		return
 	}
@@ -224,14 +232,27 @@ func (w *GroupWriter) Attach(cameraID string) {
 	if !ok {
 		return
 	}
-	w.AttachCamera(cam)
+	w.AttachCameraContext(ctx, cam)
 }
 
 // AttachCamera subscribes cam when its group exists and the camera is accepted.
 func (w *GroupWriter) AttachCamera(cam config.CameraConfig) {
+	w.AttachCameraContext(context.Background(), cam)
+}
+
+// AttachCameraContext subscribes cam and carries the caller trace into the
+// asynchronous group writer session.
+func (w *GroupWriter) AttachCameraContext(ctx context.Context, cam config.CameraConfig) {
 	if w == nil || cam.ID == "" || media.IsSubStreamID(cam.ID) || (cam.Protocol != "voip" && !w.Accepts(cam)) {
 		return
 	}
+	ctx, span := observability.StartBusinessSpan(ctx, "recording.group.attach",
+		attribute.String("nvr.camera.id", cam.ID),
+		attribute.String("nvr.stream.id", cam.StreamID),
+		attribute.String("nvr.media.protocol", string(cam.Protocol)),
+		attribute.String("nvr.media.encoding", cam.Encoding),
+	)
+	defer span.End()
 	w.mu.Lock()
 	if _, exists := w.sessions[cam.ID]; exists {
 		w.mu.Unlock()
@@ -251,6 +272,7 @@ func (w *GroupWriter) AttachCamera(cam config.CameraConfig) {
 		subID:     "nvr-record-" + cam.ID,
 		audio:     cam.AudioEnabled,
 		audioOnly: cam.Encoding == "audio",
+		traceCtx:  observability.DetachedContext(ctx),
 		segDur:    w.segDur,
 		store:     w.store,
 		db:        w.db,
@@ -320,6 +342,12 @@ func (w *GroupWriter) forget(cameraID string, removeSub bool) {
 
 // Sync attaches groups that already exist and drops subscribers whose group is gone.
 func (w *GroupWriter) Sync() {
+	w.SyncContext(context.Background())
+}
+
+// SyncContext reconciles subscriptions and uses ctx as the parent for any
+// sessions attached during this pass.
+func (w *GroupWriter) SyncContext(ctx context.Context) {
 	if w == nil || w.groups == nil {
 		return
 	}
@@ -329,7 +357,7 @@ func (w *GroupWriter) Sync() {
 			return
 		}
 		seen[streamName] = struct{}{}
-		w.Attach(streamName)
+		w.AttachContext(ctx, streamName)
 	})
 	w.mu.Lock()
 	var stale []string
@@ -358,7 +386,7 @@ func (w *GroupWriter) Run(ctx context.Context) {
 	w.mu.Unlock()
 	defer w.Close()
 
-	w.Sync()
+	w.SyncContext(ctx)
 	var events <-chan media.Event
 	if w.engine != nil {
 		ch, err := w.engine.SubscribeEvents(ctx, media.EventFilter{Types: []media.EventType{
@@ -382,18 +410,18 @@ func (w *GroupWriter) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			w.Sync()
+			w.SyncContext(ctx)
 		case ev, ok := <-events:
 			if !ok {
 				events = nil
 				continue
 			}
-			w.onEvent(ev)
+			w.onEvent(ctx, ev)
 		}
 	}
 }
 
-func (w *GroupWriter) onEvent(ev media.Event) {
+func (w *GroupWriter) onEvent(ctx context.Context, ev media.Event) {
 	if media.IsSubStreamID(ev.StreamID) {
 		return
 	}
@@ -401,7 +429,7 @@ func (w *GroupWriter) onEvent(ev media.Event) {
 	case media.EventPublisherStopped, media.EventRelayPullStopped, media.EventStreamStopped:
 		w.Detach(ev.StreamID)
 	default:
-		w.Attach(ev.StreamID)
+		w.AttachContext(ctx, ev.StreamID)
 	}
 }
 

@@ -21,6 +21,8 @@ import (
 	"github.com/q191201771/naza/pkg/nazalog"
 
 	"github.com/lalmax-pro/lalmax-nvr/internal/config"
+	"github.com/lalmax-pro/lalmax-nvr/internal/observability"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 type EmbeddedLalmaxConfig struct {
@@ -226,22 +228,33 @@ func (e *EmbeddedLalmax) PlayHTTPHandler() http.Handler {
 }
 
 // AddCustomizePubSession registers a custom publish session for feeding frames directly into lal.
-func (e *EmbeddedLalmax) AddCustomizePubSession(_ context.Context, streamName string) (CustomizePubSession, error) {
+func (e *EmbeddedLalmax) AddCustomizePubSession(ctx context.Context, streamName string) (session CustomizePubSession, retErr error) {
+	_, span := observability.StartBusinessSpan(ctx, "lalmax.publish_session.add",
+		attribute.String("nvr.stream.id", streamName),
+		attribute.String("nvr.media.engine.mode", "embedded"),
+	)
+	defer func() { observability.EndBusinessSpan(span, retErr) }()
+
 	e.mu.Lock()
 	server := e.server
 	e.mu.Unlock()
 	if server == nil {
 		return nil, fmt.Errorf("embedded lalmax server is nil")
 	}
-	ctx, err := server.AddCustomizePubSession(streamName)
+	pubCtx, err := server.AddCustomizePubSession(streamName)
 	if err != nil {
 		return nil, err
 	}
-	return &customizePubSessionWrapper{ctx: ctx}, nil
+	return &customizePubSessionWrapper{ctx: pubCtx}, nil
 }
 
 // DelCustomizePubSession removes a custom publish session.
-func (e *EmbeddedLalmax) DelCustomizePubSession(_ context.Context, session CustomizePubSession) error {
+func (e *EmbeddedLalmax) DelCustomizePubSession(ctx context.Context, session CustomizePubSession) (retErr error) {
+	_, span := observability.StartBusinessSpan(ctx, "lalmax.publish_session.remove",
+		attribute.String("nvr.media.engine.mode", "embedded"),
+	)
+	defer func() { observability.EndBusinessSpan(span, retErr) }()
+
 	wrapper, ok := session.(*customizePubSessionWrapper)
 	if !ok {
 		return fmt.Errorf("invalid session type")

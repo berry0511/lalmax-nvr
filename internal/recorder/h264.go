@@ -28,6 +28,8 @@ import (
 	"github.com/lalmax-pro/lalmax-nvr/internal/model"
 	"github.com/lalmax-pro/lalmax-nvr/internal/model/nalutil"
 	"github.com/lalmax-pro/lalmax-nvr/internal/muxer"
+	"github.com/lalmax-pro/lalmax-nvr/internal/observability"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 var h264Logger = slog.Default().With("component", "h264-recorder")
@@ -86,6 +88,7 @@ type H264Recorder struct {
 	status  model.RecorderStatus
 	cancel  context.CancelFunc
 	done    chan struct{}
+	runCtx  context.Context
 	paused  atomic.Bool // when true, frames are consumed but not written to disk
 	preroll *prerollRing
 
@@ -215,8 +218,9 @@ func (r *H264Recorder) Start(ctx context.Context) error {
 	if r.status == model.StatusRecording || r.status == model.StatusReconnecting {
 		return fmt.Errorf("recorder for %q already running", r.cfg.CameraID)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(observability.DetachedContext(ctx))
 	r.cancel = cancel
+	r.runCtx = ctx
 	r.done = make(chan struct{})
 	r.status = model.StatusRecording
 	r.incActive()
@@ -296,6 +300,7 @@ func (r *H264Recorder) run(ctx context.Context) {
 	defer r.setStatus(model.StatusStopped)
 	var retryCount int
 	for {
+		r.retryCount = retryCount
 		err, connected := r.connectAndRecord(ctx)
 		if ctx.Err() != nil {
 			return
@@ -311,7 +316,7 @@ func (r *H264Recorder) run(ctx context.Context) {
 		if r.metrics != nil {
 			r.metrics.CameraReconnectBackoffSeconds.WithLabelValues(r.cfg.CameraID).Set(backoff.Seconds())
 		}
-		h264Logger.Error("connection error, reconnecting", "camera_id", r.cfg.CameraID, "error", err, "backoff", backoff, "attempt", retryCount)
+		h264Logger.ErrorContext(ctx, "connection error, reconnecting", "camera_id", r.cfg.CameraID, "error", err, "backoff", backoff, "attempt", retryCount)
 		r.recordError("connection")
 
 		// Track disconnect info for the first segment after recovery.
@@ -327,6 +332,16 @@ func (r *H264Recorder) run(ctx context.Context) {
 			return
 		case <-time.After(backoff):
 		}
+	}
+}
+
+func (r *H264Recorder) connectionSpanAttributes(protocol string) []attribute.KeyValue {
+	return []attribute.KeyValue{
+		attribute.String("nvr.camera.id", r.cfg.CameraID),
+		attribute.String("nvr.stream.id", streamIDOrCameraID(r.cfg.StreamID, r.cfg.CameraID)),
+		attribute.String("nvr.media.protocol", protocol),
+		attribute.String("nvr.media.encoding", "h264"),
+		attribute.Int("nvr.connection.retry_count", r.retryCount),
 	}
 }
 
@@ -346,7 +361,13 @@ func (r *H264Recorder) connectAndRecord(ctx context.Context) (error, bool) {
 }
 
 func (r *H264Recorder) connectAndRecordFrames(ctx context.Context) (error, bool) {
-	sub, err := r.cfg.FrameSource(ctx)
+	attrs := r.connectionSpanAttributes("frames")
+	var sub media.FrameSubscription
+	ctx, err := observability.RunBusinessOperation(ctx, "recorder.frames.subscribe", func(opCtx context.Context) error {
+		var err error
+		sub, err = r.cfg.FrameSource(opCtx)
+		return err
+	}, attrs...)
 	if err != nil {
 		return err, false
 	}
@@ -507,6 +528,7 @@ func (r *H264Recorder) writeMediaAudioSample(data []byte, dur time.Duration) {
 }
 
 func (r *H264Recorder) connectAndRecordRTSP(ctx context.Context) (error, bool) {
+	attrs := r.connectionSpanAttributes("rtsp")
 	u, err := base.ParseURL(r.cfg.RTSPURL)
 	if err != nil {
 		return fmt.Errorf("invalid RTSP URL: %w", err), false
@@ -522,12 +544,18 @@ func (r *H264Recorder) connectAndRecordRTSP(ctx context.Context) (error, bool) {
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 	}
-	if err := client.Start(); err != nil {
+	ctx, err = observability.RunBusinessOperation(ctx, "recorder.rtsp.connect", func(context.Context) error { return client.Start() }, attrs...)
+	if err != nil {
 		return fmt.Errorf("client start: %w", err), false
 	}
 	defer client.Close()
 
-	desc, _, err := client.Describe(u)
+	var desc *description.Session
+	ctx, err = observability.RunBusinessOperation(ctx, "recorder.rtsp.describe", func(context.Context) error {
+		var err error
+		desc, _, err = client.Describe(u)
+		return err
+	}, attrs...)
 	if err != nil {
 		return fmt.Errorf("DESCRIBE: %w", err), false
 	}
@@ -540,7 +568,11 @@ func (r *H264Recorder) connectAndRecordRTSP(ctx context.Context) (error, bool) {
 	if err != nil {
 		return fmt.Errorf("create RTP decoder: %w", err), false
 	}
-	if _, err := client.Setup(desc.BaseURL, medi, 0, 0); err != nil {
+	ctx, err = observability.RunBusinessOperation(ctx, "recorder.rtsp.setup_video", func(context.Context) error {
+		_, err := client.Setup(desc.BaseURL, medi, 0, 0)
+		return err
+	}, attrs...)
+	if err != nil {
 		return fmt.Errorf("SETUP: %w", err), false
 	}
 
@@ -736,7 +768,11 @@ func (r *H264Recorder) connectAndRecordRTSP(ctx context.Context) (error, bool) {
 	}
 
 	r.setStatus(model.StatusRecording)
-	if _, err := client.Play(nil); err != nil {
+	_, err = observability.RunBusinessOperation(ctx, "recorder.rtsp.play", func(context.Context) error {
+		_, err := client.Play(nil)
+		return err
+	}, attrs...)
+	if err != nil {
 		close(r.frameCh)
 		<-writerDone
 		return fmt.Errorf("PLAY: %w", err), false
@@ -920,8 +956,18 @@ func (r *H264Recorder) closeCurrentSegmentLocked() {
 	if r.muxer == nil {
 		return
 	}
+	baseCtx := observability.DetachedContext(r.runCtx)
+	_, span := observability.StartBusinessSpan(baseCtx, "recording.segment.finalize",
+		attribute.String("nvr.camera.id", r.cfg.CameraID),
+		attribute.String("nvr.stream.id", streamIDOrCameraID(r.cfg.StreamID, r.cfg.CameraID)),
+		attribute.String("nvr.recording.format", "h264"),
+		attribute.Int("nvr.recording.frame_count", r.frameCount),
+	)
+	var finalizeErr error
+	defer func() { observability.EndBusinessSpan(span, finalizeErr) }()
 	if err := r.muxer.Close(); err != nil {
-		h264Logger.Error("failed to close muxer", "camera_id", r.cfg.CameraID, "error", err)
+		finalizeErr = err
+		h264Logger.ErrorContext(baseCtx, "failed to close muxer", "camera_id", r.cfg.CameraID, "error", err)
 		if r.curTempPath != "" {
 			os.Remove(r.curTempPath)
 		}
@@ -936,7 +982,8 @@ func (r *H264Recorder) closeCurrentSegmentLocked() {
 	// Atomic rename: temp → final
 	if r.curTempPath != "" && r.curFinalPath != "" {
 		if err := r.store.CloseSegment(r.curTempPath, r.curFinalPath); err != nil {
-			h264Logger.Error("failed to close segment", "camera_id", r.cfg.CameraID, "error", err)
+			finalizeErr = err
+			h264Logger.ErrorContext(baseCtx, "failed to close segment", "camera_id", r.cfg.CameraID, "error", err)
 		}
 	}
 
@@ -967,8 +1014,9 @@ func (r *H264Recorder) closeCurrentSegmentLocked() {
 			fileSize = info.Size()
 			rec.FileSize = fileSize
 		}
-		if err := r.cfg.DB.InsertRecordingWithRetry(context.Background(), rec, 3, 500*time.Millisecond); err != nil {
-			h264Logger.Error("failed to insert recording", "camera_id", r.cfg.CameraID, "error", err)
+		if err := r.cfg.DB.InsertRecordingWithRetry(baseCtx, rec, 3, 500*time.Millisecond); err != nil {
+			finalizeErr = err
+			h264Logger.ErrorContext(baseCtx, "failed to insert recording", "camera_id", r.cfg.CameraID, "error", err)
 		}
 	}
 

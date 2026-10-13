@@ -297,24 +297,34 @@ type WebDAVConfig struct {
 
 // ObservabilityConfig defines observability settings
 type ObservabilityConfig struct {
-	LogLevel    string     `yaml:"log_level"`    // default "info"
-	LogFormat   string     `yaml:"log_format"`   // default "text"
-	EnablePprof bool       `yaml:"enable_pprof"` // default false
-	OTLP        OTLPConfig `yaml:"otlp"`
+	LogLevel           string     `yaml:"log_level"`             // default "info"
+	LogFormat          string     `yaml:"log_format"`            // default "text"
+	EnablePprof        bool       `yaml:"enable_pprof"`          // default false
+	TraceRetention     string     `yaml:"trace_retention"`       // local trace retention, default 24h
+	MaxLocalTraces     int        `yaml:"max_local_traces"`      // local trace cap, default 10000
+	LocalTraceEnabled  *bool      `yaml:"local_trace_enabled"`   // store spans in the local trace database, default true
+	TraceUIURLTemplate string     `yaml:"trace_ui_url_template"` // optional third-party trace URL containing {trace_id}
+	OTLP               OTLPConfig `yaml:"otlp"`
+}
+
+func (c ObservabilityConfig) LocalTracesEnabled() bool {
+	return c.LocalTraceEnabled == nil || *c.LocalTraceEnabled
 }
 
 // OTLPConfig defines export to an external OTLP/HTTP collector.
 // Pointer booleans preserve an explicitly configured false while allowing
-// traces and metrics to default to enabled.
+// traces, metrics, and logs to default to enabled.
 type OTLPConfig struct {
 	Enabled               bool              `yaml:"enabled"`
 	Endpoint              string            `yaml:"endpoint"`
 	ServiceName           string            `yaml:"service_name"`
 	TracesEnabled         *bool             `yaml:"traces_enabled"`
 	MetricsEnabled        *bool             `yaml:"metrics_enabled"`
+	LogsEnabled           *bool             `yaml:"logs_enabled"`
 	Headers               map[string]string `yaml:"headers,omitempty"`
 	Timeout               string            `yaml:"timeout"`
 	MetricsExportInterval string            `yaml:"metrics_export_interval"`
+	LogsExportInterval    string            `yaml:"logs_export_interval"`
 }
 
 func (c OTLPConfig) ExportTraces() bool {
@@ -323,6 +333,10 @@ func (c OTLPConfig) ExportTraces() bool {
 
 func (c OTLPConfig) ExportMetrics() bool {
 	return c.MetricsEnabled == nil || *c.MetricsEnabled
+}
+
+func (c OTLPConfig) ExportLogs() bool {
+	return c.LogsEnabled == nil || *c.LogsEnabled
 }
 
 type HLSConfig struct {
@@ -813,6 +827,21 @@ func Validate(cfg *Config) error {
 	if cfg.Observability.LogFormat != "json" && cfg.Observability.LogFormat != "text" {
 		return fmt.Errorf("observability.log_format invalid: %s (must be json/text)", cfg.Observability.LogFormat)
 	}
+	if raw := strings.TrimSpace(cfg.Observability.TraceRetention); raw != "" {
+		if retention, err := time.ParseDuration(raw); err != nil || retention <= 0 {
+			return fmt.Errorf("observability.trace_retention must be a positive duration")
+		}
+	}
+	if cfg.Observability.MaxLocalTraces != 0 && (cfg.Observability.MaxLocalTraces < 100 || cfg.Observability.MaxLocalTraces > 1000000) {
+		return fmt.Errorf("observability.max_local_traces must be between 100 and 1000000")
+	}
+	if raw := strings.TrimSpace(cfg.Observability.TraceUIURLTemplate); raw != "" {
+		candidate := strings.ReplaceAll(raw, "{trace_id}", strings.Repeat("0", 32))
+		parsed, err := url.Parse(candidate)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || !strings.Contains(raw, "{trace_id}") {
+			return fmt.Errorf("observability.trace_ui_url_template must be an http(s) URL containing {trace_id}")
+		}
+	}
 	if cfg.Observability.OTLP.Enabled {
 		otlp := cfg.Observability.OTLP
 		endpoint, err := url.Parse(otlp.Endpoint)
@@ -822,8 +851,8 @@ func Validate(cfg *Config) error {
 		if endpoint.RawQuery != "" || endpoint.Fragment != "" {
 			return fmt.Errorf("observability.otlp.endpoint must not contain a query or fragment")
 		}
-		if !otlp.ExportTraces() && !otlp.ExportMetrics() {
-			return fmt.Errorf("observability.otlp requires traces_enabled or metrics_enabled")
+		if !otlp.ExportTraces() && !otlp.ExportMetrics() && !otlp.ExportLogs() {
+			return fmt.Errorf("observability.otlp requires traces_enabled, metrics_enabled, or logs_enabled")
 		}
 		if strings.TrimSpace(otlp.ServiceName) == "" {
 			return fmt.Errorf("observability.otlp.service_name is required")
@@ -833,6 +862,9 @@ func Validate(cfg *Config) error {
 		}
 		if interval, err := time.ParseDuration(otlp.MetricsExportInterval); err != nil || interval <= 0 {
 			return fmt.Errorf("observability.otlp.metrics_export_interval must be a positive duration")
+		}
+		if interval, err := time.ParseDuration(otlp.LogsExportInterval); err != nil || interval <= 0 {
+			return fmt.Errorf("observability.otlp.logs_export_interval must be a positive duration")
 		}
 		for name, value := range otlp.Headers {
 			if strings.TrimSpace(name) == "" || strings.ContainsAny(name+value, "\r\n") {
@@ -1164,6 +1196,16 @@ func (cfg *Config) ApplyDefaults() {
 	if strings.TrimSpace(cfg.Observability.LogFormat) == "" {
 		cfg.Observability.LogFormat = "text"
 	}
+	if strings.TrimSpace(cfg.Observability.TraceRetention) == "" {
+		cfg.Observability.TraceRetention = "24h"
+	}
+	if cfg.Observability.MaxLocalTraces == 0 {
+		cfg.Observability.MaxLocalTraces = 10000
+	}
+	if cfg.Observability.LocalTraceEnabled == nil {
+		cfg.Observability.LocalTraceEnabled = new(bool)
+		*cfg.Observability.LocalTraceEnabled = true
+	}
 	// EnablePprof defaults to false (zero value)
 	if strings.TrimSpace(cfg.Observability.OTLP.Endpoint) == "" {
 		cfg.Observability.OTLP.Endpoint = "http://127.0.0.1:4318"
@@ -1179,11 +1221,18 @@ func (cfg *Config) ApplyDefaults() {
 		cfg.Observability.OTLP.MetricsEnabled = new(bool)
 		*cfg.Observability.OTLP.MetricsEnabled = true
 	}
+	if cfg.Observability.OTLP.LogsEnabled == nil {
+		cfg.Observability.OTLP.LogsEnabled = new(bool)
+		*cfg.Observability.OTLP.LogsEnabled = true
+	}
 	if strings.TrimSpace(cfg.Observability.OTLP.Timeout) == "" {
 		cfg.Observability.OTLP.Timeout = "10s"
 	}
 	if strings.TrimSpace(cfg.Observability.OTLP.MetricsExportInterval) == "" {
 		cfg.Observability.OTLP.MetricsExportInterval = "30s"
+	}
+	if strings.TrimSpace(cfg.Observability.OTLP.LogsExportInterval) == "" {
+		cfg.Observability.OTLP.LogsExportInterval = "1s"
 	}
 	// Version
 	// HLS defaults

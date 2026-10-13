@@ -12,7 +12,9 @@ import (
 	"github.com/lalmax-pro/lalmax-nvr/internal/event"
 	"github.com/lalmax-pro/lalmax-nvr/internal/model"
 	"github.com/lalmax-pro/lalmax-nvr/internal/muxer"
+	"github.com/lalmax-pro/lalmax-nvr/internal/observability"
 	"github.com/q191201771/lal/pkg/base"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const groupGOPLimit = 300
@@ -31,6 +33,7 @@ type recSession struct {
 	group     subscribeGroup
 	owner     *GroupWriter
 	hub       *model.StreamHub
+	traceCtx  context.Context
 
 	streamMu  sync.RWMutex
 	liveCodec string
@@ -307,7 +310,13 @@ func (s *recSession) writeAudio(msg base.RtmpMsg, af audioFrame) {
 	}
 }
 
-func (s *recSession) openSegment() error {
+func (s *recSession) openSegment() (retErr error) {
+	_, span := observability.StartBusinessSpan(observability.DetachedContext(s.traceCtx), "recording.segment.open",
+		attribute.String("nvr.camera.id", s.cameraID),
+		attribute.String("nvr.stream.id", s.cameraID),
+		attribute.String("nvr.recording.format", s.codec),
+	)
+	defer func() { observability.EndBusinessSpan(span, retErr) }()
 	tempPath, finalPath, err := s.store.CreateSegment(s.cameraID, s.codec)
 	if err != nil {
 		return err
@@ -341,13 +350,23 @@ func (s *recSession) closeSegment() {
 	if s.mux == nil {
 		return
 	}
+	baseCtx := observability.DetachedContext(s.traceCtx)
+	_, span := observability.StartBusinessSpan(baseCtx, "recording.segment.finalize",
+		attribute.String("nvr.camera.id", s.cameraID),
+		attribute.String("nvr.stream.id", s.cameraID),
+		attribute.String("nvr.recording.format", s.codec),
+		attribute.Int("nvr.recording.frame_count", s.frames),
+	)
+	var finalizeErr error
+	defer func() { observability.EndBusinessSpan(span, finalizeErr) }()
 	frames := s.frames
 	tempPath := s.tempPath
 	finalPath := s.finalPath
 	start := s.segStart
 	codec := s.codec
 	if err := s.mux.Close(); err != nil {
-		slog.Error("group recorder failed to close segment", "camera_id", s.cameraID, "error", err)
+		finalizeErr = err
+		slog.Default().ErrorContext(baseCtx, "group recorder failed to close segment", "camera_id", s.cameraID, "error", err)
 		os.Remove(tempPath)
 		s.resetSegment()
 		return
@@ -358,7 +377,8 @@ func (s *recSession) closeSegment() {
 		return
 	}
 	if err := s.store.CloseSegment(tempPath, finalPath); err != nil {
-		slog.Error("group recorder failed to publish segment", "camera_id", s.cameraID, "error", err)
+		finalizeErr = err
+		slog.Default().ErrorContext(baseCtx, "group recorder failed to publish segment", "camera_id", s.cameraID, "error", err)
 		return
 	}
 	now := time.Now()
@@ -377,12 +397,13 @@ func (s *recSession) closeSegment() {
 		rec.FileSize = info.Size()
 	}
 	if s.db != nil {
-		if err := s.db.InsertRecordingWithRetry(context.Background(), rec, 3, 500*time.Millisecond); err != nil {
-			slog.Error("group recorder failed to insert recording", "camera_id", s.cameraID, "error", err)
+		if err := s.db.InsertRecordingWithRetry(baseCtx, rec, 3, 500*time.Millisecond); err != nil {
+			finalizeErr = err
+			slog.Default().ErrorContext(baseCtx, "group recorder failed to insert recording", "camera_id", s.cameraID, "error", err)
 		}
 	}
 	if s.bus != nil {
-		s.bus.Publish(context.Background(), event.TopicSegmentCompleted, event.SegmentCompleted{
+		s.bus.Publish(baseCtx, event.TopicSegmentCompleted, event.SegmentCompleted{
 			CameraID:    s.cameraID,
 			FilePath:    finalPath,
 			Format:      codec,

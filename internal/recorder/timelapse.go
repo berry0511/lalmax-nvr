@@ -15,6 +15,8 @@ import (
 
 	"github.com/lalmax-pro/lalmax-nvr/internal/metrics"
 	"github.com/lalmax-pro/lalmax-nvr/internal/model"
+	"github.com/lalmax-pro/lalmax-nvr/internal/observability"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 var timelapseLogger = slog.Default().With("component", "timelapse-recorder")
@@ -57,6 +59,7 @@ type TimelapseRecorder struct {
 	status model.RecorderStatus
 	cancel context.CancelFunc
 	done   chan struct{}
+	runCtx context.Context
 
 	lastCapture atomic.Int64 // UnixNano of last frame capture
 
@@ -161,7 +164,15 @@ func (r *TimelapseRecorder) OnFrame(data []byte) {
 
 	// Create segment directory if needed
 	if r.curTempPath == "" {
-		tempPath, finalPath, err := r.store.CreateSegment(r.cfg.CameraID, "timelapse")
+		var tempPath, finalPath string
+		_, err := observability.RunBusinessOperation(observability.DetachedContext(r.runCtx), "recording.timelapse.segment.open", func(context.Context) error {
+			var err error
+			tempPath, finalPath, err = r.store.CreateSegment(r.cfg.CameraID, "timelapse")
+			return err
+		},
+			attribute.String("nvr.camera.id", r.cfg.CameraID),
+			attribute.String("nvr.recording.format", "timelapse"),
+		)
 		if err != nil {
 			timelapseLogger.Error("failed to create timelapse segment", "camera_id", r.cfg.CameraID, "error", err)
 			return
@@ -214,6 +225,13 @@ func (r *TimelapseRecorder) triggerMerge() {
 
 // mergeSegment runs FFmpeg to convert JPEG directory → MP4 timelapse.
 func (r *TimelapseRecorder) mergeSegment(tempPath, finalPath string, segStart time.Time, frameCount int, cameraID string) {
+	ctx, span := observability.StartBusinessSpan(observability.DetachedContext(r.runCtx), "recording.timelapse.merge",
+		attribute.String("nvr.camera.id", cameraID),
+		attribute.String("nvr.recording.format", "timelapse"),
+		attribute.Int("nvr.recording.frame_count", frameCount),
+	)
+	var mergeErr error
+	defer func() { observability.EndBusinessSpan(span, mergeErr) }()
 	defer func() {
 		if panicErr := recover(); panicErr != nil {
 			buf := make([]byte, 4096)
@@ -224,7 +242,8 @@ func (r *TimelapseRecorder) mergeSegment(tempPath, finalPath string, segStart ti
 
 	// Close segment (atomic rename)
 	if err := r.store.CloseSegment(tempPath, finalPath); err != nil {
-		timelapseLogger.Error("failed to close timelapse segment", "camera_id", cameraID, "error", err)
+		mergeErr = err
+		timelapseLogger.ErrorContext(ctx, "failed to close timelapse segment", "camera_id", cameraID, "error", err)
 		return
 	}
 
@@ -246,10 +265,10 @@ func (r *TimelapseRecorder) mergeSegment(tempPath, finalPath string, segStart ti
 	}
 	args = append(args, "-pix_fmt", "yuv420p", "-y", outputPath)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	timelapseLogger.Info("starting timelapse merge",
+	timelapseLogger.InfoContext(ctx, "starting timelapse merge",
 		"camera_id", cameraID,
 		"segment", finalPath,
 		"output", outputPath,
@@ -259,7 +278,8 @@ func (r *TimelapseRecorder) mergeSegment(tempPath, finalPath string, segStart ti
 	)
 
 	if err := r.runFF(ctx, ffmpeg, args, outputPath); err != nil {
-		timelapseLogger.Warn("timelapse FFmpeg merge failed",
+		mergeErr = err
+		timelapseLogger.WarnContext(ctx, "timelapse FFmpeg merge failed",
 			"camera_id", cameraID,
 			"segment", finalPath,
 			"error", err,
@@ -269,7 +289,8 @@ func (r *TimelapseRecorder) mergeSegment(tempPath, finalPath string, segStart ti
 
 	// Verify output exists
 	if _, err := os.Stat(outputPath); err != nil {
-		timelapseLogger.Warn("timelapse output missing after merge",
+		mergeErr = err
+		timelapseLogger.WarnContext(ctx, "timelapse output missing after merge",
 			"camera_id", cameraID,
 			"output", outputPath,
 		)
@@ -297,15 +318,16 @@ func (r *TimelapseRecorder) mergeSegment(tempPath, finalPath string, segStart ti
 	}
 
 	if r.cfg.DB != nil {
-		if err := r.cfg.DB.InsertRecordingWithRetry(context.Background(), recording, 3, 500*time.Millisecond); err != nil {
-			timelapseLogger.Error("failed to insert timelapse recording", "camera_id", cameraID, "error", err)
+		if err := r.cfg.DB.InsertRecordingWithRetry(ctx, recording, 3, 500*time.Millisecond); err != nil {
+			mergeErr = err
+			timelapseLogger.ErrorContext(ctx, "failed to insert timelapse recording", "camera_id", cameraID, "error", err)
 			return
 		}
 	}
 
 	r.recordSegmentCreated()
 
-	timelapseLogger.Info("timelapse merge completed",
+	timelapseLogger.InfoContext(ctx, "timelapse merge completed",
 		"camera_id", cameraID,
 		"output", outputPath,
 		"size", fileSize,
@@ -329,8 +351,9 @@ func (r *TimelapseRecorder) Start(ctx context.Context) error {
 	if r.status == model.StatusRecording || r.status == model.StatusReconnecting {
 		return fmt.Errorf("timelapse recorder for %q already running", r.cfg.CameraID)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(observability.DetachedContext(ctx))
 	r.cancel = cancel
+	r.runCtx = ctx
 	r.done = make(chan struct{})
 	r.status = model.StatusRecording
 	r.lastCapture.Store(0) // reset so first frame is always captured

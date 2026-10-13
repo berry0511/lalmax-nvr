@@ -6,7 +6,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lalmax-pro/lalmax-nvr/internal/observability"
 	"github.com/lalmax-pro/lalmax-nvr/internal/storage"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 var schedLogger = slog.Default().With("component", "recording-scheduler")
@@ -132,6 +134,10 @@ func (s *RecordingScheduler) run(ctx context.Context) {
 }
 
 func (s *RecordingScheduler) check(ctx context.Context) {
+	ctx, span := observability.StartBusinessSpan(ctx, "recording.scheduler.reconcile")
+	var checkErr error
+	defer func() { observability.EndBusinessSpan(span, checkErr) }()
+
 	s.mu.Lock()
 	planner := s.planner
 	tasks := s.tasks
@@ -147,6 +153,7 @@ func (s *RecordingScheduler) check(ctx context.Context) {
 	if planner != nil {
 		if err := planner.Refresh(ctx); err != nil {
 			schedLogger.Error("failed to refresh recording plans", "error", err)
+			checkErr = err
 			return
 		}
 	}
@@ -161,6 +168,7 @@ func (s *RecordingScheduler) check(ctx context.Context) {
 		ids, err := aliveFn(ctx)
 		if err != nil {
 			schedLogger.Error("failed to list lalmax streams", "error", err)
+			checkErr = err
 		} else {
 			aliveKnown = true
 			for _, id := range ids {
@@ -170,6 +178,11 @@ func (s *RecordingScheduler) check(ctx context.Context) {
 			}
 		}
 	}
+	span.SetAttributes(
+		attribute.Int("nvr.recording.desired_stream_count", len(desired)),
+		attribute.Int("nvr.media.alive_stream_count", len(aliveSet)),
+		attribute.Int("nvr.recording.running_task_count", len(tasks.RunningIDs())),
+	)
 
 	if aliveKnown {
 		for id := range aliveSet {

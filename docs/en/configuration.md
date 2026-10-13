@@ -91,14 +91,20 @@ observability:
   log_level: "info"              # Log level: debug, info, warn, error
   log_format: "text"             # Log format: json or text
   enable_pprof: false            # Enable pprof debug endpoints
+  trace_retention: "24h"         # Local trace retention period
+  max_local_traces: 10000        # Maximum locally retained traces
+  local_trace_enabled: true      # Store traces locally; can also be toggled in Web Settings
+  trace_ui_url_template: ""      # Jaeger/Tempo URL template containing {trace_id}
   otlp:
-    enabled: false               # Export to an external OTLP/HTTP collector
+    enabled: false               # Export traces, metrics, and logs to an OTLP/HTTP collector
     endpoint: "http://127.0.0.1:4318"
     service_name: "lalmax-nvr"
     traces_enabled: true
     metrics_enabled: true
+    logs_enabled: true
     timeout: "10s"
     metrics_export_interval: "30s"
+    logs_export_interval: "1s"
 version: "1.0"
 ```
 
@@ -550,13 +556,25 @@ HLS playback is independent of recording pulls: disabling `hls.enabled` or using
 ### `observability.otlp`
 
 - **Description**: Optional external OTLP/HTTP export. The application reads this configuration only; `OTEL_*` environment variables are neither required nor read
+- Local traces are stored in the application database, with a default 24-hour retention and a cap of 10,000 traces. Expired/excess traces are pruned periodically. Writes use an asynchronous queue; spans may be dropped with a warning if it fills
+- **`local_trace_enabled`**: Controls local span storage, default `true`; it can be toggled immediately in the Web Settings Tracing tab. Turning it off keeps existing traces
+- **`trace_ui_url_template`**: Optional third-party UI URL template. It must use HTTP(S) and include `{trace_id}`, for example `http://localhost:16686/trace/{trace_id}`. The web UI can show local spans and link to the configured trace UI
 - **`enabled`**: Enables external export, default `false`. The frontend observability API continues to work while disabled
-- **`endpoint`**: Collector base URL, default `http://127.0.0.1:4318`. The application appends `/v1/traces` and `/v1/metrics`
+- **`endpoint`**: Collector base URL, default `http://127.0.0.1:4318`. The application appends `/v1/traces`, `/v1/metrics`, and `/v1/logs`
 - **`service_name`**: OTel service name, default `lalmax-nvr`
-- **`traces_enabled` / `metrics_enabled`**: Toggle trace and metric export independently; both default to `true`, and at least one must be enabled
+- A unique `service.instance.id` is generated at process startup to distinguish replicas and restart cycles
+- **`traces_enabled` / `metrics_enabled` / `logs_enabled`**: Toggle trace, metric, and structured log export independently; all default to `true`, and at least one must be enabled
 - **`timeout`**: Per-export timeout, default `10s`
 - **`metrics_export_interval`**: Periodic metric export interval, default `30s`
+- **`logs_export_interval`**: Batched log export interval, default `1s`
 - **`headers`**: Optional HTTP header map for collector authentication. Protect configuration files containing tokens as sensitive files
+- Traces and logs share W3C Trace Context. Request logs include their trace/span IDs so failures can be joined to request traces
+- Business spans cover camera add/update/start and ONVIF preparation, media pull startup, recording-plan reconciliation, recording-task creation, connection retries, and recording-segment persistence. Background recorders retain the starting trace context without inheriting HTTP request cancellation
+- Business spans use `nvr.*` attributes to correlate `camera.id`, `stream.id`, protocol, encoding, retry count, and stop reason. Full stream URLs, usernames, and passwords are not exported
+- Calls to an external lalmax engine in HTTP mode create client spans and propagate `traceparent` / `tracestate`. They record only the request method, host, path, and status code; query parameters and baggage are omitted. Enable OpenTelemetry HTTP server instrumentation in the external lalmax process as well to join both sides into one trace
+- In `embedded` mode, the built-in lalmax control API, HLS/FMP4, and WebRTC HTTP requests create server spans. Publish, subscribe, and relay-pull lifecycle events carry a short event span context back to NVR over its internal SSE stream. Long-lived SSE and FLV connections are excluded from whole-connection spans
+- Metrics include API request duration, status, response size, and Go goroutine, memory, GC, and scheduler measurements
+- The Go OTLP logs SDK is experimental; review compatibility when upgrading OpenTelemetry Go dependencies
 
 ## Media Engine Configuration
 
@@ -992,4 +1010,7 @@ observability:
     service_name: "lalmax-nvr"
     traces_enabled: true
     metrics_enabled: true
+    logs_enabled: true
+    metrics_export_interval: "30s"
+    logs_export_interval: "1s"
 ```

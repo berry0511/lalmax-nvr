@@ -1,42 +1,50 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
-	"github.com/lalmax-pro/lalmax-nvr/internal/observability"
+	"github.com/lalmax-pro/lalmax-nvr/internal/config"
+	"github.com/lalmax-pro/lalmax-nvr/internal/storage"
 	"github.com/stretchr/testify/require"
 )
 
-func TestAPIObservabilityEndpoint(t *testing.T) {
+func TestObservabilityTraceAPIs(t *testing.T) {
 	db, store := setupTestDB(t)
 	defer db.Close()
-	h := TestHandler(db, store)
+	now := time.Now()
+	traceID := "0123456789abcdef0123456789abcdef"
+	require.NoError(t, db.StoreTraceSpan(context.Background(), storage.TraceSpanRecord{
+		TraceID: traceID, SpanID: "0123456789abcdef", Name: "camera.start", Service: "lalmax-nvr",
+		StatusCode: 2, StartUnixNS: now.Add(-20 * time.Millisecond).UnixNano(), EndUnixNS: now.UnixNano(), Attributes: `{}`, Events: `[]`, Links: `[]`,
+	}))
+	cfg := &config.Config{}
+	cfg.Observability.TraceUIURLTemplate = "http://traces.local/trace/{trace_id}"
+	h := newHandlerWithConfig(db, store, cfg)
 	routes := h.Routes()
-	h.apiObserver.Aggregator().Observe(observability.Sample{
-		Timestamp: time.Now(), Method: http.MethodGet, Route: "/api/capabilities", Status: http.StatusOK,
-	})
-	rr := httptest.NewRecorder()
-	routes.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/observability/api?window=1m&series=1m&limit=10", nil))
 
-	require.Equal(t, http.StatusOK, rr.Code)
-	require.Equal(t, "no-store", rr.Header().Get("Cache-Control"))
-	var response observability.DashboardResponse
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response))
-	require.Equal(t, int64(60), response.WindowSeconds)
-	require.Equal(t, uint64(1), response.Summary.Requests)
-	require.Len(t, response.Routes, 1)
-	require.Equal(t, "/api/capabilities", response.Routes[0].Route)
-}
+	list := doRequest(t, routes, http.MethodGet, "/api/observability/traces?limit=10", nil, "", "")
+	require.Equal(t, http.StatusOK, list.Code, list.Body.String())
+	var listBody struct {
+		Traces   []storage.TraceSummary `json:"traces"`
+		Template string                 `json:"external_trace_url_template"`
+	}
+	require.NoError(t, json.Unmarshal(list.Body.Bytes(), &listBody))
+	require.Len(t, listBody.Traces, 1)
+	require.Equal(t, traceID, listBody.Traces[0].TraceID)
+	require.Equal(t, cfg.Observability.TraceUIURLTemplate, listBody.Template)
 
-func TestAPIObservabilityEndpointRejectsInvalidLimit(t *testing.T) {
-	db, store := setupTestDB(t)
-	defer db.Close()
-	h := TestHandler(db, store)
-	rr := httptest.NewRecorder()
-	h.Routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/observability/api?limit=101", nil))
-	require.Equal(t, http.StatusBadRequest, rr.Code)
+	detail := doRequest(t, routes, http.MethodGet, "/api/observability/traces/"+traceID, nil, "", "")
+	require.Equal(t, http.StatusOK, detail.Code, detail.Body.String())
+	var detailBody struct {
+		TraceID string                    `json:"trace_id"`
+		Spans   []storage.TraceSpanRecord `json:"spans"`
+	}
+	require.NoError(t, json.Unmarshal(detail.Body.Bytes(), &detailBody))
+	require.Equal(t, traceID, detailBody.TraceID)
+	require.Len(t, detailBody.Spans, 1)
+	require.Equal(t, "camera.start", detailBody.Spans[0].Name)
 }

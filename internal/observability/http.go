@@ -1,6 +1,8 @@
 package observability
 
 import (
+	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -115,6 +117,19 @@ func (o *HTTPObserver) Middleware(next http.Handler) http.Handler {
 			ResponseBytes: int64(recorder.Bytes),
 			TraceID:       traceID,
 		})
+		if recorder.Status >= http.StatusInternalServerError {
+			attrs := []any{
+				"component", "http",
+				"http.request.method", r.Method,
+				"http.route", route,
+				"http.response.status_code", recorder.Status,
+				"error.type", http.StatusText(recorder.Status),
+			}
+			if panicValue != nil {
+				attrs = append(attrs, "exception.type", fmt.Sprintf("%T", panicValue))
+			}
+			slog.ErrorContext(ctx, "HTTP request failed", attrs...)
+		}
 		if panicValue != nil {
 			panic(panicValue)
 		}

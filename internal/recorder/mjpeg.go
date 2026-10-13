@@ -13,12 +13,15 @@ import (
 
 	"github.com/bluenviron/gortsplib/v5"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
+	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/pion/rtp"
 
 	"github.com/lalmax-pro/lalmax-nvr/internal/event"
 	"github.com/lalmax-pro/lalmax-nvr/internal/metrics"
 	"github.com/lalmax-pro/lalmax-nvr/internal/model"
+	"github.com/lalmax-pro/lalmax-nvr/internal/observability"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 var mjpegLogger = slog.Default().With("component", "mjpeg-recorder")
@@ -135,7 +138,7 @@ func (r *MJPEGRecorder) Start(ctx context.Context) error {
 	if r.status == model.StatusRecording || r.status == model.StatusReconnecting {
 		return fmt.Errorf("recorder for %q already running", r.cfg.CameraID)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(observability.DetachedContext(ctx))
 	r.cancel = cancel
 	r.done = make(chan struct{})
 	r.status = model.StatusRecording
@@ -174,6 +177,7 @@ func (r *MJPEGRecorder) run(ctx context.Context) {
 	defer r.setStatus(model.StatusStopped)
 	var retryCount int
 	for {
+		r.retryCount = retryCount
 		err, connected := r.connectAndRecord(ctx)
 		if ctx.Err() != nil {
 			return
@@ -189,7 +193,7 @@ func (r *MJPEGRecorder) run(ctx context.Context) {
 		if r.metrics != nil {
 			r.metrics.CameraReconnectBackoffSeconds.WithLabelValues(r.cfg.CameraID).Set(backoff.Seconds())
 		}
-		mjpegLogger.Error("connection error, reconnecting", "camera_id", r.cfg.CameraID, "error", err, "backoff", backoff, "attempt", retryCount)
+		mjpegLogger.ErrorContext(ctx, "connection error, reconnecting", "camera_id", r.cfg.CameraID, "error", err, "backoff", backoff, "attempt", retryCount)
 		r.recordError("connection")
 
 		// Track disconnect info for the first segment after recovery.
@@ -209,6 +213,13 @@ func (r *MJPEGRecorder) run(ctx context.Context) {
 }
 
 func (r *MJPEGRecorder) connectAndRecord(ctx context.Context) (error, bool) {
+	attrs := []attribute.KeyValue{
+		attribute.String("nvr.camera.id", r.cfg.CameraID),
+		attribute.String("nvr.stream.id", r.cfg.CameraID),
+		attribute.String("nvr.media.protocol", "rtsp"),
+		attribute.String("nvr.media.encoding", "mjpeg"),
+		attribute.Int("nvr.connection.retry_count", r.retryCount),
+	}
 	u, err := base.ParseURL(r.cfg.RTSPURL)
 	if err != nil {
 		return fmt.Errorf("invalid RTSP URL: %w", err), false
@@ -221,12 +232,18 @@ func (r *MJPEGRecorder) connectAndRecord(ctx context.Context) (error, bool) {
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 	}
-	if err := client.Start(); err != nil {
+	ctx, err = observability.RunBusinessOperation(ctx, "recorder.rtsp.connect", func(context.Context) error { return client.Start() }, attrs...)
+	if err != nil {
 		return fmt.Errorf("client start: %w", err), false
 	}
 	defer client.Close()
 
-	desc, _, err := client.Describe(u)
+	var desc *description.Session
+	ctx, err = observability.RunBusinessOperation(ctx, "recorder.rtsp.describe", func(context.Context) error {
+		var err error
+		desc, _, err = client.Describe(u)
+		return err
+	}, attrs...)
 	if err != nil {
 		return fmt.Errorf("DESCRIBE: %w", err), false
 	}
@@ -242,7 +259,11 @@ func (r *MJPEGRecorder) connectAndRecord(ctx context.Context) (error, bool) {
 		return fmt.Errorf("create RTP decoder: %w", err), false
 	}
 
-	if _, err := client.Setup(desc.BaseURL, medi, 0, 0); err != nil {
+	ctx, err = observability.RunBusinessOperation(ctx, "recorder.rtsp.setup_video", func(context.Context) error {
+		_, err := client.Setup(desc.BaseURL, medi, 0, 0)
+		return err
+	}, attrs...)
+	if err != nil {
 		return fmt.Errorf("SETUP: %w", err), false
 	}
 
@@ -285,7 +306,11 @@ func (r *MJPEGRecorder) connectAndRecord(ctx context.Context) (error, bool) {
 	}
 
 	r.setStatus(model.StatusRecording)
-	if _, err := client.Play(nil); err != nil {
+	_, err = observability.RunBusinessOperation(ctx, "recorder.rtsp.play", func(context.Context) error {
+		_, err := client.Play(nil)
+		return err
+	}, attrs...)
+	if err != nil {
 		close(r.frameCh)
 		<-writerDone
 		return fmt.Errorf("PLAY: %w", err), false
