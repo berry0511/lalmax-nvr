@@ -45,16 +45,23 @@ type Service struct {
 	db      storage.DLNARepository
 	store   *storage.Manager
 	engine  media.Engine
-	mu      sync.RWMutex
-	conn    *net.UDPConn
-	send    *net.UDPConn
-	httpSrv *http.Server
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
+	mu          sync.RWMutex
+	viewerMu    sync.Mutex
+	viewers     int
+	viewerLimit int
+	conn        *net.UDPConn
+	send        *net.UDPConn
+	httpSrv     *http.Server
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
 }
 
 func NewService(cfg *config.Config, db storage.DLNARepository, store *storage.Manager, engine media.Engine) *Service {
-	return &Service{cfg: cfg, db: db, store: store, engine: engine}
+	limit := config.DefaultDLNAMaxMediaViewers
+	if cfg != nil && cfg.DLNA.MaxMediaViewers > 0 {
+		limit = cfg.DLNA.MaxMediaViewers
+	}
+	return &Service{cfg: cfg, db: db, store: store, engine: engine, viewerLimit: limit}
 }
 
 func (s *Service) Enabled() bool {
@@ -87,6 +94,7 @@ func (s *Service) Start(ctx context.Context) error {
 	if err := s.validatePort(); err != nil {
 		return err
 	}
+	s.setViewerLimit(s.cfg.DLNA.MaxMediaViewers)
 	ip, iface, err := detectLANIPv4(s.cfg.DLNA.Interface, s.cfg.DLNA.AdvertiseURL)
 	if err != nil {
 		return fmt.Errorf("dlna: %w", err)
@@ -352,10 +360,49 @@ func (s *Service) RegisterRoutes(r chi.Router) {
 		r.Method("SUBSCRIBE", p, s.guard(s.events))
 		r.Method("UNSUBSCRIBE", p, s.guard(s.events))
 	}
-	r.Get(prefix+"/live/{stream}.ts", s.guard(s.live))
+	r.Get(prefix+"/live/{stream}.ts", s.guard(s.limitMediaViewers(s.live)))
 	r.Head(prefix+"/live/{stream}.ts", s.guard(s.live))
-	r.Get(prefix+"/media/{id}", s.guard(s.recording))
+	r.Get(prefix+"/media/{id}", s.guard(s.limitMediaViewers(s.recording)))
 	r.Head(prefix+"/media/{id}", s.guard(s.recording))
+}
+
+func (s *Service) setViewerLimit(limit int) {
+	if limit <= 0 {
+		limit = config.DefaultDLNAMaxMediaViewers
+	}
+	s.viewerMu.Lock()
+	s.viewerLimit = limit
+	s.viewerMu.Unlock()
+}
+
+func (s *Service) tryAcquireViewer() bool {
+	s.viewerMu.Lock()
+	defer s.viewerMu.Unlock()
+	if s.viewers >= s.viewerLimit {
+		return false
+	}
+	s.viewers++
+	return true
+}
+
+func (s *Service) releaseViewer() {
+	s.viewerMu.Lock()
+	if s.viewers > 0 {
+		s.viewers--
+	}
+	s.viewerMu.Unlock()
+}
+
+func (s *Service) limitMediaViewers(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.tryAcquireViewer() {
+			w.Header().Set("Retry-After", "5")
+			http.Error(w, "maximum number of DLNA media viewers reached", http.StatusServiceUnavailable)
+			return
+		}
+		defer s.releaseViewer()
+		next(w, r)
+	}
 }
 
 // guard keeps all DLNA endpoints unavailable until the feature is enabled and,

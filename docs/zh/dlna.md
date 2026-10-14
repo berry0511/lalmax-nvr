@@ -35,6 +35,6 @@ dlna:
     - "192.168.1.0/24"
 ```
 
-`gop_cache` 控制 HTTP-TS 为新观众缓存的 GOP 数，默认 `1`，范围 `1–16`；更大的值可能让播放器更快出画，但会增加相对直播的延迟。修改该值后需重启 NVR 并重新推流才能应用到现有流。配置中还提供 `max_media_viewers`（默认 `4`），但当前实现尚未按此值限制连接数。
+`gop_cache` 控制 HTTP-TS 为新观众缓存的 GOP 数，默认 `1`，范围 `1–16`；更大的值可能让播放器更快出画，但会增加相对直播的延迟。修改该值后需重启 NVR 并重新推流才能应用到现有流。`max_media_viewers`（默认 `4`，范围 `1–100`）限制同时播放 DLNA 直播和录像的媒体连接数；超过上限的新连接会收到 HTTP `503`，并可在 5 秒后重试。HEAD 探测请求不占用播放名额。
 
 Web UI 修改 DLNA 设置后会尝试立即重启 DLNA 服务；若设置响应带 `dlna_error`，请检查端口、网卡和组播网络。实现入口见 [`internal/dlna/service.go`](../../internal/dlna/service.go)，配置结构与默认值见 [`internal/config/config.go`](../../internal/config/config.go)。
