@@ -61,7 +61,9 @@ type EmbeddedLalmaxConfig struct {
 
 type EmbeddedLalmax struct {
 	*LalmaxHTTP
-	cfg              EmbeddedLalmaxConfig
+	cfg EmbeddedLalmaxConfig
+	// lifecycleMu serializes full server lifecycle transitions.
+	lifecycleMu      sync.Mutex
 	mu               sync.Mutex
 	server           *lalmaxserver.LalMaxServer
 	httpEngine       *LalmaxHTTP
@@ -291,6 +293,9 @@ func (w *customizePubSessionWrapper) FeedAudioSpecificConfig(asc []byte) error {
 }
 
 func (e *EmbeddedLalmax) Start(ctx context.Context) error {
+	e.lifecycleMu.Lock()
+	defer e.lifecycleMu.Unlock()
+
 	e.mu.Lock()
 	server := e.server
 	e.mu.Unlock()
@@ -318,6 +323,9 @@ func (e *EmbeddedLalmax) Start(ctx context.Context) error {
 }
 
 func (e *EmbeddedLalmax) Shutdown(ctx context.Context) error {
+	e.lifecycleMu.Lock()
+	defer e.lifecycleMu.Unlock()
+
 	e.mu.Lock()
 	server := e.server
 	e.mu.Unlock()
@@ -332,6 +340,9 @@ func (e *EmbeddedLalmax) Shutdown(ctx context.Context) error {
 }
 
 func (e *EmbeddedLalmax) Restart(ctx context.Context, rtmpPort, srtPort int, rtmpEnabled, srtEnabled bool) error {
+	e.lifecycleMu.Lock()
+	defer e.lifecycleMu.Unlock()
+
 	e.mu.Lock()
 	old := e.server
 	e.server = nil
