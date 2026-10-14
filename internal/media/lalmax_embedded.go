@@ -20,6 +20,7 @@ import (
 	lalmaxserver "github.com/q191201771/lalmax/server"
 	"github.com/q191201771/naza/pkg/nazalog"
 
+	coreauth "github.com/lalmax-pro/lalmax-nvr/internal/auth"
 	"github.com/lalmax-pro/lalmax-nvr/internal/config"
 	"github.com/lalmax-pro/lalmax-nvr/internal/observability"
 	"go.opentelemetry.io/otel/attribute"
@@ -102,6 +103,35 @@ func lalmaxListenAddr(httpAddr string) string {
 
 func NewEmbeddedLalmax(cfg EmbeddedLalmaxConfig, svrOpts ...lalmaxserver.LalMaxServerOption) (*EmbeddedLalmax, error) {
 	installLalLogBridge()
+	digestNonces := coreauth.NewDigestNonceStore(0, 0)
+	svrOpts = append(append([]lalmaxserver.LalMaxServerOption(nil), svrOpts...),
+		lalmaxserver.WithRTSPDigestNonceIssuer(digestNonces.Issue),
+		lalmaxserver.WithRTSPDigestVerifier(func(method, username, password, authorization string) bool {
+			params, ok := coreauth.ParseDigestAuthorization(authorization)
+			if !ok || params["username"] != username {
+				return false
+			}
+			nonceCount, ok := coreauth.DigestNonceCount(params)
+			if !ok || !coreauth.VerifyDigest(method, username, base.LalRtspRealm, password, params) {
+				return false
+			}
+			return digestNonces.Use(params["nonce"], nonceCount)
+		}),
+		lalmaxserver.WithRTSPDigestAuthorizationBuilder(func(method, uri, username, password, challenge string, nonceCount uint32) (string, error) {
+			params, ok := coreauth.ParseDigestAuthorization(challenge)
+			if !ok || params["realm"] == "" || params["nonce"] == "" {
+				return "", fmt.Errorf("invalid RTSP Digest challenge")
+			}
+			if algorithm := params["algorithm"]; algorithm != "" && !strings.EqualFold(algorithm, "MD5") {
+				return "", fmt.Errorf("unsupported RTSP Digest algorithm %q", algorithm)
+			}
+			qop, err := coreauth.NormalizeDigestQop(params["qop"])
+			if err != nil {
+				return "", err
+			}
+			return coreauth.BuildDigestAuthorizationWithNonceCount(method, uri, username, password, params["realm"], params["nonce"], qop, nonceCount)
+		}),
+	)
 	if cfg.HTTPAddr == "" {
 		cfg.HTTPAddr = config.DefaultLalmaxHTTPAddr
 	}

@@ -354,7 +354,13 @@ func (session *ServerCommandSession) handleAuthorized(requestCtx nazahttp.HttpRe
 		// 解析出的鉴权方式需要与配置的鉴权方式一致,防止鉴权降级
 		if session.auth.Typ == AuthTypeBasic && session.authConf.AuthMethod == 0 ||
 			session.auth.Typ == AuthTypeDigest && session.authConf.AuthMethod == 1 {
-			if session.auth.CheckAuthorization(requestCtx.Method, session.authConf.UserName, session.authConf.PassWord) {
+			authorized := false
+			if session.auth.Typ == AuthTypeDigest && session.authConf.DigestVerifier != nil {
+				authorized = session.authConf.DigestVerifier(requestCtx.Method, session.authConf.UserName, session.authConf.PassWord, session.auth.RawAuthorization)
+			} else if session.auth.Typ == AuthTypeBasic {
+				authorized = session.auth.CheckAuthorization(requestCtx.Method, session.authConf.UserName, session.authConf.PassWord)
+			}
+			if authorized {
 				return "", nil
 			}
 		}
@@ -370,7 +376,15 @@ func (session *ServerCommandSession) handleAuthorized(requestCtx nazahttp.HttpRe
 			return resp, nil
 		} else if session.authConf.AuthMethod == 1 {
 			// Digest鉴权
-			authenticate := session.auth.MakeAuthenticate(AuthTypeDigest)
+			authenticate := ""
+			if session.authConf.DigestNonceIssuer == nil {
+				return "", fmt.Errorf("RTSP Digest nonce issuer is not configured")
+			}
+			nonce, err := session.authConf.DigestNonceIssuer()
+			if err != nil {
+				return "", fmt.Errorf("issue RTSP digest nonce: %w", err)
+			}
+			authenticate = session.auth.MakeAuthenticateWithNonce(AuthTypeDigest, nonce)
 			resp := PackResponseAuthorized(requestCtx.Headers.Get(HeaderCSeq), authenticate)
 			return resp, nil
 		} else {

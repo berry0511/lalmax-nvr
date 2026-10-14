@@ -29,6 +29,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/q191201771/lal/pkg/base"
 	"github.com/q191201771/lal/pkg/logic"
+	"github.com/q191201771/lal/pkg/rtsp"
 	"github.com/q191201771/naza/pkg/nazalog"
 )
 
@@ -51,23 +52,30 @@ type LalMaxServer struct {
 	udptsMgr        *udpts.Manager
 	recorder        *ffmpegRecorder
 
-	configMu sync.RWMutex
-	mu       sync.Mutex
-	started  bool
-	ready    bool
-	cancel   context.CancelFunc
-	runDone  chan error
-	hookOnce sync.Once
-	playAuth func(http.Handler) http.Handler
+	configMu           sync.RWMutex
+	mu                 sync.Mutex
+	started            bool
+	ready              bool
+	cancel             context.CancelFunc
+	runDone            chan error
+	hookOnce           sync.Once
+	playAuth           func(http.Handler) http.Handler
+	controlAuth        func(http.Handler) http.Handler
+	playbackAuthorizer func(protocol, streamID, token string) error
 }
 
 // LalMaxServerOption allows customizing LalMaxServer behavior.
 type LalMaxServerOption func(*lalMaxServerOptions)
 
 type lalMaxServerOptions struct {
-	authentication      logic.IAuthentication
-	publisherAuthorizer func(protocol, streamID, token string) error
-	playAuth            func(http.Handler) http.Handler
+	authentication                 logic.IAuthentication
+	publisherAuthorizer            func(protocol, streamID, token string) error
+	subscriberAuthorizer           func(protocol, streamID, token string) error
+	playAuth                       func(http.Handler) http.Handler
+	controlAuth                    func(http.Handler) http.Handler
+	rtspDigestNonceIssuer          rtsp.DigestNonceIssuer
+	rtspDigestVerifier             rtsp.DigestVerifier
+	rtspDigestAuthorizationBuilder rtsp.DigestAuthorizationBuilder
 }
 
 // WithAuthentication injects a custom IAuthentication into the underlying lal server.
@@ -75,6 +83,30 @@ type lalMaxServerOptions struct {
 func WithAuthentication(auth logic.IAuthentication) LalMaxServerOption {
 	return func(o *lalMaxServerOptions) {
 		o.authentication = auth
+	}
+}
+
+// WithRTSPDigestVerifier installs shared RTSP Digest validation for the
+// underlying lal RTSP server.
+func WithRTSPDigestVerifier(verifier rtsp.DigestVerifier) LalMaxServerOption {
+	return func(o *lalMaxServerOptions) {
+		o.rtspDigestVerifier = verifier
+	}
+}
+
+// WithRTSPDigestNonceIssuer installs the shared nonce source for RTSP Digest
+// challenges.
+func WithRTSPDigestNonceIssuer(issuer rtsp.DigestNonceIssuer) LalMaxServerOption {
+	return func(o *lalMaxServerOptions) {
+		o.rtspDigestNonceIssuer = issuer
+	}
+}
+
+// WithRTSPDigestAuthorizationBuilder installs the shared Digest header builder
+// for outbound RTSP pulls.
+func WithRTSPDigestAuthorizationBuilder(builder rtsp.DigestAuthorizationBuilder) LalMaxServerOption {
+	return func(o *lalMaxServerOptions) {
+		o.rtspDigestAuthorizationBuilder = builder
 	}
 }
 
@@ -87,11 +119,27 @@ func WithHTTPPlayAuth(auth func(http.Handler) http.Handler) LalMaxServerOption {
 	}
 }
 
+// WithHTTPControlAuth protects the lalmax control, stats, hook, and ZLM
+// compatibility APIs with the application's HTTP authentication middleware.
+func WithHTTPControlAuth(auth func(http.Handler) http.Handler) LalMaxServerOption {
+	return func(o *lalMaxServerOptions) {
+		o.controlAuth = auth
+	}
+}
+
 // WithPublisherAuthorizer installs per-stream authorization for SRT and WHIP,
 // whose custom publishers do not pass through RTMP/RTSP session callbacks.
 func WithPublisherAuthorizer(authorizer func(protocol, streamID, token string) error) LalMaxServerOption {
 	return func(o *lalMaxServerOptions) {
 		o.publisherAuthorizer = authorizer
+	}
+}
+
+// WithSubscriberAuthorizer installs per-stream authorization for SRT and
+// custom WebRTC playback sessions.
+func WithSubscriberAuthorizer(authorizer func(protocol, streamID, token string) error) LalMaxServerOption {
+	return func(o *lalMaxServerOptions) {
+		o.subscriberAuthorizer = authorizer
 	}
 }
 
@@ -142,17 +190,22 @@ func NewLalMaxServer(conf *config.Config, opts ...LalMaxServerOption) (*LalMaxSe
 		if serverOpts.authentication != nil {
 			option.Authentication = serverOpts.authentication
 		}
+		option.RTSPDigestNonceIssuer = serverOpts.rtspDigestNonceIssuer
+		option.RTSPDigestVerifier = serverOpts.rtspDigestVerifier
+		option.RTSPDigestAuthorizationBuilder = serverOpts.rtspDigestAuthorizationBuilder
 	})
 
 	maxsvr := &LalMaxServer{
-		lalsvr:    lalsvr,
-		conf:      conf,
-		stats:     maxlogic.NewStatAggregator(maxlogic.GetGroupManagerInstance()),
-		notifyHub: notifyHub,
-		rtpPubMgr: rtppub.NewManager(lalsvr, conf.GB28181Config.MediaConfig),
-		udptsMgr:  udpts.NewManager(lalsvr),
-		recorder:  newFfmpegRecorder(""),
-		playAuth:  serverOpts.playAuth,
+		lalsvr:             lalsvr,
+		conf:               conf,
+		stats:              maxlogic.NewStatAggregator(maxlogic.GetGroupManagerInstance()),
+		notifyHub:          notifyHub,
+		rtpPubMgr:          rtppub.NewManager(lalsvr, conf.GB28181Config.MediaConfig),
+		udptsMgr:           udpts.NewManager(lalsvr),
+		recorder:           newFfmpegRecorder(""),
+		playAuth:           serverOpts.playAuth,
+		controlAuth:        serverOpts.controlAuth,
+		playbackAuthorizer: serverOpts.subscriberAuthorizer,
 	}
 
 	// 注入 sub 数量查询，用于 on_stream_none_reader 判断
@@ -173,6 +226,11 @@ func NewLalMaxServer(conf *config.Config, opts ...LalMaxServerOption) (*LalMaxSe
 		if serverOpts.publisherAuthorizer != nil {
 			maxsvr.srtsvr.SetPublisherAuthorizer(func(streamID, token string) error {
 				return serverOpts.publisherAuthorizer("srt", streamID, token)
+			})
+		}
+		if serverOpts.subscriberAuthorizer != nil {
+			maxsvr.srtsvr.SetSubscriberAuthorizer(func(streamID, token string) error {
+				return serverOpts.subscriberAuthorizer("srt", streamID, token)
 			})
 		}
 	}
@@ -201,6 +259,9 @@ func NewLalMaxServer(conf *config.Config, opts ...LalMaxServerOption) (*LalMaxSe
 			maxsvr.rtcsvr.SetPublisherAuthorizer(func(streamID, token string) error {
 				return serverOpts.publisherAuthorizer("whip", streamID, token)
 			})
+		}
+		if serverOpts.subscriberAuthorizer != nil {
+			maxsvr.rtcsvr.SetSubscriberAuthorizer(serverOpts.subscriberAuthorizer)
 		}
 		maxsvr.rtcsvr.SetStreamNotFoundFn(func(app, stream, schema string) {
 			notifyHub.NotifyStreamNotFound(ZlmOnStreamNotFoundPayload{

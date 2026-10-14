@@ -2,13 +2,12 @@ package ban
 
 import (
 	"context"
-	"crypto/subtle"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"strings"
 	"time"
 
+	"github.com/lalmax-pro/lalmax-nvr/internal/auth"
 	"github.com/lalmax-pro/lalmax-nvr/internal/storage"
 	"github.com/q191201771/lal/pkg/base"
 	"github.com/q191201771/lal/pkg/logic"
@@ -19,13 +18,16 @@ var logger = slog.Default().With("component", "ban")
 // Manager enforces stream bans via lal's IAuthentication interface.
 // All protocols (RTMP, RTSP, SRT, WHIP, GB28181) are checked uniformly.
 type Manager struct {
-	db            storage.StreamBanRepository
-	kickFunc      func(ctx context.Context, sessionID string) error
-	publishTokens map[string]map[string]string
+	db        storage.StreamBanRepository
+	kickFunc  func(ctx context.Context, sessionID string) error
+	mediaAuth *auth.MediaAuthorizer
 }
 
-func NewManager(db storage.StreamBanRepository) *Manager {
-	return &Manager{db: db}
+func NewManager(db storage.StreamBanRepository, mediaAuth *auth.MediaAuthorizer) *Manager {
+	if mediaAuth == nil {
+		mediaAuth = auth.NewMediaAuthorizer()
+	}
+	return &Manager{db: db, mediaAuth: mediaAuth}
 }
 
 // SetKickFunc sets the function used to kick currently active banned streams.
@@ -40,25 +42,24 @@ func (m *Manager) SetRTMPStreamKeys(keys map[string]string) {
 
 // SetPublishTokens installs per-stream publish credentials for one protocol.
 func (m *Manager) SetPublishTokens(protocol string, keys map[string]string) {
-	if m.publishTokens == nil {
-		m.publishTokens = make(map[string]map[string]string)
-	}
-	protocol = strings.ToLower(strings.TrimSpace(protocol))
-	cloned := make(map[string]string, len(keys))
-	for streamID, token := range keys {
-		cloned[streamID] = token
-	}
-	m.publishTokens[protocol] = cloned
+	m.mediaAuth.SetPublishTokens(protocol, keys)
 }
 
 // OnPubStart checks if the stream is banned. Returns error to reject the session.
 func (m *Manager) OnPubStart(info base.PubStartInfo) error {
 	if strings.EqualFold(info.Protocol, base.SessionProtocolRtmpStr) {
-		params, err := url.ParseQuery(info.UrlParam)
+		token, err := auth.QueryToken(info.UrlParam, "stream_key")
 		if err != nil {
 			return fmt.Errorf("invalid RTMP publish parameters for stream %q", info.StreamName)
 		}
-		return m.AuthorizePublish("rtmp", info.StreamName, params.Get("stream_key"))
+		return m.AuthorizePublish("rtmp", info.StreamName, token)
+	}
+	if strings.EqualFold(info.Protocol, base.SessionProtocolRtspStr) && m.mediaAuth.SharedPublishRequired() {
+		token, err := auth.QueryToken(info.UrlParam, "token")
+		if err != nil {
+			return fmt.Errorf("invalid RTSP publish parameters for stream %q", info.StreamName)
+		}
+		return m.AuthorizePublish("rtsp", info.StreamName, token)
 	}
 	return m.rejectBannedStream(info.StreamName, info.Protocol, false)
 }
@@ -66,14 +67,16 @@ func (m *Manager) OnPubStart(info base.PubStartInfo) error {
 // AuthorizePublish checks a protocol token and rejects banned stream IDs.
 func (m *Manager) AuthorizePublish(protocol, streamID, token string) error {
 	protocol = strings.ToLower(strings.TrimSpace(protocol))
-	want := m.publishTokens[protocol][streamID]
-	if want == "" {
-		return fmt.Errorf("%s publishing is not configured for stream %q", protocol, streamID)
-	}
-	if !secureTokenEqual(token, want) {
-		return fmt.Errorf("invalid %s publish token for stream %q", protocol, streamID)
+	if err := m.mediaAuth.AuthorizePublish(protocol, streamID, token); err != nil {
+		return err
 	}
 	return m.rejectBannedStream(streamID, protocol, true)
+}
+
+// MediaAuthorizer returns the shared credential policy used by protocol
+// adapters. Ban checks remain the responsibility of Manager.
+func (m *Manager) MediaAuthorizer() *auth.MediaAuthorizer {
+	return m.mediaAuth
 }
 
 func (m *Manager) rejectBannedStream(streamID, protocol string, failClosed bool) error {
@@ -96,18 +99,29 @@ func (m *Manager) rejectBannedStream(streamID, protocol string, failClosed bool)
 	return nil
 }
 
-func secureTokenEqual(got, want string) bool {
-	return got != "" && len(got) == len(want) && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
-}
-
-// OnSubStart allows all subscriptions.
+// OnSubStart applies the shared stream playback-token policy when configured.
 func (m *Manager) OnSubStart(info base.SubStartInfo) error {
-	return nil
+	if !m.mediaAuth.PlaybackRequired() {
+		return nil
+	}
+	token, err := auth.QueryToken(info.UrlParam, "token")
+	if err != nil {
+		return fmt.Errorf("invalid %s playback parameters for stream %q", info.Protocol, info.StreamName)
+	}
+	return m.mediaAuth.AuthorizePlayback(info.Protocol, info.StreamName, token)
 }
 
-// OnHls allows all HLS requests.
+// OnHls applies the shared stream playback-token policy to HLS playlists and
+// segments when configured.
 func (m *Manager) OnHls(streamName, urlParam string) error {
-	return nil
+	if !m.mediaAuth.PlaybackRequired() {
+		return nil
+	}
+	token, err := auth.QueryToken(urlParam, "token")
+	if err != nil {
+		return fmt.Errorf("invalid HLS playback parameters for stream %q", streamName)
+	}
+	return m.mediaAuth.AuthorizePlayback("hls", streamName, token)
 }
 
 // Ban adds a ban for a stream.
