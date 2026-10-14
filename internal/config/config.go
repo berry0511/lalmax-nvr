@@ -453,8 +453,9 @@ type XiaomiConfig struct {
 // SRT is served by lalmax on its default port (:19000).
 // Camera pushes should use streamid format: #!::h=<camera_id>,m=publish
 type SRTConfig struct {
-	Enabled *bool `yaml:"enabled"` // default false
-	Port    int   `yaml:"port,omitempty"`
+	Enabled    *bool             `yaml:"enabled"` // default false
+	Port       int               `yaml:"port,omitempty"`
+	StreamKeys map[string]string `yaml:"stream_keys,omitempty"` // stream_id → publish token
 }
 
 // RTMPConfig configures the RTMP ingest server.
@@ -472,8 +473,9 @@ type RTMPConfig struct {
 // Disabling WHIP only hides ingest URLs and the mapping handler; WHEP playback
 // still needs rtc_config and is not turned off.
 type WHIPConfig struct {
-	Enabled    *bool             `yaml:"enabled"`     // default true
-	StreamKeys map[string]string `yaml:"stream_keys"` // camera_id → streamid
+	Enabled       *bool             `yaml:"enabled"`                  // default true
+	StreamKeys    map[string]string `yaml:"stream_keys"`              // camera_id → streamid alias
+	PublishTokens map[string]string `yaml:"publish_tokens,omitempty"` // stream_id → publish token
 }
 
 // IsWHIPEnabled reports whether WHIP ingest URLs and mapping should be advertised.
@@ -661,6 +663,9 @@ func Save(path string, cfg *Config) error {
 	saveCfg.Cameras = nil
 	saveCfg.VoIP = cfg.VoIP.Clone()
 	saveCfg.RTMP.StreamKeys = cloneStringMap(cfg.RTMP.StreamKeys)
+	saveCfg.SRT.StreamKeys = cloneStringMap(cfg.SRT.StreamKeys)
+	saveCfg.WHIP.StreamKeys = cloneStringMap(cfg.WHIP.StreamKeys)
+	saveCfg.WHIP.PublishTokens = cloneStringMap(cfg.WHIP.PublishTokens)
 	if cfg.Storage.MigrationTarget != nil {
 		target := *cfg.Storage.MigrationTarget
 		saveCfg.Storage.MigrationTarget = &target

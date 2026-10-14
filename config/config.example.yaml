@@ -189,10 +189,11 @@ webdav:
 
 # SRT ingest — receive MPEG-TS pushed streams from cameras or encoders
 # SRT is served by lalmax on port 19000 (managed by the media engine).
-# Camera streamid format: #!::h=<camera_id>,m=publish
-# Push URL: srt://<host>:19000 with streamid #!::h=<camera_id>,m=publish
+# Camera streamid format: #!::h=<stream_id>,m=publish,u=<token>
 # srt:
 #   enabled: true
+#   stream_keys:
+#     front-door: "generate-a-long-random-token"
 
 # WHIP ingest — WebRTC-HTTP publish (OBS, WHIP clients)
 # Signaling: http://<host>:12090/webrtc/whip?streamid=<camera_id>
@@ -202,6 +203,8 @@ webdav:
 #   enabled: true
 #   stream_keys:
 #     front-door: "my-whip-stream"
+#   publish_tokens:
+#     front-door: "generate-a-long-random-token"
 
 # GB28181 SIP signaling — NVR is the SIP platform (上级), not an RTSP puller.
 # Devices REGISTER inbound; after Catalog, the NVR sends INVITE and the device

@@ -300,6 +300,16 @@ func decryptConfig(cfg *Config, key []byte) {
 			cfg.RTMP.StreamKeys[streamID] = v
 		}
 	}
+	for streamID, token := range cfg.SRT.StreamKeys {
+		if v, err := Decrypt(token, key); err == nil {
+			cfg.SRT.StreamKeys[streamID] = v
+		}
+	}
+	for streamID, token := range cfg.WHIP.PublishTokens {
+		if v, err := Decrypt(token, key); err == nil {
+			cfg.WHIP.PublishTokens[streamID] = v
+		}
+	}
 	for i := range cfg.VoIP.Users {
 		if v, err := Decrypt(cfg.VoIP.Users[i].Password, key); err == nil {
 			cfg.VoIP.Users[i].Password = v
@@ -383,6 +393,22 @@ func encryptConfig(cfg *Config, key []byte) []string {
 			}
 		}
 	}
+	for streamID, token := range cfg.SRT.StreamKeys {
+		if token != "" && !IsEncrypted(token) {
+			if v, err := Encrypt(token, key); err == nil {
+				cfg.SRT.StreamKeys[streamID] = v
+				encrypted = append(encrypted, fmt.Sprintf("srt.stream_keys[%s]", streamID))
+			}
+		}
+	}
+	for streamID, token := range cfg.WHIP.PublishTokens {
+		if token != "" && !IsEncrypted(token) {
+			if v, err := Encrypt(token, key); err == nil {
+				cfg.WHIP.PublishTokens[streamID] = v
+				encrypted = append(encrypted, fmt.Sprintf("whip.publish_tokens[%s]", streamID))
+			}
+		}
+	}
 	for i := range cfg.VoIP.Users {
 		if password := cfg.VoIP.Users[i].Password; password != "" && !IsEncrypted(password) {
 			if v, err := Encrypt(password, key); err == nil {
@@ -438,6 +464,16 @@ func SensitiveFieldPaths(cfg *Config) []string {
 			fields = append(fields, fmt.Sprintf("rtmp.stream_keys[%s]", streamID))
 		}
 	}
+	for streamID, token := range cfg.SRT.StreamKeys {
+		if token != "" && !IsEncrypted(token) {
+			fields = append(fields, fmt.Sprintf("srt.stream_keys[%s]", streamID))
+		}
+	}
+	for streamID, token := range cfg.WHIP.PublishTokens {
+		if token != "" && !IsEncrypted(token) {
+			fields = append(fields, fmt.Sprintf("whip.publish_tokens[%s]", streamID))
+		}
+	}
 	if cfg.MetricsAuth.Password != "" && !IsEncrypted(cfg.MetricsAuth.Password) {
 		fields = append(fields, "metrics_auth.password")
 	}
@@ -462,6 +498,8 @@ func SensitiveFieldPaths(cfg *Config) []string {
 type sensitiveSnapshot struct {
 	VoIPPasswords        []string
 	RTMPStreamKeys       map[string]string
+	SRTStreamKeys        map[string]string
+	WHIPPublishTokens    map[string]string
 	AuthPassword         string
 	MQTTPassword         string
 	XiaomiUserID         string
@@ -474,6 +512,8 @@ type sensitiveSnapshot struct {
 func snapshotSensitive(cfg *Config) sensitiveSnapshot {
 	s := sensitiveSnapshot{
 		RTMPStreamKeys:       cloneStringMap(cfg.RTMP.StreamKeys),
+		SRTStreamKeys:        cloneStringMap(cfg.SRT.StreamKeys),
+		WHIPPublishTokens:    cloneStringMap(cfg.WHIP.PublishTokens),
 		AuthPassword:         cfg.Auth.Password,
 		MQTTPassword:         cfg.MQTT.Password,
 		XiaomiUserID:         cfg.Xiaomi.UserID,
@@ -500,6 +540,8 @@ func (s sensitiveSnapshot) restore(cfg *Config) {
 	}
 	cfg.Auth.Password = s.AuthPassword
 	cfg.RTMP.StreamKeys = cloneStringMap(s.RTMPStreamKeys)
+	cfg.SRT.StreamKeys = cloneStringMap(s.SRTStreamKeys)
+	cfg.WHIP.PublishTokens = cloneStringMap(s.WHIPPublishTokens)
 	cfg.MQTT.Password = s.MQTTPassword
 	cfg.Xiaomi.UserID = s.XiaomiUserID
 	cfg.Xiaomi.Token = s.XiaomiToken

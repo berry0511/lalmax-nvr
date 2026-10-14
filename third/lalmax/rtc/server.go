@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	config "github.com/q191201771/lalmax/config"
@@ -20,11 +21,17 @@ import (
 type StreamNotFoundFn func(app, stream, schema string)
 
 type RtcServer struct {
-	config           config.RtcConfig
-	lalServer        logic.ILalServer
-	udpMux           ice.UDPMux
-	tcpMux           ice.TCPMux
-	streamNotFoundFn StreamNotFoundFn
+	config            config.RtcConfig
+	lalServer         logic.ILalServer
+	publishAuthorizer func(streamID, token string) error
+	udpMux            ice.UDPMux
+	tcpMux            ice.TCPMux
+	streamNotFoundFn  StreamNotFoundFn
+}
+
+// SetPublisherAuthorizer installs an admission check for WHIP publishers.
+func (s *RtcServer) SetPublisherAuthorizer(authorizer func(streamID, token string) error) {
+	s.publishAuthorizer = authorizer
 }
 
 // SetStreamNotFoundFn 注入流不存在回调
@@ -117,6 +124,17 @@ func (s *RtcServer) HandleWHIP(c *gin.Context) {
 	if streamid == "" {
 		c.Status(http.StatusMethodNotAllowed)
 		return
+	}
+	if s.publishAuthorizer != nil {
+		token := c.Request.URL.Query().Get("stream_key")
+		if authorization := strings.Fields(c.GetHeader("Authorization")); len(authorization) == 2 && strings.EqualFold(authorization[0], "Bearer") {
+			token = authorization[1]
+		}
+		if err := s.publishAuthorizer(streamid, token); err != nil {
+			c.Header("WWW-Authenticate", "Bearer")
+			c.String(http.StatusUnauthorized, "unauthorized publisher")
+			return
+		}
 	}
 
 	body, err := c.GetRawData()

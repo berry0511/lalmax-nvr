@@ -647,8 +647,21 @@ func (h *Handler) attachStreamURLs(ctx context.Context, item *streamSummary) {
 		item.IngestURLs = h.buildIngestURLs(ctx, item.StreamID, appName)
 		return
 	}
-	if h.config == nil || h.config.IsWHIPEnabled() {
+	if h.config == nil {
 		item.IngestURLs = h.buildStreamURLs(ctx, item.StreamID, appName, []string{"whip"})
+	} else if h.config.IsWHIPEnabled() {
+		if token := h.config.WHIP.PublishTokens[item.StreamID]; token != "" {
+			urls := h.buildStreamURLs(ctx, item.StreamID, appName, []string{"whip"})
+			for i := range urls {
+				if u, err := url.Parse(urls[i].URL); err == nil {
+					q := u.Query()
+					q.Set("stream_key", token)
+					u.RawQuery = q.Encode()
+					urls[i].URL = u.String()
+				}
+			}
+			item.IngestURLs = urls
+		}
 	}
 }
 
@@ -695,9 +708,36 @@ func (h *Handler) buildIngestURLs(ctx context.Context, streamID, appName string)
 			continue
 		}
 		if protocol == "srt" {
-			if u := h.buildSRTIngestURL(ctx, streamID); u != "" {
+			token := ""
+			if h.config != nil {
+				token = h.config.SRT.StreamKeys[streamID]
+			}
+			if token == "" {
+				continue
+			}
+			if u := h.buildSRTIngestURL(ctx, streamID, token); u != "" {
 				out = append(out, streamPlayURL{Protocol: "srt", URL: u, Backend: "lalmax"})
 			}
+			continue
+		}
+		if protocol == "whip" {
+			token := ""
+			if h.config != nil {
+				token = h.config.WHIP.PublishTokens[streamID]
+			}
+			if token == "" {
+				continue
+			}
+			urls := h.buildStreamURLs(ctx, streamID, appName, []string{protocol})
+			for i := range urls {
+				if u, err := url.Parse(urls[i].URL); err == nil {
+					q := u.Query()
+					q.Set("stream_key", token)
+					u.RawQuery = q.Encode()
+					urls[i].URL = u.String()
+				}
+			}
+			out = append(out, urls...)
 			continue
 		}
 		out = append(out, h.buildStreamURLs(ctx, streamID, appName, []string{protocol})...)
@@ -705,7 +745,7 @@ func (h *Handler) buildIngestURLs(ctx context.Context, streamID, appName string)
 	return out
 }
 
-func (h *Handler) buildSRTIngestURL(ctx context.Context, streamID string) string {
+func (h *Handler) buildSRTIngestURL(ctx context.Context, streamID, token string) string {
 	port := config.DefaultSRTPort
 	if h.config != nil && h.config.SRT.Port > 0 {
 		port = h.config.SRT.Port
@@ -723,11 +763,9 @@ func (h *Handler) buildSRTIngestURL(ctx context.Context, streamID string) string
 			}
 		}
 	}
-	u := url.URL{
-		Scheme:   "srt",
-		Host:     net.JoinHostPort(host, strconv.Itoa(port)),
-		RawQuery: fmt.Sprintf("streamid=#!::h=%s,m=publish", streamID),
-	}
+	query := url.Values{}
+	query.Set("streamid", fmt.Sprintf("#!::h=%s,m=publish,u=%s", streamID, token))
+	u := url.URL{Scheme: "srt", Host: net.JoinHostPort(host, strconv.Itoa(port)), RawQuery: query.Encode()}
 	return u.String()
 }
 

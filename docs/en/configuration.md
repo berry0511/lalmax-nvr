@@ -652,9 +652,11 @@ websocket:
 rtmp:
   enabled: false         # default false; embedded engine listens on 11935 when enabled
   port: 11935            # optional RTMP ingest port
-  stream_keys:           # camera_id → stream_key mapping
+  stream_keys:           # stream_id → required publish token
     cam1: "your_secret_key"
 ```
+
+Publish with `...?stream_key=<token>`. Streams without a configured key reject RTMP publishing. Keys are encrypted when `config.encryption_key` is configured.
 
 ## SRT Ingest Configuration
 
@@ -662,9 +664,11 @@ rtmp:
 srt:
   enabled: false         # default false; embedded engine listens on 19000 when enabled
   port: 19000            # optional SRT ingest port
+  stream_keys:           # stream_id → required publish token
+    cam1: "your_secret_key"
 ```
 
-> **Push format**: SRT pushes should use streamid format: `#!::h=<camera_id>,m=publish`
+> **Push format**: SRT pushes should use streamid format `#!::h=<stream_id>,m=publish,u=<token>` (or `r=<stream_id>`). The `u` field carries the token. Streams without a configured key reject publishing. Keys are encrypted when `config.encryption_key` is configured.
 
 ## JT1078 Ingest Configuration
 
@@ -732,11 +736,13 @@ Media restart functional tests pass. The extended restart race test still report
 ```yaml
 whip:
   enabled: true          # default true; false only hides ingest URLs, WHEP playback stays on
-  stream_keys:           # optional camera_id → streamid mapping
+  stream_keys:           # optional camera_id → streamid alias mapping
     cam1: "obs-front"
+  publish_tokens:        # stream_id → required publish token
+    cam1: "your_secret_key"
 ```
 
-> **Push URL**: `http://<host>:12090/webrtc/whip?streamid=<camera_id>` (OBS → Settings → Stream → WHIP). ICE mux port **4888/udp** (and TCP) must be reachable. Docker: map `12090` and `4888`. Set `media.lalmax_public_url` to a public hostname.
+> **Push URL**: `http://<host>:12090/webrtc/whip?streamid=<stream_id>&stream_key=<token>` (OBS → Settings → Stream → WHIP); WHIP clients can also send `Authorization: Bearer <token>`. Streams without a configured key reject publishing. Keys are encrypted when `config.encryption_key` is configured. ICE mux port **4888/udp** (and TCP) must be reachable. Docker: map `12090` and `4888`. Set `media.lalmax_public_url` to a public hostname.
 
 ## Health Monitoring Configuration
 
