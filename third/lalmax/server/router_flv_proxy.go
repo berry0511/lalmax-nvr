@@ -14,7 +14,7 @@ import (
 // 为什么：ZLM 的 FLV 拉流路径是 /{app}/{stream}.live.flv，lal 的 httpflv 在独立端口，
 // lalmax 不直接提供 httpflv，通过反向代理让外部只需访问 lalmax 单一端口
 func (s *LalMaxServer) initFlvProxy(router *gin.Engine) {
-	router.NoRoute(func(c *gin.Context) {
+	router.NoRoute(s.protectHTTPPlay(func(c *gin.Context) {
 		path := c.Request.URL.Path
 		if !strings.HasSuffix(path, ".flv") {
 			c.Status(http.StatusNotFound)
@@ -68,7 +68,7 @@ func (s *LalMaxServer) initFlvProxy(router *gin.Engine) {
 		c.Header("Transfer-Encoding", "chunked")
 		c.Writer.Flush()
 		io.Copy(c.Writer, resp.Body)
-	})
+	}))
 }
 
 // getLalHttpflvAddr 从 lal 原始配置中提取 httpflv 服务地址

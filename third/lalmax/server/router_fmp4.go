@@ -9,8 +9,8 @@ import (
 )
 
 func (s *LalMaxServer) initFmp4Router(router *gin.Engine) {
-	router.GET("/live/m4s/:streamid", s.HandleHttpFmp4)
-	router.GET("/live/hls/:streamid/:type", s.HandleHls)
+	router.GET("/live/m4s/:streamid", s.protectHTTPPlay(s.HandleHttpFmp4))
+	router.GET("/live/hls/:streamid/:type", s.protectHTTPPlay(s.HandleHls))
 }
 
 func (s *LalMaxServer) HandleHls(c *gin.Context) {

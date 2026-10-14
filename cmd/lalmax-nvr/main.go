@@ -622,6 +622,7 @@ func NewApp(cfg *config.Config, configPath string) (*App, error) {
 	engine, err := newMediaEngine(cfg,
 		lalmaxserver.WithAuthentication(a.banMgr),
 		lalmaxserver.WithPublisherAuthorizer(a.banMgr.AuthorizePublish),
+		lalmaxserver.WithHTTPPlayAuth(a.multiUserMW),
 	)
 	if err != nil {
 		db.Close()
