@@ -58,6 +58,7 @@ type LalMaxServer struct {
 	cancel   context.CancelFunc
 	runDone  chan error
 	hookOnce sync.Once
+	playAuth func(http.Handler) http.Handler
 }
 
 // LalMaxServerOption allows customizing LalMaxServer behavior.
@@ -66,6 +67,7 @@ type LalMaxServerOption func(*lalMaxServerOptions)
 type lalMaxServerOptions struct {
 	authentication      logic.IAuthentication
 	publisherAuthorizer func(protocol, streamID, token string) error
+	playAuth            func(http.Handler) http.Handler
 }
 
 // WithAuthentication injects a custom IAuthentication into the underlying lal server.
@@ -73,6 +75,15 @@ type lalMaxServerOptions struct {
 func WithAuthentication(auth logic.IAuthentication) LalMaxServerOption {
 	return func(o *lalMaxServerOptions) {
 		o.authentication = auth
+	}
+}
+
+// WithHTTPPlayAuth protects direct HTTP playback routes with the application's
+// HTTP authentication middleware. Publishing routes keep their protocol token
+// checks and are not wrapped by this middleware.
+func WithHTTPPlayAuth(auth func(http.Handler) http.Handler) LalMaxServerOption {
+	return func(o *lalMaxServerOptions) {
+		o.playAuth = auth
 	}
 }
 
@@ -141,6 +152,7 @@ func NewLalMaxServer(conf *config.Config, opts ...LalMaxServerOption) (*LalMaxSe
 		rtpPubMgr: rtppub.NewManager(lalsvr, conf.GB28181Config.MediaConfig),
 		udptsMgr:  udpts.NewManager(lalsvr),
 		recorder:  newFfmpegRecorder(""),
+		playAuth:  serverOpts.playAuth,
 	}
 
 	// 注入 sub 数量查询，用于 on_stream_none_reader 判断

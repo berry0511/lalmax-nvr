@@ -601,6 +601,8 @@ HLS playback is independent of recording pulls: disabling `hls.enabled` or using
 
 `media.rtsp_auth_enable` enables authentication for RTSP playback. To use it, configure both `media.rtsp_username` and `media.rtsp_password`; `media.rtsp_auth_method` is `0` for Basic or `1` for Digest. The password is encrypted in the saved config when a configuration encryption key is enabled.
 
+In embedded mode, direct playback routes on the lalmax HTTP port (default `12090`)—WHEP, LL-HLS, HTTP-fMP4, and the HTTP-FLV proxy—use NVR local account authentication. Players must support HTTP Basic Auth or the API's `token` query parameter. In-app `/api/cameras/.../stream` playback remains protected by NVR API authentication. RTMP, SRT, the separate lal HTTP listener (default `18080`), and native RTSP listeners do not pass through this HTTP middleware; configure their protocol authentication separately. Coverage for those listeners is being completed in follow-up changes.
+
 ## DLNA configuration
 
 The optional LAN MediaServer is disabled by default. `dlna.port` defaults to **8200**, separate from `server.listen`; `include_live` and `include_recordings` default to true. Use `interface` to select a network interface and `allowed_cidrs` to restrict clients. `max_browse_count` defaults to **200**, and `gop_cache` to **1**. The `max_media_viewers` setting exists but is not currently enforced. See the [DLNA guide](dlna.md).

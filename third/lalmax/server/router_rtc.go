@@ -13,13 +13,15 @@ func (s *LalMaxServer) initRtcRouter(router *gin.Engine) {
 	rtc.OPTIONS("/whip", s.HandleWHIP)
 	rtc.DELETE("/whip", s.HandleWHIP)
 
-	rtc.GET("/whep", s.HandleWHEP)
-	rtc.POST("/whep", s.HandleWHEP)
-	rtc.OPTIONS("/whep", s.HandleWHEP)
-	rtc.DELETE("/whep", s.HandleWHEP)
+	playAuth := s.protectHTTPPlay(s.HandleWHEP)
+	rtc.GET("/whep", playAuth)
+	rtc.POST("/whep", playAuth)
+	rtc.OPTIONS("/whep", playAuth)
+	rtc.DELETE("/whep", playAuth)
 
-	rtc.POST("/play/live/:streamid", s.HandleJessibuca)
-	rtc.DELETE("/play/live/:streamid", s.HandleJessibuca)
+	jessibucaAuth := s.protectHTTPPlay(s.HandleJessibuca)
+	rtc.POST("/play/live/:streamid", jessibucaAuth)
+	rtc.DELETE("/play/live/:streamid", jessibucaAuth)
 }
 
 func (s *LalMaxServer) HandleWHIP(c *gin.Context) {

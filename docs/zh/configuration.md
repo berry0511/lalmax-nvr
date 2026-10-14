@@ -601,6 +601,8 @@ HLS 播放与录像拉流相互独立：关闭 `hls.enabled` 或启用按需切�
 
 `media.rtsp_auth_enable` 控制是否对 RTSP 播放启用鉴权。要正常使用鉴权，需要同时配置 `media.rtsp_username` 和 `media.rtsp_password`；`media.rtsp_auth_method` 为 `0`（Basic）或 `1`（Digest）。配置加密密钥启用后，保存配置时会加密 RTSP 密码。
 
+embedded 模式下，lalmax HTTP 端口（默认 `12090`）的直连播放入口，包括 WHEP、LL-HLS、HTTP-fMP4 和 HTTP-FLV 代理，使用 NVR 本地账号认证。播放器需支持 HTTP Basic Auth，或使用 NVR API 支持的 `token` 查询参数。应用内 `/api/cameras/.../stream` 播放地址继续由 NVR API 认证保护。RTMP、SRT、独立 lal HTTP（默认 `18080`）及 RTSP 原生监听端口不经过这层 HTTP 认证；请分别配置协议鉴权，相关覆盖会继续补齐。
+
 ## DLNA 配置
 
 可选的局域网 MediaServer，默认关闭。`dlna.port` 默认 **8200**，与 `server.listen` 分开；`include_live` 和 `include_recordings` 默认开启。可用 `interface` 指定网卡、`allowed_cidrs` 限制客户端网段。`max_browse_count` 默认 **200**，`gop_cache` 默认 **1**。`max_media_viewers` 已提供配置项，但当前未用于限制连接数。使用方法见 [DLNA 指南](dlna.md)。
