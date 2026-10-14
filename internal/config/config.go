@@ -365,6 +365,7 @@ type HLSConfig struct {
 // StreamingConfig configures streaming protocol options (WebRTC, FLV, etc.)
 // DefaultDLNAPort is the MediaServer HTTP port, separate from server.listen.
 const DefaultDLNAPort = 8200
+const DefaultDLNAMaxMediaViewers = 4
 
 // DLNAConfig controls the optional LAN UPnP MediaServer.
 type DLNAConfig struct {
@@ -1150,7 +1151,7 @@ func (cfg *Config) ApplyDefaults() {
 		cfg.DLNA.MaxBrowseCount = 200
 	}
 	if cfg.DLNA.MaxMediaViewers <= 0 {
-		cfg.DLNA.MaxMediaViewers = 4
+		cfg.DLNA.MaxMediaViewers = DefaultDLNAMaxMediaViewers
 	}
 	if cfg.DLNA.GopCache <= 0 {
 		cfg.DLNA.GopCache = 1
