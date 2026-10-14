@@ -125,6 +125,9 @@ type IPTVRepository interface {
 	InsertIPTVSource(ctx context.Context, src IPTVSource) error
 	ListIPTVSources(ctx context.Context) ([]IPTVSource, error)
 	GetIPTVSource(ctx context.Context, id string) (*IPTVSource, error)
+	GetIPTVSourceByImportJob(ctx context.Context, jobID string) (*IPTVSource, error)
+	UpdateIPTVSource(ctx context.Context, src IPTVSource) error
+	UpdateIPTVSourceRefresh(ctx context.Context, id, status string, refreshedAt *time.Time, lastError string, added, missing int) error
 	DeleteIPTVSource(ctx context.Context, id string) error
 	UpsertIPTVChannel(ctx context.Context, ch IPTVChannel) error
 	ListIPTVChannels(ctx context.Context, sourceID, group, q string, favorite *bool) ([]IPTVChannel, error)

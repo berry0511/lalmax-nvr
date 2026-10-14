@@ -9,6 +9,7 @@ import (
 
 type IPTVSource struct {
 	ID                 string     `json:"id"`
+	ImportJobID        string     `json:"import_job_id,omitempty"`
 	Name               string     `json:"name"`
 	PlaylistURL        string     `json:"playlist_url"`
 	RequestHeaders     string     `json:"-"`
@@ -16,6 +17,9 @@ type IPTVSource struct {
 	RefreshIntervalSec int        `json:"refresh_interval_sec"`
 	LastRefreshedAt    *time.Time `json:"last_refreshed_at,omitempty"`
 	LastError          string     `json:"last_error,omitempty"`
+	RefreshStatus      string     `json:"refresh_status"`
+	LastRefreshNew     int        `json:"last_refresh_new"`
+	LastRefreshMissing int        `json:"last_refresh_missing"`
 	CreatedAt          time.Time  `json:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`
 }
@@ -84,6 +88,7 @@ type IPTVImportItem struct {
 func (d *DB) migrateIPTV(ctx context.Context) error {
 	sourceSQL := `CREATE TABLE IF NOT EXISTS iptv_sources (
 		id TEXT PRIMARY KEY,
+		import_job_id TEXT NOT NULL DEFAULT '',
 		name TEXT NOT NULL,
 		playlist_url TEXT NOT NULL,
 		request_headers TEXT NOT NULL DEFAULT '',
@@ -91,6 +96,9 @@ func (d *DB) migrateIPTV(ctx context.Context) error {
 		refresh_interval_sec INTEGER NOT NULL DEFAULT 21600,
 		last_refreshed_at DATETIME,
 		last_error TEXT NOT NULL DEFAULT '',
+		refresh_status TEXT NOT NULL DEFAULT 'idle',
+		last_refresh_new INTEGER NOT NULL DEFAULT 0,
+		last_refresh_missing INTEGER NOT NULL DEFAULT 0,
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL
 	);`
@@ -166,6 +174,12 @@ func (d *DB) migrateIPTV(ctx context.Context) error {
 	_, _ = d.execContext(ctx, `ALTER TABLE iptv_import_items ADD COLUMN request_headers TEXT NOT NULL DEFAULT ''`)
 	_, _ = d.execContext(ctx, `ALTER TABLE iptv_channels ADD COLUMN request_headers TEXT NOT NULL DEFAULT ''`)
 	_, _ = d.execContext(ctx, `ALTER TABLE iptv_channels ADD COLUMN publish_enabled INTEGER NOT NULL DEFAULT 0`)
+	_, _ = d.execContext(ctx, `ALTER TABLE iptv_sources ADD COLUMN refresh_status TEXT NOT NULL DEFAULT 'idle'`)
+	_, _ = d.execContext(ctx, `ALTER TABLE iptv_sources ADD COLUMN last_refresh_new INTEGER NOT NULL DEFAULT 0`)
+	_, _ = d.execContext(ctx, `ALTER TABLE iptv_sources ADD COLUMN last_refresh_missing INTEGER NOT NULL DEFAULT 0`)
+	_, _ = d.execContext(ctx, `ALTER TABLE iptv_sources ADD COLUMN import_job_id TEXT NOT NULL DEFAULT ''`)
+	_, _ = d.execContext(ctx, `UPDATE iptv_sources SET import_job_id=(SELECT id FROM iptv_import_jobs WHERE status='committed' AND name=iptv_sources.name AND playlist_url=iptv_sources.playlist_url AND created_at<=iptv_sources.created_at ORDER BY created_at DESC LIMIT 1) WHERE import_job_id='' AND EXISTS (SELECT 1 FROM iptv_import_jobs WHERE status='committed' AND name=iptv_sources.name AND playlist_url=iptv_sources.playlist_url AND created_at<=iptv_sources.created_at)`)
+	_, _ = d.execContext(ctx, `CREATE INDEX IF NOT EXISTS idx_iptv_sources_import_job ON iptv_sources(import_job_id)`)
 	_, _ = d.execContext(ctx, `CREATE INDEX IF NOT EXISTS idx_iptv_channels_source ON iptv_channels(source_id, group_name)`)
 	_, _ = d.execContext(ctx, `CREATE INDEX IF NOT EXISTS idx_iptv_import_items_job ON iptv_import_items(job_id, row_no)`)
 	_, _ = d.execContext(ctx, "UPDATE schema_meta SET value='32' WHERE key='schema_version'")
@@ -313,13 +327,13 @@ func (d *DB) InsertIPTVSource(ctx context.Context, src IPTVSource) error {
 	if src.UpdatedAt.IsZero() {
 		src.UpdatedAt = now
 	}
-	_, err := d.execContext(ctx, `INSERT INTO iptv_sources(id, name, playlist_url, request_headers, enabled, refresh_interval_sec, last_refreshed_at, last_error, created_at, updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?)`, src.ID, src.Name, src.PlaylistURL, src.RequestHeaders, boolToInt(src.Enabled), src.RefreshIntervalSec, timeToDBPtr(src.LastRefreshedAt), src.LastError, timeToDB(src.CreatedAt), timeToDB(src.UpdatedAt))
+	_, err := d.execContext(ctx, `INSERT INTO iptv_sources(id, import_job_id, name, playlist_url, request_headers, enabled, refresh_interval_sec, last_refreshed_at, last_error, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?)`, src.ID, src.ImportJobID, src.Name, src.PlaylistURL, src.RequestHeaders, boolToInt(src.Enabled), src.RefreshIntervalSec, timeToDBPtr(src.LastRefreshedAt), src.LastError, timeToDB(src.CreatedAt), timeToDB(src.UpdatedAt))
 	return err
 }
 
 func (d *DB) ListIPTVSources(ctx context.Context) ([]IPTVSource, error) {
-	rows, err := d.queryContext(ctx, `SELECT id, name, playlist_url, request_headers, enabled, refresh_interval_sec, last_refreshed_at, last_error, created_at, updated_at FROM iptv_sources ORDER BY name`)
+	rows, err := d.queryContext(ctx, `SELECT id, import_job_id, name, playlist_url, request_headers, enabled, refresh_interval_sec, last_refreshed_at, last_error, refresh_status, last_refresh_new, last_refresh_missing, created_at, updated_at FROM iptv_sources ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -336,7 +350,7 @@ func (d *DB) ListIPTVSources(ctx context.Context) ([]IPTVSource, error) {
 }
 
 func (d *DB) GetIPTVSource(ctx context.Context, id string) (*IPTVSource, error) {
-	row := d.queryRowContext(ctx, `SELECT id, name, playlist_url, request_headers, enabled, refresh_interval_sec, last_refreshed_at, last_error, created_at, updated_at FROM iptv_sources WHERE id=?`, id)
+	row := d.queryRowContext(ctx, `SELECT id, import_job_id, name, playlist_url, request_headers, enabled, refresh_interval_sec, last_refreshed_at, last_error, refresh_status, last_refresh_new, last_refresh_missing, created_at, updated_at FROM iptv_sources WHERE id=?`, id)
 	src, err := scanIPTVSource(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -345,6 +359,30 @@ func (d *DB) GetIPTVSource(ctx context.Context, id string) (*IPTVSource, error) 
 		return nil, err
 	}
 	return &src, nil
+}
+
+func (d *DB) GetIPTVSourceByImportJob(ctx context.Context, jobID string) (*IPTVSource, error) {
+	row := d.queryRowContext(ctx, `SELECT id, import_job_id, name, playlist_url, request_headers, enabled, refresh_interval_sec, last_refreshed_at, last_error, refresh_status, last_refresh_new, last_refresh_missing, created_at, updated_at FROM iptv_sources WHERE import_job_id=?`, jobID)
+	src, err := scanIPTVSource(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &src, nil
+}
+
+func (d *DB) UpdateIPTVSource(ctx context.Context, src IPTVSource) error {
+	_, err := d.execContext(ctx, `UPDATE iptv_sources SET name=?, enabled=?, refresh_interval_sec=?, updated_at=? WHERE id=?`,
+		src.Name, boolToInt(src.Enabled), src.RefreshIntervalSec, timeToDB(time.Now()), src.ID)
+	return err
+}
+
+func (d *DB) UpdateIPTVSourceRefresh(ctx context.Context, id, status string, refreshedAt *time.Time, lastError string, added, missing int) error {
+	_, err := d.execContext(ctx, `UPDATE iptv_sources SET refresh_status=?, last_refreshed_at=COALESCE(?, last_refreshed_at), last_error=?, last_refresh_new=?, last_refresh_missing=?, updated_at=? WHERE id=?`,
+		status, timeToDBPtr(refreshedAt), lastError, added, missing, timeToDB(time.Now()), id)
+	return err
 }
 
 func (d *DB) DeleteIPTVSource(ctx context.Context, id string) error {
@@ -477,7 +515,7 @@ func scanIPTVSource(row iptvRowScanner) (IPTVSource, error) {
 	var src IPTVSource
 	var lastRef, created, updated sql.NullString
 	var enabled int
-	err := row.Scan(&src.ID, &src.Name, &src.PlaylistURL, &src.RequestHeaders, &enabled, &src.RefreshIntervalSec, &lastRef, &src.LastError, &created, &updated)
+	err := row.Scan(&src.ID, &src.ImportJobID, &src.Name, &src.PlaylistURL, &src.RequestHeaders, &enabled, &src.RefreshIntervalSec, &lastRef, &src.LastError, &src.RefreshStatus, &src.LastRefreshNew, &src.LastRefreshMissing, &created, &updated)
 	if err != nil {
 		return IPTVSource{}, err
 	}

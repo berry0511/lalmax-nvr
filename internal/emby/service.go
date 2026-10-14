@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bluenviron/gohlslib"
+	"github.com/bluenviron/gohlslib/v2"
 	"github.com/google/uuid"
 	"github.com/lalmax-pro/lalmax-nvr/internal/config"
 	"github.com/lalmax-pro/lalmax-nvr/internal/media"

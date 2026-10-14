@@ -6,9 +6,9 @@ import (
 
 	config "github.com/q191201771/lalmax/config"
 
-	"github.com/bluenviron/gohlslib"
-	"github.com/bluenviron/gohlslib/pkg/codecs"
-	"github.com/bluenviron/mediacommon/pkg/codecs/mpeg4audio"
+	"github.com/bluenviron/gohlslib/v2"
+	"github.com/bluenviron/gohlslib/v2/pkg/codecs"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
 	"github.com/gin-gonic/gin"
 	"github.com/q191201771/lal/pkg/avc"
 	"github.com/q191201771/lal/pkg/base"
@@ -19,6 +19,8 @@ import (
 
 type HlsSession struct {
 	muxer               *gohlslib.Muxer
+	videoTrack          *gohlslib.Track
+	audioTrack          *gohlslib.Track
 	done                atomic.Bool
 	data                []Frame
 	audioCodecId        int
@@ -77,11 +79,11 @@ func NewHlsSessionWithAppName(appName, streamName string, conf config.Fmp4HlsCon
 
 	if conf.LowLatency && conf.PartDuration > 0 {
 		// llhls设置part duration
-		session.muxer.PartDuration = time.Millisecond * time.Duration(conf.PartDuration)
+		session.muxer.PartMinDuration = time.Millisecond * time.Duration(conf.PartDuration)
 	}
 
 	if conf.SegmentDuration > 0 {
-		session.muxer.SegmentDuration = time.Second * time.Duration(conf.SegmentDuration)
+		session.muxer.SegmentMinDuration = time.Second * time.Duration(conf.SegmentDuration)
 	}
 
 	return session
@@ -122,7 +124,7 @@ func (session *HlsSession) OnMsg(msg base.RtmpMsg) {
 
 				nalus = append(nalus, nals...)
 				pts := time.Millisecond*time.Duration(msg.Pts()) - session.startVideoPts
-				err = session.muxer.WriteH26x(time.Now(), pts, nalus)
+				err = session.writeVideo(time.Now(), pts, nalus)
 				if err != nil {
 					nazalog.Error("hls-fmp4 WriteH26x failed, err:", err)
 				}
@@ -135,7 +137,7 @@ func (session *HlsSession) OnMsg(msg base.RtmpMsg) {
 					session.audioStartPTSFilled = true
 				}
 				pts := time.Millisecond*time.Duration(msg.Dts()) - session.startAudioPts
-				err := session.muxer.WriteMPEG4Audio(time.Now(), pts, [][]byte{msg.Payload[2:]})
+				err := session.muxer.WriteMPEG4Audio(session.audioTrack, time.Now(), durationToClockTicks(pts, session.audioTrack.ClockRate), [][]byte{msg.Payload[2:]})
 				if err != nil {
 					nazalog.Error("hls-fmp4 WriteMPEG4Audio failed, err:", err)
 				}
@@ -145,7 +147,7 @@ func (session *HlsSession) OnMsg(msg base.RtmpMsg) {
 					session.audioStartPTSFilled = true
 				}
 				pts := time.Millisecond*time.Duration(msg.Dts()) - session.startAudioPts
-				err := session.muxer.WriteOpus(time.Now(), pts, [][]byte{msg.Payload[1:]})
+				err := session.muxer.WriteOpus(session.audioTrack, time.Now(), durationToClockTicks(pts, session.audioTrack.ClockRate), [][]byte{msg.Payload[1:]})
 				if err != nil {
 					nazalog.Error("hls-fmp4 WriteOpus failed, err:", err)
 				}
@@ -265,22 +267,39 @@ func (session *HlsSession) readyToStart() bool {
 	return session.videoCodecId == -1 && session.audioCodecId != -1 && session.audioStartPTSFilled
 }
 
+func (session *HlsSession) writeVideo(ntp time.Time, pts time.Duration, au [][]byte) error {
+	if session.videoTrack == nil {
+		return nil
+	}
+	clockPTS := durationToClockTicks(pts, session.videoTrack.ClockRate)
+	if session.videoCodecId == int(base.RtmpCodecIdHevc) {
+		return session.muxer.WriteH265(session.videoTrack, ntp, clockPTS, au)
+	}
+	return session.muxer.WriteH264(session.videoTrack, ntp, clockPTS, au)
+}
+
+func durationToClockTicks(pts time.Duration, clockRate int) int64 {
+	return int64(pts/time.Millisecond) * int64(clockRate) / 1000
+}
+
 func (session *HlsSession) drain() {
 	if session.videoCodecId != -1 {
 		if session.videoCodecId == int(base.RtmpCodecIdAvc) {
-			session.muxer.VideoTrack = &gohlslib.Track{
+			session.videoTrack = &gohlslib.Track{
 				Codec: &codecs.H264{
 					SPS: session.sps,
 					PPS: session.pps,
 				},
+				ClockRate: 90000,
 			}
 		} else if session.videoCodecId == int(base.RtmpCodecIdHevc) {
-			session.muxer.VideoTrack = &gohlslib.Track{
+			session.videoTrack = &gohlslib.Track{
 				Codec: &codecs.H265{
 					VPS: session.vps,
 					SPS: session.sps,
 					PPS: session.pps,
 				},
+				ClockRate: 90000,
 			}
 		}
 	}
@@ -294,18 +313,27 @@ func (session *HlsSession) drain() {
 				return
 			}
 
-			session.muxer.AudioTrack = &gohlslib.Track{
+			session.audioTrack = &gohlslib.Track{
 				Codec: &codecs.MPEG4Audio{
 					Config: mpegConf,
 				},
+				ClockRate: mpegConf.SampleRate,
 			}
 		} else if session.audioCodecId == int(base.RtmpSoundFormatOpus) {
-			session.muxer.AudioTrack = &gohlslib.Track{
+			session.audioTrack = &gohlslib.Track{
 				Codec: &codecs.Opus{
 					ChannelCount: 1,
 				},
+				ClockRate: 48000,
 			}
 		}
+	}
+
+	if session.videoTrack != nil {
+		session.muxer.Tracks = append(session.muxer.Tracks, session.videoTrack)
+	}
+	if session.audioTrack != nil {
+		session.muxer.Tracks = append(session.muxer.Tracks, session.audioTrack)
 	}
 
 	if err := session.muxer.Start(); err != nil {
@@ -315,20 +343,20 @@ func (session *HlsSession) drain() {
 
 	for _, data := range session.data {
 		if (data.codecType == base.RtmpCodecIdAvc || data.codecType == base.RtmpCodecIdHevc) && session.videoCodecId != -1 {
-			err := session.muxer.WriteH26x(data.ntp, data.pts, data.au)
+			err := session.writeVideo(data.ntp, data.pts, data.au)
 			if err != nil {
 				nazalog.Error("hls-fmp4 WriteH26x failed, err:", err)
 				continue
 			}
 		} else if session.audioCodecId != -1 {
 			if data.codecType == base.RtmpSoundFormatAac {
-				err := session.muxer.WriteMPEG4Audio(data.ntp, data.pts, data.au)
+				err := session.muxer.WriteMPEG4Audio(session.audioTrack, data.ntp, durationToClockTicks(data.pts, session.audioTrack.ClockRate), data.au)
 				if err != nil {
 					nazalog.Error("hls-fmp4 WriteMPEG4Audio failed, err:", err)
 					continue
 				}
 			} else if data.codecType == base.RtmpSoundFormatOpus {
-				err := session.muxer.WriteOpus(data.ntp, data.pts, data.au)
+				err := session.muxer.WriteOpus(session.audioTrack, data.ntp, durationToClockTicks(data.pts, session.audioTrack.ClockRate), data.au)
 				if err != nil {
 					nazalog.Error("hls-fmp4 WriteMPEG4Audio failed, err:", err)
 					continue

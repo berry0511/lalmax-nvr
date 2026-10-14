@@ -385,6 +385,7 @@
       publisher_stopped: t('streams.offlineReason.publisherStopped'),
       relay_pull_stopped: t('streams.offlineReason.relayPullStopped'),
       source_ended: t('streams.offlineReason.sourceEnded'),
+      media_stopped: t('streams.offlineReason.mediaStopped'),
       playback_completed: t('streams.offlineReason.playbackCompleted'),
       stopped: t('streams.offlineReason.stopped'),
       process_restarted: t('streams.offlineReason.processRestarted'),
@@ -980,7 +981,15 @@
                     {#each streamHistory as session (session.id)}
                       <tr>
                         <td>{formatTime(session.started_at)}</td>
-                        <td>{session.ended_at ? formatTime(session.ended_at) : t('streams.onlineNow')}</td>
+                        <td>
+                          {#if session.ended_at}
+                            {formatTime(session.ended_at)}
+                          {:else if stream && !stream.active}
+                            {t('streams.sessionOpenMediaIdle')}
+                          {:else}
+                            {t('streams.onlineNow')}
+                          {/if}
+                        </td>
                         <td>{session.media_started_at ? formatTime(session.media_started_at) : '—'}</td>
                         <td>{session.media_ended_at ? formatTime(session.media_ended_at) : '—'}</td>
                         <td>{session.protocol || '—'}</td>

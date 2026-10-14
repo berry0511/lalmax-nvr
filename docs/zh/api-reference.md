@@ -36,7 +36,11 @@
 | POST | `/api/iptv/imports` | 导入 M3U URL 或文本 |
 | GET | `/api/iptv/imports/{id}/items` | 查看探测结果 |
 | POST | `/api/iptv/imports/{id}/commit` | 纳管选中的频道 |
+| GET | `/api/iptv/sources` | 查看订阅源及同步状态 |
+| PUT | `/api/iptv/sources/{id}` | 修改订阅源或暂停/恢复定时同步 |
+| POST | `/api/iptv/sources/{id}/refresh` | 开始同步订阅源 |
 | GET | `/api/iptv/channels` | 列出频道 |
+| POST | `/api/iptv/channels/{id}/check` | 检测单个频道可用性和编码 |
 | GET | `/api/iptv/channels/{id}/playback` | 获取浏览器代理播放地址 |
 | PUT | `/api/iptv/channels/{id}` | 更新频道，包括 `publish_enabled` |
 

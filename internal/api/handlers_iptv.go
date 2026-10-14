@@ -31,6 +31,12 @@ type iptvChannelUpdateRequest struct {
 	PublishEnabled *bool  `json:"publish_enabled"`
 }
 
+type iptvSourceUpdateRequest struct {
+	Name               string `json:"name"`
+	Enabled            *bool  `json:"enabled"`
+	RefreshIntervalSec *int   `json:"refresh_interval_sec"`
+}
+
 func (h *Handler) handleIPTVCreateImport(w http.ResponseWriter, r *http.Request) {
 	if h.iptvSvc == nil {
 		writeError(w, http.StatusServiceUnavailable, "iptv module unavailable")
@@ -42,7 +48,7 @@ func (h *Handler) handleIPTVCreateImport(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if strings.TrimSpace(req.PlaylistText) != "" {
-		created, err := h.iptvSvc.ImportFromReader(r.Context(), req.Name, strings.NewReader(req.PlaylistText))
+		created, err := h.iptvSvc.ImportFromReaderWithHeaders(r.Context(), req.Name, req.Headers, strings.NewReader(req.PlaylistText))
 		if err != nil {
 			writeIPTVError(w, err)
 			return
@@ -156,6 +162,59 @@ func (h *Handler) handleIPTVDeleteSource(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
+func (h *Handler) handleIPTVRefreshSource(w http.ResponseWriter, r *http.Request) {
+	if h.iptvSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "iptv module unavailable")
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if err := h.iptvSvc.RefreshSource(r.Context(), id); err != nil {
+		writeIPTVError(w, err)
+		return
+	}
+	source, err := h.iptvSvc.GetSource(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load iptv source")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"source": source})
+}
+
+func (h *Handler) handleIPTVUpdateSource(w http.ResponseWriter, r *http.Request) {
+	if h.iptvSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "iptv module unavailable")
+		return
+	}
+	var req iptvSourceUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	src, err := h.iptvSvc.GetSource(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load iptv source")
+		return
+	}
+	if src == nil {
+		writeError(w, http.StatusNotFound, "iptv source not found")
+		return
+	}
+	enabled := src.Enabled
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+	interval := src.RefreshIntervalSec
+	if req.RefreshIntervalSec != nil {
+		interval = *req.RefreshIntervalSec
+	}
+	updated, err := h.iptvSvc.UpdateSource(r.Context(), src.ID, req.Name, enabled, interval)
+	if err != nil {
+		writeIPTVError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
 func (h *Handler) handleIPTVListGroups(w http.ResponseWriter, r *http.Request) {
 	if h.iptvSvc == nil {
 		writeError(w, http.StatusServiceUnavailable, "iptv module unavailable")
@@ -202,6 +261,23 @@ func (h *Handler) handleIPTVGetChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, ch)
+}
+
+func (h *Handler) handleIPTVCheckChannel(w http.ResponseWriter, r *http.Request) {
+	if h.iptvSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "iptv module unavailable")
+		return
+	}
+	channel, err := h.iptvSvc.CheckChannel(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeIPTVError(w, err)
+		return
+	}
+	if channel == nil {
+		writeError(w, http.StatusNotFound, "iptv channel not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, channel)
 }
 
 func (h *Handler) handleIPTVGetPlayback(w http.ResponseWriter, r *http.Request) {

@@ -34,11 +34,16 @@ export interface IPTVImportItem {
 
 export interface IPTVSource {
   id: string;
+  import_job_id?: string;
   name: string;
   playlist_url?: string;
   enabled: boolean;
   refresh_interval_sec: number;
   last_error?: string;
+  last_refreshed_at?: string;
+  refresh_status: string;
+  last_refresh_new: number;
+  last_refresh_missing: number;
 }
 
 export interface IPTVChannel {
@@ -109,6 +114,22 @@ export async function listIPTVSources(): Promise<IPTVSource[]> {
 
 export async function deleteIPTVSource(id: string): Promise<void> {
   await apiRequest(`/iptv/sources/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export async function refreshIPTVSource(id: string): Promise<IPTVSource> {
+  const res = await apiRequest<{ source: IPTVSource }>(`/iptv/sources/${encodeURIComponent(id)}/refresh`, { method: 'POST' });
+  return res.source;
+}
+
+export async function updateIPTVSource(id: string, data: { name?: string; enabled?: boolean; refresh_interval_sec?: number }): Promise<IPTVSource> {
+  return apiRequest(`/iptv/sources/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function checkIPTVChannel(id: string): Promise<IPTVChannel> {
+  return apiRequest(`/iptv/channels/${encodeURIComponent(id)}/check`, { method: 'POST' });
 }
 
 export async function listIPTVGroups(): Promise<string[]> {

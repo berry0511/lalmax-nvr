@@ -1,10 +1,12 @@
 package iptv
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/url"
 	"strings"
+	"time"
 )
 
 var allowedSchemes = map[string]bool{
@@ -13,6 +15,12 @@ var allowedSchemes = map[string]bool{
 }
 
 func validatePublicURL(raw string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return validatePublicURLContext(ctx, raw)
+}
+
+func validatePublicURLContext(ctx context.Context, raw string) error {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Host == "" {
 		return fmt.Errorf("invalid URL")
@@ -27,7 +35,7 @@ func validatePublicURL(raw string) error {
 	if isBlockedHost(host) {
 		return fmt.Errorf("url host is not allowed")
 	}
-	ips, err := net.LookupIP(host)
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
 	if err != nil {
 		// DNS failure is reported later by the HTTP client; only block literal IPs here.
 		if ip := net.ParseIP(host); ip != nil && isBlockedIP(ip) {

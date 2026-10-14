@@ -32,9 +32,10 @@ type Service struct {
 	puller     media.HLSPuller
 	httpClient *http.Client
 
-	mu       sync.Mutex
-	probing  map[string]context.CancelFunc
-	starting map[string]struct{}
+	mu         sync.Mutex
+	probing    map[string]context.CancelFunc
+	refreshing map[string]context.CancelFunc
+	starting   map[string]struct{}
 }
 
 // PlaybackDetails contains the same-origin HLS proxy URL for browser playback.
@@ -65,8 +66,9 @@ func NewService(db storage.IPTVRepository, puller media.HLSPuller) *Service {
 				return nil
 			},
 		},
-		probing:  make(map[string]context.CancelFunc),
-		starting: make(map[string]struct{}),
+		probing:    make(map[string]context.CancelFunc),
+		refreshing: make(map[string]context.CancelFunc),
+		starting:   make(map[string]struct{}),
 	}
 }
 
@@ -90,7 +92,11 @@ func (s *Service) ImportFromURL(ctx context.Context, req ImportRequest) (*storag
 }
 
 func (s *Service) ImportFromReader(ctx context.Context, name string, r io.Reader) (*storage.IPTVImportJob, error) {
-	return s.importPlaylist(ctx, name, "", nil, r)
+	return s.ImportFromReaderWithHeaders(ctx, name, nil, r)
+}
+
+func (s *Service) ImportFromReaderWithHeaders(ctx context.Context, name string, headers map[string]string, r io.Reader) (*storage.IPTVImportJob, error) {
+	return s.importPlaylist(ctx, name, "", sanitizeHeaders(headers), r)
 }
 
 func (s *Service) importPlaylist(ctx context.Context, name, playlistURL string, headers map[string]string, r io.Reader) (*storage.IPTVImportJob, error) {
@@ -177,9 +183,6 @@ func (s *Service) Commit(ctx context.Context, jobID string, itemIDs []string) (*
 	if job == nil {
 		return nil, 0, errors.New("import job not found")
 	}
-	if job.Status == JobCommitted {
-		return nil, 0, errors.New("import already committed")
-	}
 	items, err := s.db.GetIPTVImportItemsByIDs(ctx, jobID, itemIDs)
 	if err != nil {
 		return nil, 0, err
@@ -200,20 +203,42 @@ func (s *Service) Commit(ctx context.Context, jobID string, itemIDs []string) (*
 	if len(accepted) == 0 {
 		return nil, 0, errors.New("none of the selected channels passed validation")
 	}
-	now := time.Now()
-	src := storage.IPTVSource{
-		ID:                 uuid.NewString(),
-		Name:               job.Name,
-		PlaylistURL:        job.PlaylistURL,
-		RequestHeaders:     job.RequestHeaders,
-		Enabled:            true,
-		RefreshIntervalSec: 21600,
-		LastRefreshedAt:    &now,
-	}
-	if err := s.db.InsertIPTVSource(ctx, src); err != nil {
+	src, err := s.db.GetIPTVSourceByImportJob(ctx, job.ID)
+	if err != nil {
 		return nil, 0, err
 	}
+	if src == nil {
+		if job.Status == JobCommitted {
+			return nil, 0, errors.New("committed import has no linked source")
+		}
+		now := time.Now()
+		src = &storage.IPTVSource{
+			ID:                 uuid.NewString(),
+			ImportJobID:        job.ID,
+			Name:               job.Name,
+			PlaylistURL:        job.PlaylistURL,
+			RequestHeaders:     job.RequestHeaders,
+			Enabled:            true,
+			RefreshIntervalSec: 21600,
+			LastRefreshedAt:    &now,
+		}
+		if err := s.db.InsertIPTVSource(ctx, *src); err != nil {
+			return nil, 0, err
+		}
+	}
+	enrolled, err := s.db.ListIPTVChannels(ctx, src.ID, "", "", nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	enrolledIDs := make(map[string]struct{}, len(enrolled))
+	for _, channel := range enrolled {
+		enrolledIDs[channel.ExternalID] = struct{}{}
+	}
+	added := 0
 	for _, item := range accepted {
+		if _, exists := enrolledIDs[item.ExternalID]; exists {
+			continue
+		}
 		ch := storage.IPTVChannel{
 			ID:             uuid.NewString(),
 			SourceID:       src.ID,
@@ -237,13 +262,17 @@ func (s *Service) Commit(ctx context.Context, jobID string, itemIDs []string) (*
 		if err := s.db.UpsertIPTVChannel(ctx, ch); err != nil {
 			return nil, 0, err
 		}
+		enrolledIDs[item.ExternalID] = struct{}{}
+		added++
 	}
-	job.Status = JobCommitted
-	if err := s.db.UpdateIPTVImportJob(ctx, *job); err != nil {
-		return nil, 0, err
+	if job.Status != JobCommitted {
+		job.Status = JobCommitted
+		if err := s.db.UpdateIPTVImportJob(ctx, *job); err != nil {
+			return nil, 0, err
+		}
 	}
 	src.PlaylistURL = redactURL(src.PlaylistURL)
-	return &src, len(accepted), nil
+	return src, added, nil
 }
 
 func (s *Service) ListSources(ctx context.Context) ([]storage.IPTVSource, error) {
@@ -254,8 +283,213 @@ func (s *Service) ListSources(ctx context.Context) ([]storage.IPTVSource, error)
 	for i := range sources {
 		sources[i].PlaylistURL = redactURL(sources[i].PlaylistURL)
 		sources[i].RequestHeaders = ""
+		if sources[i].RefreshStatus == "" {
+			sources[i].RefreshStatus = "idle"
+		}
 	}
 	return sources, nil
+}
+
+func (s *Service) UpdateSource(ctx context.Context, id, name string, enabled bool, intervalSec int) (*storage.IPTVSource, error) {
+	src, err := s.db.GetIPTVSource(ctx, id)
+	if err != nil || src == nil {
+		return src, err
+	}
+	if intervalSec < 3600 || intervalSec > 7*24*3600 {
+		return nil, errors.New("refresh interval must be between 1 hour and 7 days")
+	}
+	if strings.TrimSpace(name) != "" {
+		src.Name = strings.TrimSpace(name)
+	}
+	src.Enabled = enabled
+	src.RefreshIntervalSec = intervalSec
+	if err := s.db.UpdateIPTVSource(ctx, *src); err != nil {
+		return nil, err
+	}
+	return s.GetSource(ctx, id)
+}
+
+func (s *Service) GetSource(ctx context.Context, id string) (*storage.IPTVSource, error) {
+	src, err := s.db.GetIPTVSource(ctx, id)
+	if err != nil || src == nil {
+		return src, err
+	}
+	src.PlaylistURL = redactURL(src.PlaylistURL)
+	src.RequestHeaders = ""
+	if src.RefreshStatus == "" {
+		src.RefreshStatus = "idle"
+	}
+	return src, nil
+}
+
+// RefreshSource queues an idempotent playlist refresh. Existing channels are
+// matched by their playlist ID; newly discovered entries remain for review and
+// missing entries are preserved so user settings and recording plans survive.
+func (s *Service) RefreshSource(ctx context.Context, id string) error {
+	src, err := s.db.GetIPTVSource(ctx, id)
+	if err != nil {
+		return err
+	}
+	if src == nil {
+		return errors.New("IPTV source not found")
+	}
+	if strings.TrimSpace(src.PlaylistURL) == "" {
+		return errors.New("source has no playlist URL")
+	}
+	s.mu.Lock()
+	if _, busy := s.refreshing[id]; busy {
+		s.mu.Unlock()
+		return nil
+	}
+	jobCtx, cancel := context.WithCancel(context.Background())
+	s.refreshing[id] = cancel
+	s.mu.Unlock()
+	if err := s.db.UpdateIPTVSourceRefresh(ctx, id, "running", nil, "", src.LastRefreshNew, src.LastRefreshMissing); err != nil {
+		cancel()
+		s.mu.Lock()
+		delete(s.refreshing, id)
+		s.mu.Unlock()
+		return err
+	}
+	go func() {
+		defer func() {
+			cancel()
+			s.mu.Lock()
+			delete(s.refreshing, id)
+			s.mu.Unlock()
+		}()
+		added, missing, refreshErr := s.refreshSource(jobCtx, id)
+		at := time.Now()
+		status, message := "ready", ""
+		if refreshErr != nil {
+			status, message = "failed", refreshErr.Error()
+		}
+		if err := s.db.UpdateIPTVSourceRefresh(context.Background(), id, status, &at, message, added, missing); err != nil {
+			logger.Warn("iptv source refresh status update failed", "source_id", id, "error", err)
+		}
+	}()
+	return nil
+}
+
+func (s *Service) refreshSource(ctx context.Context, id string) (int, int, error) {
+	src, err := s.db.GetIPTVSource(ctx, id)
+	if err != nil || src == nil {
+		return 0, 0, errors.New("IPTV source not found")
+	}
+	headers := openHeaders(src.RequestHeaders)
+	body, err := s.downloadPlaylist(ctx, src.PlaylistURL, headers)
+	if err != nil {
+		return 0, 0, err
+	}
+	entries, err := ParseM3U(body)
+	if err != nil {
+		return 0, 0, err
+	}
+	if len(entries) == 0 {
+		return 0, 0, errors.New("playlist contains no channels")
+	}
+	if len(entries) > maxImportItems {
+		entries = entries[:maxImportItems]
+	}
+	channels, err := s.db.ListIPTVChannels(ctx, id, "", "", nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	byExternalID := make(map[string]storage.IPTVChannel, len(channels))
+	for _, channel := range channels {
+		byExternalID[channel.ExternalID] = channel
+	}
+	seen := make(map[string]struct{}, len(entries))
+	updated := 0
+	checkIDs := make([]string, 0, len(channels))
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return 0, 0, err
+		}
+		if _, duplicate := seen[entry.ExternalID]; duplicate {
+			continue
+		}
+		seen[entry.ExternalID] = struct{}{}
+		channel, ok := byExternalID[entry.ExternalID]
+		if !ok {
+			continue
+		}
+		// Keep user-facing names and controls stable when the playlist changes.
+		channel.GroupName = entry.GroupName
+		channel.LogoURL = entry.LogoURL
+		channel.ChannelNo = entry.ChannelNo
+		channel.SourceURL = sealSecret(entry.SourceURL)
+		channel.RequestHeaders = sealHeaders(entry.Headers)
+		if err := s.db.UpsertIPTVChannel(ctx, channel); err != nil {
+			return updated, len(channels) - len(seen), err
+		}
+		updated++
+		if channel.Enabled {
+			checkIDs = append(checkIDs, channel.ID)
+		}
+	}
+	// Refresh also runs a low-concurrency health check for enabled channels.
+	// The job is asynchronous, so large playlists do not hold the API request.
+	sem := make(chan struct{}, probeConcurrency)
+	var checks sync.WaitGroup
+	for _, channelID := range checkIDs {
+		if ctx.Err() != nil {
+			break
+		}
+		sem <- struct{}{}
+		checks.Add(1)
+		go func(id string) {
+			defer checks.Done()
+			defer func() { <-sem }()
+			if _, err := s.CheckChannel(ctx, id); err != nil && ctx.Err() == nil {
+				logger.Warn("iptv refresh channel check failed", "channel_id", id, "error", err)
+			}
+		}(channelID)
+	}
+	checks.Wait()
+	if err := ctx.Err(); err != nil {
+		return updated, max(0, len(channels)-len(seen)), err
+	}
+	return len(entries) - updated, max(0, len(channels)-len(seen)), nil
+}
+
+func (s *Service) StartRefreshLoop(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			s.refreshDueSources(ctx)
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+}
+
+func (s *Service) refreshDueSources(ctx context.Context) {
+	sources, err := s.db.ListIPTVSources(ctx)
+	if err != nil {
+		logger.Warn("list IPTV sources for refresh failed", "error", err)
+		return
+	}
+	now := time.Now()
+	for _, src := range sources {
+		if !src.Enabled || strings.TrimSpace(src.PlaylistURL) == "" || src.RefreshStatus == "running" {
+			continue
+		}
+		interval := time.Duration(src.RefreshIntervalSec) * time.Second
+		if interval <= 0 {
+			interval = 6 * time.Hour
+		}
+		if src.LastRefreshedAt != nil && now.Sub(*src.LastRefreshedAt) < interval {
+			continue
+		}
+		if err := s.RefreshSource(ctx, src.ID); err != nil {
+			logger.Warn("queue IPTV source refresh failed", "source_id", src.ID, "error", err)
+		}
+	}
 }
 
 func (s *Service) DeleteSource(ctx context.Context, id string) error {
@@ -294,6 +528,30 @@ func (s *Service) GetChannel(ctx context.Context, id string) (*storage.IPTVChann
 	}
 	ch.SourceURL = ""
 	return ch, nil
+}
+
+func (s *Service) CheckChannel(ctx context.Context, id string) (*storage.IPTVChannel, error) {
+	channel, err := s.db.GetIPTVChannel(ctx, id)
+	if err != nil || channel == nil {
+		return channel, err
+	}
+	source, err := s.db.GetIPTVSource(ctx, channel.SourceID)
+	if err != nil || source == nil {
+		return nil, errors.New("IPTV source not found")
+	}
+	result := s.probeURL(ctx, openSecret(channel.SourceURL), mergeRequestHeaders(openHeaders(source.RequestHeaders), openHeaders(channel.RequestHeaders)))
+	channel.ProbeStatus = result.Status
+	channel.ProbeError = result.Error
+	channel.VideoCodec = result.VideoCodec
+	channel.AudioCodec = result.AudioCodec
+	channel.Playable = result.Playable
+	channel.Recordable = result.Recordable
+	checked := result.CheckedAt
+	channel.LastCheckedAt = &checked
+	if err := s.db.UpsertIPTVChannel(ctx, *channel); err != nil {
+		return nil, err
+	}
+	return s.GetChannel(ctx, id)
 }
 
 func (s *Service) GetPlaybackDetails(ctx context.Context, id string) (*PlaybackDetails, error) {
@@ -440,6 +698,9 @@ func (s *Service) ReconcileSources(ctx context.Context, desired map[string]bool,
 func (s *Service) Stop() {
 	s.mu.Lock()
 	for _, cancel := range s.probing {
+		cancel()
+	}
+	for _, cancel := range s.refreshing {
 		cancel()
 	}
 	s.mu.Unlock()

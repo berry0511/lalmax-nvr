@@ -13,6 +13,10 @@ Web UI: **Media Sources → IPTV** (`#/media-sources?tab=iptv`; the legacy `#/ip
 
 Every channel keeps a stable `stream_id` for publication, recording plans, and historical recordings. Browser playback uses the HLS proxy, so the origin does not need CORS enabled and playback does not depend on lal. Publication and recording share one upstream HLS pull.
 
+URL-backed sources refresh automatically at their configured interval (default six hours). The refresh updates playlist URLs and metadata for already enrolled channels matched by `tvg-id` or another stable playlist ID, then checks enabled channels with limited concurrency. New entries are counted but not enrolled automatically; scan the playlist again and review them first. Missing entries remain in the channel library so a temporary upstream edit cannot delete user settings or recording plans. Use **Check channel** to run an on-demand availability and codec check.
+
+The channel library shows channels that passed the latest check and are currently playable. Probe status is shown as **Playable**; filter NVR publishing state by **Not published to NVR** or **Published to NVR**, and filter by the original playlist group. Use **Continue enrollment** on a source to reopen its saved probe results and add successful channels that were skipped earlier. Existing channels are marked and cannot be selected again, so repeated commits do not create duplicates.
+
 ```mermaid
 flowchart LR
   M3U[M3U] --> Import[Server parse and probe]
@@ -66,10 +70,13 @@ GET    /api/iptv/imports/{id}/items
 POST   /api/iptv/imports/{id}/items/{item_id}/probe
 POST   /api/iptv/imports/{id}/commit
 GET    /api/iptv/sources
+PUT    /api/iptv/sources/{id}
+POST   /api/iptv/sources/{id}/refresh
 DELETE /api/iptv/sources/{id}
 GET    /api/iptv/groups
 GET    /api/iptv/channels
 GET    /api/iptv/channels/{id}
+POST   /api/iptv/channels/{id}/check
 GET    /api/iptv/channels/{id}/playback
 GET    /api/iptv/channels/{id}/hls[?url=<upstream-url>]
 PUT    /api/iptv/channels/{id}
@@ -94,6 +101,6 @@ curl -u admin:password -X POST http://localhost:9090/api/iptv/imports \
   -d '{"name":"science","playlist_url":"https://iptv-org.github.io/iptv/categories/science.m3u"}'
 ```
 
-The `202` response contains an import job. Its status is `probing` and then `ready`. You can instead submit `playlist_text`; commit selected item IDs at `/imports/{id}/commit`.
+The `202` response contains an import job. Its status is `probing` and then `ready`. You can instead submit `playlist_text`; commit selected item IDs at `/imports/{id}/commit`. A committed job can be submitted again to append channels to the same source; already enrolled items are skipped. The `import_job_id` field returned by `GET /api/iptv/sources` links a source to its saved probe results.
 
 Import URLs are restricted to HTTP/HTTPS and loopback/link-local addresses are blocked. Each import is capped at 2000 channels, probe concurrency is 4, and playlist bodies are capped at 2 MiB.

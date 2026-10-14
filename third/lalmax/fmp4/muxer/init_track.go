@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/abema/go-mp4"
-	"github.com/bluenviron/mediacommon/pkg/codecs/h265"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h265"
 	"github.com/q191201771/lal/pkg/avc"
 	"github.com/q191201771/lal/pkg/hevc"
 )

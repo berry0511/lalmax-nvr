@@ -53,6 +53,10 @@ curl -u admin:password -X POST http://localhost:9090/api/recording-plans \
 3. 选择需要保留的频道并纳管。纳管不会启动 HLS pull。
 4. 点击频道开始浏览器直播放；需要通过 NVR 协议观看时，启用频道卡片上的“发布”；要录像时，在录像计划中为频道配置 `stream_id`。浏览器代理播放独立于 NVR；发布和录像可以同时使用同一条上游拉流。
 
+URL 订阅源默认每 6 小时同步一次，也可手动同步或暂停。同步会按 `tvg-id` 等稳定 ID 更新已纳管频道的播放地址和元数据，并以低并发检测已启用频道。新条目只计数提示，不会自动纳管；消失条目会保留在频道库中，避免临时源站改动覆盖频道设置或录像计划。需要时可对单个频道手动执行健康检测。
+
+频道库只显示最近一次检测成功、当前可播放的频道；频道检测状态显示“可播放”，NVR 发布状态可按“未发布到 NVR”或“已发布到 NVR”筛选，也可继续使用播放列表分组筛选。每个订阅源都可通过“继续纳管”回到原检测任务，补选之前没有加入的成功频道；已纳管频道会标记并禁用勾选，重复提交不会创建重复频道。
+
 支持的录像接入编码是 H.264/H.265 + AAC。DRM / SAMPLE-AES 和其它未支持编码会在检测阶段标记为不可用。H.265 是否能在浏览器播放取决于浏览器和设备。
 
 ## REST API
@@ -66,10 +70,13 @@ GET    /api/iptv/imports/{id}/items
 POST   /api/iptv/imports/{id}/items/{item_id}/probe
 POST   /api/iptv/imports/{id}/commit
 GET    /api/iptv/sources
+PUT    /api/iptv/sources/{id}
+POST   /api/iptv/sources/{id}/refresh
 DELETE /api/iptv/sources/{id}
 GET    /api/iptv/groups
 GET    /api/iptv/channels
 GET    /api/iptv/channels/{id}
+POST   /api/iptv/channels/{id}/check
 GET    /api/iptv/channels/{id}/playback
 GET    /api/iptv/channels/{id}/hls[?url=<upstream-url>]
 PUT    /api/iptv/channels/{id}
@@ -94,6 +101,6 @@ curl -u admin:password -X POST http://localhost:9090/api/iptv/imports \
   -d '{"name":"science","playlist_url":"https://iptv-org.github.io/iptv/categories/science.m3u"}'
 ```
 
-响应 `202` 返回导入任务。状态先为 `probing`，结束后为 `ready`。也可以传入 `playlist_text` 直接粘贴 M3U；确认导入时向 `/imports/{id}/commit` 提交所选项目 ID。
+响应 `202` 返回导入任务。状态先为 `probing`，结束后为 `ready`。也可以传入 `playlist_text` 直接粘贴 M3U；确认导入时向 `/imports/{id}/commit` 提交所选项目 ID。任务首次提交后仍可再次提交未纳管的项目，系统会把新频道追加到同一订阅源并跳过重复项；`GET /api/iptv/sources` 返回的 `import_job_id` 用于关联原检测任务。
 
 服务端限制导入 URL 为 HTTP/HTTPS 并拦截 loopback、link-local 地址。单次最多 2000 个频道；探测并发数为 4；播放列表体积上限为 2 MiB。

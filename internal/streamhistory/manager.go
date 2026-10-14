@@ -22,7 +22,8 @@ type Manager struct {
 	engine            media.Engine
 	cancelFunc        context.CancelFunc
 	mu                sync.Mutex
-	iptvSessions      map[string]string
+	iptvSessions      map[string]string // stream ID -> currently active media history session
+	iptvPullErrors    map[string]string // stream ID -> most recent sanitized upstream pull error
 	activeSessions    map[string]struct{}
 	hookRegistered    bool
 	historyReconciled bool
@@ -33,47 +34,30 @@ func NewManager(db storage.StreamHistoryRepository, engine media.Engine) *Manage
 		db:             db,
 		engine:         engine,
 		iptvSessions:   make(map[string]string),
+		iptvPullErrors: make(map[string]string),
 		activeSessions: make(map[string]struct{}),
 	}
 }
 
-// RecordHLSPullSessionState tracks the accepted lifetime of a native HLS pull
-// task. Media availability is recorded separately from lalmax hook events.
+// RecordHLSPullSessionState closes an active media-history interval when the
+// native HLS pull task ends. Starting a task alone is not an online media
+// session; media history begins on the stream-active event.
 func (m *Manager) RecordHLSPullSessionState(streamID string, online bool, at time.Time, offlineReason, offlineDetail string) {
 	if m == nil || m.db == nil || streamID == "" {
 		return
 	}
-	if at.IsZero() {
+	if !online && at.IsZero() {
 		at = time.Now()
 	}
 	m.mu.Lock()
 	if online {
-		if _, exists := m.iptvSessions[streamID]; exists {
-			m.mu.Unlock()
-			return
-		}
-		sessionID := fmt.Sprintf("hls-pull-%s-%d", streamID, at.UnixNano())
-		m.iptvSessions[streamID] = sessionID
+		delete(m.iptvPullErrors, streamID)
 		m.mu.Unlock()
-		history := &storage.StreamHistory{
-			StreamID:  streamID,
-			AppName:   "live",
-			Protocol:  "HLS_PULL",
-			SessionID: sessionID,
-			StartedAt: at,
-		}
-		if err := m.insertStartOnce(history); err != nil {
-			logger.Error("failed to insert IPTV pull history", "stream_id", streamID, "error", err)
-			m.mu.Lock()
-			if m.iptvSessions[streamID] == sessionID {
-				delete(m.iptvSessions, streamID)
-			}
-			m.mu.Unlock()
-		}
 		return
 	}
 	sessionID, exists := m.iptvSessions[streamID]
 	delete(m.iptvSessions, streamID)
+	delete(m.iptvPullErrors, streamID)
 	m.mu.Unlock()
 	if exists {
 		if offlineReason == "" {
@@ -86,13 +70,96 @@ func (m *Manager) RecordHLSPullSessionState(streamID string, online bool, at tim
 	}
 }
 
+// RecordHLSPullAttemptError retains the latest sanitized upstream failure so
+// a media-stop event can explain why the IPTV stream became idle.
+func (m *Manager) RecordHLSPullAttemptError(streamID, detail string) {
+	if m == nil || streamID == "" || strings.TrimSpace(detail) == "" {
+		return
+	}
+	m.mu.Lock()
+	m.iptvPullErrors[streamID] = strings.TrimSpace(detail)
+	m.mu.Unlock()
+}
+
 func (m *Manager) RecordMediaState(streamID string, active bool, at time.Time) {
 	if m == nil || m.db == nil || streamID == "" {
+		return
+	}
+	if isIPTVStreamID(streamID) {
+		if active {
+			m.startIPTVMediaHistory(streamID, at)
+			return
+		}
+		m.finishIPTVMediaHistory(streamID, at)
 		return
 	}
 	if err := m.db.RecordStreamHistoryMediaState(context.Background(), streamID, at, active); err != nil {
 		logger.Warn("failed to update stream media state", "stream_id", streamID, "active", active, "error", err)
 	}
+}
+
+func (m *Manager) startIPTVMediaHistory(streamID string, at time.Time) {
+	if at.IsZero() {
+		at = time.Now()
+	}
+	m.mu.Lock()
+	if _, exists := m.iptvSessions[streamID]; exists {
+		delete(m.iptvPullErrors, streamID)
+		m.mu.Unlock()
+		if err := m.db.RecordStreamHistoryMediaState(context.Background(), streamID, at, true); err != nil {
+			logger.Warn("failed to update IPTV media state", "stream_id", streamID, "active", true, "error", err)
+		}
+		return
+	}
+	sessionID := fmt.Sprintf("hls-pull-%s-%d", streamID, at.UnixNano())
+	m.iptvSessions[streamID] = sessionID
+	delete(m.iptvPullErrors, streamID)
+	m.mu.Unlock()
+
+	history := &storage.StreamHistory{
+		StreamID:  streamID,
+		AppName:   "live",
+		Protocol:  "HLS_PULL",
+		SessionID: sessionID,
+		StartedAt: at,
+	}
+	if err := m.insertStartOnce(history); err != nil {
+		logger.Error("failed to insert IPTV media history", "stream_id", streamID, "error", err)
+		m.mu.Lock()
+		if m.iptvSessions[streamID] == sessionID {
+			delete(m.iptvSessions, streamID)
+		}
+		m.mu.Unlock()
+		return
+	}
+	if err := m.db.RecordStreamHistoryMediaState(context.Background(), streamID, at, true); err != nil {
+		logger.Warn("failed to update IPTV media state", "stream_id", streamID, "active", true, "error", err)
+	}
+}
+
+func (m *Manager) finishIPTVMediaHistory(streamID string, at time.Time) {
+	if at.IsZero() {
+		at = time.Now()
+	}
+	m.mu.Lock()
+	sessionID, exists := m.iptvSessions[streamID]
+	delete(m.iptvSessions, streamID)
+	pullError := m.iptvPullErrors[streamID]
+	delete(m.iptvPullErrors, streamID)
+	m.mu.Unlock()
+	if !exists {
+		return
+	}
+	reason := "media_stopped"
+	detail := "Media engine reported that the stream group stopped."
+	if pullError != "" {
+		reason = "upstream_error"
+		detail = pullError
+	}
+	if err := m.db.FinishStreamHistory(context.Background(), streamID, sessionID, at, reason, detail, 0, 0); err != nil {
+		logger.Warn("failed to finish IPTV media history", "stream_id", streamID, "error", err)
+	}
+	m.forgetActive(streamID, sessionID, "HLS_PULL")
 }
 
 // Start begins listening for pub events and recording history.
@@ -299,6 +366,10 @@ func isInternalHLSHistory(streamID, protocol string) bool {
 	}
 	streamID = strings.ToLower(strings.TrimSpace(streamID))
 	return strings.HasPrefix(streamID, "iptv_") || strings.HasPrefix(streamID, "emby_")
+}
+
+func isIPTVStreamID(streamID string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(streamID)), "iptv_")
 }
 
 func classifyStopReason(payload pubStopPayload, fallback string) (string, string) {

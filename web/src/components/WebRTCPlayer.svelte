@@ -253,6 +253,14 @@ let destroyed = false;
       if (!videoEl || !pc) return;
       const now = Date.now();
 
+      // Hidden dashboard tabs pause playback. Ignore the resulting lack of
+      // currentTime progress; visibility recovery already rebuilds the peer.
+      if (!tabVisible || document.hidden || videoEl.paused) {
+        lastPlaybackTime = videoEl.currentTime;
+        zombieCount = 0;
+        return;
+      }
+
       // Check if video is stuck (readyState 0 for >20s or no playback progress for >60s)
       if (videoEl.readyState === 0) {
         zombieCount++;

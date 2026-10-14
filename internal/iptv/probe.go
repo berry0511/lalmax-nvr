@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bluenviron/gohlslib"
+	"github.com/bluenviron/gohlslib/v2"
 	"github.com/lalmax-pro/lalmax-nvr/internal/media"
 )
 
@@ -18,11 +18,6 @@ const (
 
 func (s *Service) probeURL(ctx context.Context, rawURL string, headers map[string]string) ProbeResult {
 	res := ProbeResult{Status: ItemFailed, CheckedAt: time.Now()}
-	if err := validatePublicURL(rawURL); err != nil {
-		res.Error = err.Error()
-		return res
-	}
-
 	timeout := defaultProbeTimeout
 	if deadline, ok := ctx.Deadline(); ok {
 		timeout = time.Until(deadline)
@@ -33,6 +28,10 @@ func (s *Service) probeURL(ctx context.Context, rawURL string, headers map[strin
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	if err := validatePublicURLContext(reqCtx, rawURL); err != nil {
+		res.Error = err.Error()
+		return res
+	}
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, rawURL, nil)
 	if err != nil {

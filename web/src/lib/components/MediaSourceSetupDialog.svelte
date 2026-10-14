@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { createCamera, createStream, discoverONVIFDevices, listCameras, getEmbyConfig, saveEmbyConfig, browseEmbyLibrary, addEmbyItem, listEmbyItems, createIPTVImport, getIPTVImport, listIPTVImportItems, commitIPTVImport } from '$lib/api';
   import type { DiscoveredDevice, EmbyConfig, EmbyMediaItem, IPTVImportItem, IPTVImportJob } from '$lib/api';
   import { t } from '$lib/i18n';
@@ -30,9 +30,28 @@
 
   let playlistURL = $state('');
   let playlistText = $state('');
+  let requestHeadersText = $state('');
   let importJob = $state<IPTVImportJob | null>(null);
   let importItems = $state<IPTVImportItem[]>([]);
   let selectedItems = $state<Set<string>>(new Set());
+  let importPendingCount = $derived(importItems.filter((item) => item.status === 'pending' || item.status === 'probing').length);
+  let importCompletedCount = $derived(Math.max(0, Math.min(importJob?.total_items ?? importItems.length, importItems.length - importPendingCount)));
+  let importProgress = $derived(importJob?.total_items ? Math.round((importCompletedCount / importJob.total_items) * 100) : 0);
+  let importFailedCount = $derived(importItems.filter((item) => item.status === 'failed').length);
+  let importUnsupportedCount = $derived(importItems.filter((item) => item.status === 'unsupported').length);
+  let importPollTimer: number | undefined;
+  let importPollBusy = false;
+
+  onDestroy(() => stopIPTVImportPolling());
+
+  function stopIPTVImportPolling() {
+    if (importPollTimer) window.clearInterval(importPollTimer);
+    importPollTimer = undefined;
+  }
+
+  function iptvStatusLabel(status: string) {
+    return t(`iptv.status.${status}`) || status;
+  }
 
   const sourceOptions = [
     { id: 'camera' as const, icon: Camera, title: 'mediaIngest.camera', description: 'mediaIngest.cameraHint' },
@@ -105,16 +124,25 @@
         return;
       }
       if (selected === 'iptv') {
-        const job = await createIPTVImport({ name: name.trim() || undefined, playlist_url: playlistText.trim() ? undefined : playlistURL.trim(), playlist_text: playlistText.trim() || undefined });
-        importJob = job;
-        for (let attempt = 0; attempt < 60; attempt++) {
-          const [latest, rows] = await Promise.all([getIPTVImport(job.id), listIPTVImportItems(job.id)]);
-          importJob = latest;
-          importItems = rows.items;
-          if (latest.status === 'ready' || latest.status === 'failed' || latest.status === 'committed') break;
-          await new Promise((resolve) => window.setTimeout(resolve, 500));
+        let headers: Record<string, string> | undefined;
+        if (requestHeadersText.trim()) {
+          let parsed: unknown;
+          try { parsed = JSON.parse(requestHeadersText); }
+          catch { throw new Error(t('iptv.invalidHeaders')); }
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || Object.values(parsed).some((value) => typeof value !== 'string')) {
+            throw new Error(t('iptv.invalidHeaders'));
+          }
+          headers = parsed as Record<string, string>;
         }
-        selectedItems = new Set(importItems.filter((item) => (item.playable || item.status === 'playable' || item.status === 'warning') && !item.drm && item.status !== 'unsupported' && item.status !== 'failed').map((item) => item.id));
+        const job = await createIPTVImport({ name: name.trim() || undefined, playlist_url: playlistText.trim() ? undefined : playlistURL.trim(), playlist_text: playlistText.trim() || undefined, headers });
+        importJob = job;
+        importItems = [];
+        selectedItems = new Set();
+        await pollIPTVImport();
+        if (!['ready', 'failed', 'committed'].includes(importJob.status)) {
+          stopIPTVImportPolling();
+          importPollTimer = window.setInterval(() => void pollIPTVImport(), 1000);
+        }
       }
     } catch (e) {
       error = e instanceof Error ? e.message : t('mediaIngest.setup.saveFailed');
@@ -145,12 +173,27 @@
     if (!importJob) return;
     saving = true; error = '';
     try {
+      await pollIPTVImport();
+    } catch (e) { error = e instanceof Error ? e.message : t('iptv.loadFailed'); }
+    finally { saving = false; }
+  }
+
+  async function pollIPTVImport() {
+    if (!importJob || importPollBusy) return;
+    importPollBusy = true;
+    try {
       const [latest, rows] = await Promise.all([getIPTVImport(importJob.id), listIPTVImportItems(importJob.id)]);
       importJob = latest;
       importItems = rows.items;
-      if (selectedItems.size === 0) selectedItems = new Set(rows.items.filter((item) => (item.playable || item.status === 'playable' || item.status === 'warning') && !item.drm && item.status !== 'unsupported' && item.status !== 'failed').map((item) => item.id));
-    } catch (e) { error = e instanceof Error ? e.message : t('iptv.loadFailed'); }
-    finally { saving = false; }
+      if (['ready', 'failed', 'committed'].includes(latest.status)) {
+        if (selectedItems.size === 0) selectedItems = new Set(rows.items.filter((item) => (item.playable || item.status === 'playable' || item.status === 'warning') && !item.drm && item.status !== 'unsupported' && item.status !== 'failed').map((item) => item.id));
+        stopIPTVImportPolling();
+      }
+    } catch (e) {
+      error = e instanceof Error ? e.message : t('iptv.loadFailed');
+    } finally {
+      importPollBusy = false;
+    }
   }
 
   async function commitIPTV() {
@@ -249,13 +292,15 @@
             <label class="block"><span class="input-label">{t('iptv.importName')}</span><input class="input mt-1 w-full" bind:value={name} placeholder={t('iptv.importNameHint')} /></label>
             <label class="block"><span class="input-label">{t('iptv.playlistURL')}</span><input class="input mt-1 w-full" bind:value={playlistURL} placeholder="https://example.com/live.m3u" /></label>
             <label class="block"><span class="input-label">{t('iptv.playlistText')}</span><textarea class="input mt-1 w-full min-h-28" bind:value={playlistText} placeholder="#EXTM3U"></textarea></label>
+            <label class="block"><span class="input-label">{t('iptv.requestHeaders')}</span><textarea class="input mt-1 w-full min-h-20 font-mono text-xs" bind:value={requestHeadersText} placeholder={'{\n  "Referer": "https://example.com/",\n  "User-Agent": "Mozilla/5.0"\n}'} spellcheck="false"></textarea><span class="block text-xs th-text-muted mt-1">{t('iptv.requestHeadersHint')}</span></label>
             <p class="text-xs th-text-muted">{t('mediaIngest.setup.iptvHint')}</p>
             <div class="flex justify-between items-center pt-2"><button type="button" class="btn btn-ghost" onclick={() => selected = null} disabled={saving}><ArrowLeft size={16} />{t('common.back')}</button><button class="btn btn-primary" disabled={saving || (!playlistURL.trim() && !playlistText.trim())}>{#if saving}<LoaderCircle size={16} class="animate-spin" />{/if}{t('iptv.import')}</button></div>
           </form>
         {:else}
           <section class="space-y-4">
             <div class="flex items-start justify-between gap-3"><div><h3 class="font-semibold th-text-primary">{t('iptv.reviewTitle')}</h3><p class="text-sm th-text-muted mt-1">{importJob.name} · {importJob.status} · {importItems.length}/{importJob.total_items}</p></div><div class="flex gap-2"><button class="btn btn-secondary btn-sm" onclick={() => void refreshIPTVImport()} disabled={saving} aria-label={t('common.refresh')}><RefreshCw size={15} class={saving ? 'animate-spin' : ''} /></button><button class="btn btn-primary btn-sm" onclick={() => void commitIPTV()} disabled={saving || selectedItems.size === 0 || importJob.status !== 'ready'}><Check size={15} />{t('iptv.commit', { count: String(selectedItems.size) })}</button></div></div>
-            <div class="max-h-[48vh] overflow-y-auto divide-y th-border rounded-lg border th-border">{#each importItems as item (item.id)}<label class="flex items-center gap-3 p-3"><input type="checkbox" checked={selectedItems.has(item.id)} disabled={item.drm || item.status === 'unsupported' || item.status === 'failed'} onchange={() => toggleIPTVItem(item)} /><span class="min-w-0 flex-1"><span class="block text-sm font-medium th-text-primary">{item.name}</span><span class="block text-xs th-text-muted mt-0.5">{item.group_name || t('iptv.ungrouped')} · {item.status}</span></span>{#if item.drm}<span class="badge badge-warning">DRM</span>{/if}</label>{/each}</div>
+            <div class="rounded-lg border th-border p-3 space-y-2" aria-live="polite"><div class="flex items-center justify-between gap-3 text-sm"><span class="th-text-primary">{importJob.status === 'probing' ? t('iptv.probeInProgress') : t('iptv.probeComplete')}</span><span class="th-text-muted tabular-nums">{importCompletedCount}/{importJob.total_items} · {importProgress}%</span></div><div class="h-2 rounded-full th-bg-secondary overflow-hidden" role="progressbar" aria-label={t('iptv.probeProgressLabel')} aria-valuemin="0" aria-valuemax="100" aria-valuenow={importProgress}><div class="h-full rounded-full bg-emerald-500 transition-[width]" style={`width: ${importProgress}%`}></div></div><div class="flex flex-wrap gap-x-4 text-xs th-text-muted"><span>{t('iptv.probeFailedCount', { count: String(importFailedCount) })}</span><span>{t('iptv.probeUnsupportedCount', { count: String(importUnsupportedCount) })}</span><span>{t('iptv.probePendingCount', { count: String(importPendingCount) })}</span></div></div>
+            <div class="max-h-[48vh] overflow-y-auto divide-y th-border rounded-lg border th-border">{#each importItems as item (item.id)}<label class="flex items-start gap-3 p-3"><input class="mt-1" type="checkbox" checked={selectedItems.has(item.id)} disabled={item.drm || item.status === 'unsupported' || item.status === 'failed'} onchange={() => toggleIPTVItem(item)} /><span class="min-w-0 flex-1"><span class="block text-sm font-medium th-text-primary">{item.name}</span><span class="block text-xs th-text-muted mt-0.5">{item.group_name || t('iptv.ungrouped')} · {iptvStatusLabel(item.status)}{#if item.http_status} · HTTP {item.http_status}{/if}</span>{#if item.error}<span class="block text-xs th-color-danger mt-1 break-words">{item.error}</span>{/if}</span>{#if item.drm}<span class="badge badge-warning">DRM</span>{/if}</label>{/each}</div>
             {#if importJob.status === 'failed'}<p class="text-sm th-color-danger">{importJob.error || t('iptv.importFailed')}</p>{/if}
           </section>
         {/if}

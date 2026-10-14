@@ -36,7 +36,11 @@ Stream details include state and available `play_urls`; use those returned URLs 
 | POST | `/api/iptv/imports` | Import an M3U URL or text |
 | GET | `/api/iptv/imports/{id}/items` | Inspect probe results |
 | POST | `/api/iptv/imports/{id}/commit` | Enroll selected channels |
+| GET | `/api/iptv/sources` | List playlist sources and sync status |
+| PUT | `/api/iptv/sources/{id}` | Update a source or pause/resume scheduled sync |
+| POST | `/api/iptv/sources/{id}/refresh` | Start a source sync |
 | GET | `/api/iptv/channels` | List channels |
+| POST | `/api/iptv/channels/{id}/check` | Check one channel's availability and codecs |
 | GET | `/api/iptv/channels/{id}/playback` | Get a browser proxy playback URL |
 | PUT | `/api/iptv/channels/{id}` | Update a channel, including `publish_enabled` |
 

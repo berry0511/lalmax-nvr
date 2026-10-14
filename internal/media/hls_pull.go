@@ -4,15 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/bluenviron/gohlslib"
-	"github.com/bluenviron/gohlslib/pkg/codecs"
+	"github.com/bluenviron/gohlslib/v2"
+	"github.com/bluenviron/gohlslib/v2/pkg/codecs"
 	"github.com/lalmax-pro/lalmax-nvr/internal/observability"
 	"github.com/q191201771/lal/pkg/base"
 	"go.opentelemetry.io/otel/attribute"
@@ -33,6 +35,7 @@ var (
 	ErrHLSPullBusy = errors.New("hls pull concurrency limit reached")
 	// errHLSPullPlaybackDuration marks the natural end of a bounded VOD playback.
 	errHLSPullPlaybackDuration = errors.New("hls pull playback duration reached")
+	hlsPullURLPattern          = regexp.MustCompile(`(?i)https?://[^\s"'<>]+`)
 )
 
 // HLSPullManager pulls standard HLS playlists and injects frames into lal.
@@ -41,6 +44,7 @@ type HLSPullManager struct {
 	httpClient   *http.Client
 	maxTasks     int
 	sessionState func(streamID string, online bool, at time.Time, offlineReason, offlineDetail string)
+	pullError    func(streamID, detail string)
 
 	mu    sync.Mutex
 	tasks map[string]*hlsPullTask
@@ -92,6 +96,57 @@ func (m *HLSPullManager) SetSessionCallback(callback func(streamID string, onlin
 	m.mu.Lock()
 	m.sessionState = callback
 	m.mu.Unlock()
+}
+
+// SetPullErrorCallback receives sanitized errors before a failed pull session
+// is removed from the media engine.
+func (m *HLSPullManager) SetPullErrorCallback(callback func(streamID, detail string)) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.pullError = callback
+	m.mu.Unlock()
+}
+
+func (m *HLSPullManager) notifyPullError(streamID string, err error) {
+	if err == nil {
+		return
+	}
+	detail := sanitizeHLSPullError(err.Error())
+	slog.Warn("HLS pull attempt failed", "stream_id", streamID, "error", detail)
+	m.mu.Lock()
+	callback := m.pullError
+	m.mu.Unlock()
+	if callback != nil {
+		callback(streamID, detail)
+	}
+}
+
+func sanitizeHLSPullError(detail string) string {
+	return hlsPullURLPattern.ReplaceAllStringFunc(detail, func(raw string) string {
+		trimmed := raw
+		suffix := ""
+		for len(trimmed) > 0 && strings.ContainsRune(").,;]}", rune(trimmed[len(trimmed)-1])) {
+			suffix = trimmed[len(trimmed)-1:] + suffix
+			trimmed = trimmed[:len(trimmed)-1]
+		}
+		u, err := url.Parse(trimmed)
+		if err != nil {
+			return "[URL redacted]" + suffix
+		}
+		u.User = nil
+		if u.Path != "" {
+			u.Path = "/[path redacted]"
+			u.RawPath = ""
+		}
+		if u.RawQuery != "" {
+			u.RawQuery = "redacted"
+			u.ForceQuery = true
+		}
+		u.Fragment = ""
+		return u.String() + suffix
+	})
 }
 
 func (m *HLSPullManager) notifySession(streamID string, online bool, at time.Time, offlineReason, offlineDetail string) {
@@ -235,9 +290,10 @@ func (m *HLSPullManager) runTask(ctx context.Context, task *hlsPullTask) {
 				task.req.Headers = headers
 			}
 			if err != nil {
+				m.notifyPullError(task.streamID, err)
 				if task.req.PullRetryNum >= 0 && attempts > task.req.PullRetryNum {
 					completionReason = "upstream_error"
-					completionDetail = err.Error()
+					completionDetail = sanitizeHLSPullError(err.Error())
 					return
 				}
 				select {
@@ -278,7 +334,7 @@ func (m *HLSPullManager) runTask(ctx context.Context, task *hlsPullTask) {
 		completedWith = err
 		if task.req.PullRetryNum >= 0 && attempts > task.req.PullRetryNum {
 			completionReason = "upstream_error"
-			completionDetail = err.Error()
+			completionDetail = sanitizeHLSPullError(err.Error())
 			return
 		}
 		select {
@@ -295,7 +351,7 @@ func (m *HLSPullManager) runTask(ctx context.Context, task *hlsPullTask) {
 	}
 }
 
-func (m *HLSPullManager) pullOnce(ctx context.Context, task *hlsPullTask) error {
+func (m *HLSPullManager) pullOnce(ctx context.Context, task *hlsPullTask) (retErr error) {
 	attrs := []attribute.KeyValue{
 		attribute.String("nvr.stream.id", task.streamID),
 		attribute.String("nvr.media.source.kind", "hls"),
@@ -314,6 +370,9 @@ func (m *HLSPullManager) pullOnce(ctx context.Context, task *hlsPullTask) error 
 		option.AudioFormat = base.AvPacketStreamAudioFormatRawAac
 	})
 	defer func() {
+		if retErr != nil && ctx.Err() == nil && !errors.Is(retErr, gohlslib.ErrClientEOS) && !errors.Is(retErr, errHLSPullPlaybackDuration) {
+			m.notifyPullError(task.streamID, retErr)
+		}
 		opCtx, span := observability.StartBusinessSpan(observability.DetachedContext(ctx), "media.hls_pull.close_session", attrs...)
 		closeErr := m.engine.DelCustomizePubSession(opCtx, session)
 		observability.EndBusinessSpan(span, closeErr)
@@ -396,10 +455,14 @@ func attachHLSTracks(client *gohlslib.Client, session CustomizePubSession, track
 		}
 	}
 	for _, track := range tracks {
+		clockRate := track.ClockRate
+		if clockRate <= 0 {
+			clockRate = 90000
+		}
 		switch codec := track.Codec.(type) {
 		case *codecs.H264, *codecs.H265:
 			pt := info.VideoPT
-			client.OnDataH26x(track, func(pts, dts time.Duration, au [][]byte) {
+			client.OnDataH26x(track, func(pts, dts int64, au [][]byte) {
 				payload := AnnexBFromAU(au)
 				if len(payload) == 0 {
 					return
@@ -410,17 +473,17 @@ func attachHLSTracks(client *gohlslib.Client, session CustomizePubSession, track
 				_ = session.FeedAvPacket(base.AvPacket{
 					Payload:     payload,
 					PayloadType: pt,
-					Pts:         pts.Milliseconds(),
-					Timestamp:   dts.Milliseconds(),
+					Pts:         clockTicksToMilliseconds(pts, clockRate),
+					Timestamp:   clockTicksToMilliseconds(dts, clockRate),
 				})
 			})
 		case *codecs.MPEG4Audio:
-			sampleRate := codec.SampleRate
+			sampleRate := codec.Config.SampleRate
 			if sampleRate <= 0 {
 				sampleRate = 44100
 			}
-			client.OnDataMPEG4Audio(track, func(pts time.Duration, aus [][]byte) {
-				ts := pts.Milliseconds()
+			client.OnDataMPEG4Audio(track, func(pts int64, aus [][]byte) {
+				ts := clockTicksToMilliseconds(pts, clockRate)
 				step := int64(0)
 				if sampleRate > 0 {
 					step = int64(1024 * 1000 / sampleRate)
@@ -434,7 +497,6 @@ func attachHLSTracks(client *gohlslib.Client, session CustomizePubSession, track
 					})
 				}
 			})
-			_ = codec
 		}
 	}
 	return nil
@@ -470,7 +532,7 @@ func ClassifyHLSTracks(tracks []*gohlslib.Track) (HLSTrackInfo, error) {
 			info.VideoParamSets = AnnexBFromAU([][]byte{codec.VPS, codec.SPS, codec.PPS})
 		case *codecs.MPEG4Audio:
 			info.AudioCodec = "aac"
-			if asc, err := codec.Marshal(); err == nil {
+			if asc, err := codec.Config.Marshal(); err == nil {
 				info.AudioASC = asc
 			}
 		case *codecs.Opus:
@@ -492,6 +554,13 @@ func ClassifyHLSTracks(tracks []*gohlslib.Track) (HLSTrackInfo, error) {
 		}
 		return info, fmt.Errorf("%w: %s", ErrHLSPullUnsupportedCodec, info.UnsupportedHint)
 	}
+}
+
+func clockTicksToMilliseconds(ticks int64, clockRate int) int64 {
+	if clockRate <= 0 {
+		return 0
+	}
+	return ticks * 1000 / int64(clockRate)
 }
 
 // AnnexBFromAU concatenates NAL units with 4-byte start codes.

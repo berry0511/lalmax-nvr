@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { onMount, setContext } from 'svelte';
-  import { getDashboardCameras, getCredentials, listProtocols, DEFAULT_PROTOCOLS, buildProtocolsMap, normalizeProtocol, getProtocolCapabilities, getHealthCameras, apiRequest, subscribeNvrEvents, streamMediaURL, listStreams } from '$lib/api';
+  import { onDestroy, onMount, setContext } from 'svelte';
+  import { getDashboardCameras, getCredentials, listProtocols, DEFAULT_PROTOCOLS, buildProtocolsMap, normalizeProtocol, getProtocolCapabilities, apiRequest, subscribeNvrEvents, streamMediaURL, listStreams } from '$lib/api';
   import type { NvrEvent } from '$lib/api';
   import type { Camera, ProtocolInfo, StreamInfo } from '$lib/api';
   import { t } from '$lib/i18n';
   import { showToast } from '$lib/toast';
-  import { Loader2, AlertCircle, Video, VideoOff, X, Settings, ImageOff, CircleCheck, CirclePause, CircleAlert, RefreshCw, WifiOff, LayoutGrid, Plus, Search, Play } from 'lucide-svelte';
+  import { Loader2, AlertCircle, Video, VideoOff, X, Settings, ImageOff, CircleCheck, CirclePause, WifiOff, LayoutGrid, Plus, Search, Play } from 'lucide-svelte';
   import PtzControl from '../components/PtzControl.svelte';
   import VideoPlayer from '../components/VideoPlayer.svelte';
   import WebRTCPlayer from '../components/WebRTCPlayer.svelte';
@@ -44,6 +44,17 @@
 
   let allCameras = $state<Camera[]>([]);
   let allStreams = $state<StreamInfo[]>([]);
+  let refreshingStreams = false;
+  // Status polling must not tear down a healthy player on one transient
+  // inactive response. Two consecutive polls (20s) are required to mark an
+  // already-online stream offline.
+  const offlinePollCounts = new Map<string, number>();
+  let streamStatusTimer: number | undefined;
+  let dashboardDisposed = false;
+  onDestroy(() => {
+    dashboardDisposed = true;
+    if (streamStatusTimer !== undefined) window.clearInterval(streamStatusTimer);
+  });
 
   interface WallSource {
     id: string;
@@ -87,6 +98,7 @@
     wallSources.filter((source) => source.kind === 'stream' && source.stream).map((source) => [source.id, source.stream!]),
   ));
   let configOpen = $state(false);
+  let applyingLayout = $state(false);
   let gridLayout = $state<GridLayout>(4);
   let slotAssignments = $state<(string | null)[]>([null, null, null, null]);
   let pendingGridLayout = $state<GridLayout>(4);
@@ -104,41 +116,11 @@
   let snapshotUrls = $state<Record<string, string>>({});
   let snapshotLoading = $state<Record<string, boolean>>({});
   let snapshotTransientErrors = $state<Record<string, boolean>>({});
-  let healthStatuses = $state<Record<string, string>>({});
   let alarmFlash = $state<Record<string, number>>({});
   let tourOn = $state(false);
   let tourIndex = $state(0);
   let instantReplayId = $state<string | null>(null);
 
-  function healthDotColor(status: string): string {
-    switch (status) {
-      case 'healthy':
-      case 'recording':
-        return 'var(--color-success)';
-      case 'reconnecting':
-        return 'var(--color-warning)';
-      case 'error':
-      case 'offline':
-        return 'var(--color-danger)';
-      default:
-        return 'var(--color-text-tertiary)';
-    }
-  }
-
-  function healthDotLabel(status: string): string {
-    switch (status) {
-      case 'healthy':
-      case 'recording':
-        return t('dashboard.healthOnline');
-      case 'reconnecting':
-        return t('health.status.reconnecting');
-      case 'error':
-      case 'offline':
-        return t('dashboard.healthOffline');
-      default:
-        return t('health.status.unknown');
-    }
-  }
   let streamPlayURLs = $state<Record<string, Record<string, string>>>({});
 
   // Snapshot manager — handles fetch, interval, and cleanup lifecycle
@@ -297,13 +279,19 @@
     pendingSlotAssignments = next;
   }
 
-  function applyLayoutConfig() {
-    gridLayout = pendingGridLayout;
-    slotAssignments = [...pendingSlotAssignments];
-    saveLayout();
-    void loadCameraPlayURLs(getAssignedIds(slotAssignments));
-    configOpen = false;
-    editingSlotIndex = null;
+  async function applyLayoutConfig() {
+    applyingLayout = true;
+    try {
+      const nextAssignments = [...pendingSlotAssignments];
+      await loadCameraPlayURLs(getAssignedIds(nextAssignments));
+      gridLayout = pendingGridLayout;
+      slotAssignments = nextAssignments;
+      saveLayout();
+      configOpen = false;
+      editingSlotIndex = null;
+    } finally {
+      applyingLayout = false;
+    }
   }
 
   function wallSourceLabel(source: WallSource): string {
@@ -345,13 +333,71 @@
   async function loadWallStreams(): Promise<StreamInfo[]> {
     const pageSize = 100;
     const first = await listStreams({ limit: pageSize, offset: 0 });
-    const all = [...first.streams];
     const total = Math.min(first.total, 500);
-    for (let offset = pageSize; offset < total; offset += pageSize) {
-      const page = await listStreams({ limit: pageSize, offset });
-      all.push(...page.streams);
+    const offsets = Array.from(
+      { length: Math.ceil((total - pageSize) / pageSize) },
+      (_, index) => (index + 1) * pageSize,
+    );
+    const remaining = await Promise.all(offsets.map((offset) => listStreams({ limit: pageSize, offset })));
+    return [...first.streams, ...remaining.flatMap((page) => page.streams)];
+  }
+
+  async function refreshWallStreams() {
+    if (refreshingStreams) return;
+    refreshingStreams = true;
+    try {
+      const refreshed = await loadWallStreams();
+      const currentById = new Map(allStreams.map((stream) => [stream.stream_id, stream]));
+      const refreshedIDs = new Set(refreshed.map((stream) => stream.stream_id));
+      const listChanged = refreshedIDs.size !== currentById.size ||
+        [...refreshedIDs].some((id) => !currentById.has(id));
+      const nextStreams = refreshed.map((incoming) => {
+        const current = currentById.get(incoming.stream_id);
+        if (!current) return incoming;
+
+        let nextActive = current.active;
+        if (incoming.active) {
+          offlinePollCounts.delete(incoming.stream_id);
+          nextActive = true;
+        } else {
+          const offlinePolls = (offlinePollCounts.get(incoming.stream_id) ?? 0) + 1;
+          offlinePollCounts.set(incoming.stream_id, offlinePolls);
+          // Preserve the last known online state for one transient poll.
+          nextActive = current.active && offlinePolls < 2;
+        }
+
+        // Keep each existing row and its playback URLs stable. Replacing every
+        // object here invalidates the dashboard's derived wall sources on
+        // every poll and can make player components reconnect unnecessarily.
+        if (current.active !== nextActive) current.active = nextActive;
+        return current;
+      });
+
+      // Only replace the collection when streams were actually added/removed.
+      // For a normal status poll, changing `active` above is the only reactive
+      // update, so live players with an unchanged status remain untouched.
+      if (listChanged) allStreams = nextStreams;
+    } catch (e) {
+      console.warn('Failed to refresh stream status for the dashboard:', e);
+    } finally {
+      refreshingStreams = false;
     }
-    return all;
+  }
+
+  function streamForCamera(camera: Camera): StreamInfo | undefined {
+    return allStreams.find((stream) =>
+      stream.stream_id === camera.stream_id ||
+      stream.stream_id === camera.id ||
+      stream.camera_id === camera.id
+    );
+  }
+
+  function wallSourceStatus(source: WallSource): { label: string; badgeClass: string } {
+    const stream = source.stream || (source.camera ? streamForCamera(source.camera) : undefined);
+    if (!stream) return { label: t('health.status.unknown'), badgeClass: 'badge-neutral' };
+    return stream.active
+      ? { label: t('dashboard.healthOnline'), badgeClass: 'badge-success' }
+      : { label: t('dashboard.streamOffline'), badgeClass: 'badge-warning' };
   }
 
   interface CameraProtocolDetail {
@@ -362,8 +408,8 @@
     Backend?: string;
   }
 
-  async function loadCameraPlayURLs(ids: string[]) {
-    const cameraIds = ids.filter((id) => cameraById.has(id));
+  async function loadCameraPlayURLs(ids: string[], knownCameraIds?: ReadonlySet<string>) {
+    const cameraIds = ids.filter((id) => knownCameraIds ? knownCameraIds.has(id) : cameraById.has(id));
     const results = await Promise.all(cameraIds.map(async (cameraId) => {
       try {
         const response = await apiRequest<{ protocols: CameraProtocolDetail[] }>(`/cameras/${cameraId}/protocols?quality=sub`);
@@ -394,16 +440,20 @@
   }
 
   function getStreamUrl(cameraId: string): string {
-    return defaultProtocol === 'll-hls'
+    const protocol = defaultProtocol === 'll-hls' ? 'll-hls' : 'hls';
+    const fallback = protocol === 'll-hls'
       ? streamMediaURL(streamIdFor(cameraId), 'll-hls')
       : streamMediaURL(streamIdFor(cameraId), 'hls');
+    return getCameraPlayURL(cameraId, protocol, fallback);
   }
 
-  function getProtocolPlayURL(cameraId: string, protocol: 'flv' | 'ws-flv'): string {
+  function getCameraPlayURL(cameraId: string, protocol: string, fallback = ''): string {
     const cameraUrls = streamPlayURLs[cameraId] || {};
-    if (cameraUrls[protocol]) return cameraUrls[protocol];
-    if (protocol === 'flv') return streamMediaURL(streamIdFor(cameraId), 'flv');
-    return '';
+    return cameraUrls[protocol] || fallback;
+  }
+
+  function getStreamPlayURL(stream: StreamInfo, protocol: string, fallback: string): string {
+    return stream.play_urls?.find((play) => play.protocol === protocol)?.url || fallback;
   }
 
   function getGridClass(layout: GridLayout): string {
@@ -429,21 +479,10 @@
     return `calc((100vh - 168px) / ${rows})`;
   }
 
-  function getStatusBadge(camera: Camera): { class: string; label: string; icon: any; text: string } {
-    const status = camera.status?.toLowerCase() || '';
-    if (status === 'recording' || status === 'active') {
-      return { class: 'badge-success', label: '●', icon: CircleCheck, text: t('cameras.statusRecording') };
-    }
-    if (status === 'error' || status === 'failed') {
-      return { class: 'badge-error', label: '●', icon: CircleAlert, text: t('cameras.statusError') };
-    }
-    if (status === 'reconnecting') {
-      return { class: 'badge-warning', label: '●', icon: RefreshCw, text: t('cameras.statusReconnecting') };
-    }
-    if (status === 'offline') {
-      return { class: 'badge-warning', label: '●', icon: WifiOff, text: t('cameras.statusOffline') || 'Offline' };
-    }
-    return { class: 'badge-neutral', label: '●', icon: CirclePause, text: t('cameras.statusStopped') };
+  function getStreamStatusBadge(stream: StreamInfo | undefined): { class: string; icon: any; text: string } {
+    if (!stream) return { class: 'badge-neutral', icon: CirclePause, text: t('health.status.unknown') };
+    if (stream.active) return { class: 'badge-success', icon: CircleCheck, text: t('dashboard.healthOnline') };
+    return { class: 'badge-warning', icon: WifiOff, text: t('dashboard.streamOffline') };
   }
 
   function isHlsSupported(camera: Camera): boolean {
@@ -477,18 +516,18 @@
 
   function streamPageURL(stream: StreamInfo, mode: CameraMode): string {
     const streamId = stream.stream_id;
-    if (mode === 'flv') return streamMediaURL(streamId, 'flv');
+    if (mode === 'flv') return getStreamPlayURL(stream, 'flv', streamMediaURL(streamId, 'flv'));
     if (mode === 'ws-flv') {
-      // WS-FLV is served by lal's FLV endpoint. `/stream/ws` is the separate
-      // raw-frame WebCodecs transport and only supports recorder-backed cameras.
-      return stream.play_urls?.find((play) => play.protocol === 'ws-flv')?.url || '';
+      return getStreamPlayURL(stream, 'ws-flv', '');
     }
-    if (mode === 'wasm') return streamMediaURL(streamId, 'ws');
-    if (mode === 'webrtc') return streamMediaURL(streamId, 'webrtc');
-    if (mode === 'fmp4') return streamMediaURL(streamId, 'fmp4');
-    return defaultProtocol === 'll-hls'
+    if (mode === 'wasm') return getStreamPlayURL(stream, 'wasm', streamMediaURL(streamId, 'ws'));
+    if (mode === 'webrtc') return getStreamPlayURL(stream, 'webrtc', streamMediaURL(streamId, 'webrtc'));
+    if (mode === 'fmp4') return getStreamPlayURL(stream, 'fmp4', streamMediaURL(streamId, 'fmp4'));
+    const protocol = defaultProtocol === 'll-hls' ? 'll-hls' : 'hls';
+    const fallback = protocol === 'll-hls'
       ? streamMediaURL(streamId, 'll-hls')
       : streamMediaURL(streamId, 'hls');
+    return getStreamPlayURL(stream, protocol, fallback);
   }
 
   // Preload WasmPlayer when any assigned cell would use 'wasm' mode
@@ -548,9 +587,35 @@
   }
 
   function toggleTour() {
-    tourOn = !tourOn;
+    if (tourOn) {
+      tourOn = false;
+      tourIndex = 0;
+      shrinkToGrid();
+      return;
+    }
+    if (assignedCameraIds.length < 2) {
+      showToast(t('dashboard.tourNeedsTwoSources'), 'info');
+      return;
+    }
     tourIndex = 0;
+    expandedCameraId = assignedCameraIds[0];
+    tourOn = true;
   }
+
+  $effect(() => {
+    if (!tourOn) return;
+    const ids = assignedCameraIds;
+    if (ids.length < 2) {
+      tourOn = false;
+      shrinkToGrid();
+      return;
+    }
+    const timer = window.setInterval(() => {
+      tourIndex = (tourIndex + 1) % ids.length;
+      expandedCameraId = ids[tourIndex];
+    }, 8000);
+    return () => window.clearInterval(timer);
+  });
 
   function startInstantReplay(cameraId: string) {
     instantReplayId = cameraId;
@@ -570,16 +635,41 @@
     let streams: StreamInfo[] = [];
     let cameraErr = '';
     let streamErr = '';
-    try {
-      cameras = (await getDashboardCameras()).filter(c => c.enabled !== false);
-    } catch (e) {
-      cameraErr = e instanceof Error ? e.message : String(e);
+    const saved = loadSavedLayout();
+    const camerasPromise = getDashboardCameras();
+    const [cameraResult, streamResult, protocolResult, settingsResult, playURLsResult] = await Promise.allSettled([
+      camerasPromise,
+      loadWallStreams(),
+      listProtocols(),
+      getStreamingSettings(),
+      camerasPromise.then((cameraList) => loadCameraPlayURLs(
+        getAssignedIds(saved.slots),
+        new Set(cameraList.filter((camera) => camera.enabled !== false).map((camera) => camera.id)),
+      )),
+    ]);
+    if (cameraResult.status === 'fulfilled') {
+      cameras = cameraResult.value.filter(c => c.enabled !== false);
+    } else {
+      cameraErr = cameraResult.reason instanceof Error ? cameraResult.reason.message : String(cameraResult.reason);
     }
-    try {
-      streams = await loadWallStreams();
-    } catch (e) {
-      streamErr = e instanceof Error ? e.message : String(e);
-      console.warn('Failed to load streams for the dashboard:', e);
+    if (streamResult.status === 'fulfilled') {
+      streams = streamResult.value;
+    } else {
+      streamErr = streamResult.reason instanceof Error ? streamResult.reason.message : String(streamResult.reason);
+      console.warn('Failed to load streams for the dashboard:', streamResult.reason);
+    }
+    if (protocolResult.status === 'fulfilled' && protocolResult.value?.length) {
+      protocolsMap = buildProtocolsMap(protocolResult.value);
+    } else if (protocolResult.status === 'rejected') {
+      console.warn('Failed to load protocol capabilities:', protocolResult.reason);
+    }
+    if (settingsResult.status === 'fulfilled' && settingsResult.value.default_protocol) {
+      defaultProtocol = settingsResult.value.default_protocol;
+    } else if (settingsResult.status === 'rejected') {
+      console.warn('Failed to load streaming settings:', settingsResult.reason);
+    }
+    if (playURLsResult.status === 'rejected') {
+      console.warn('Failed to load camera playback URLs:', playURLsResult.reason);
     }
     if (cameraErr && streamErr) {
       error = cameraErr;
@@ -588,7 +678,6 @@
     }
     allCameras = cameras;
     allStreams = streams;
-    const saved = loadSavedLayout();
     const availableIds = new Set(buildWallSources(cameras, streams).map((source) => source.id));
     const cameraIds = new Set(cameras.map((cam) => cam.id));
     gridLayout = saved.layout;
@@ -600,37 +689,12 @@
     });
     pendingGridLayout = gridLayout;
     pendingSlotAssignments = [...slotAssignments];
+    // WS-FLV requires a server-provided play URL. Other modes have stable route fallbacks.
     loading = false;
-    await loadCameraPlayURLs(getAssignedIds(slotAssignments));
-    // Fetch camera health status (public, no auth)
-    try {
-      const healthData = await getHealthCameras();
-      const statuses: Record<string, string> = {};
-      for (const [id, detail] of Object.entries(healthData)) {
-        statuses[id] = detail.latest_status;
-      }
-      healthStatuses = statuses;
-    } catch (e) {
-      console.warn('Failed to load camera health status:', e);
-    }
-    // Load protocol capabilities
-    try {
-      const list = await listProtocols();
-      if (list && list.length > 0) {
-        protocolsMap = buildProtocolsMap(list);
-      }
-    } catch (e) {
-      console.warn('Failed to load protocol capabilities:', e);
-    }
-    // Load default streaming protocol from settings
-    try {
-      const config = await getStreamingSettings();
-      if (config.default_protocol) {
-        defaultProtocol = config.default_protocol;
-      }
-    } catch (e) {
-      console.warn('Failed to load streaming settings:', e);
-    }
+    streamStatusTimer = window.setInterval(() => {
+      void refreshWallStreams();
+    }, 10000);
+    if (dashboardDisposed) window.clearInterval(streamStatusTimer);
     document.addEventListener('fullscreenchange', handleFullscreenChange);
 
     // Page Visibility API: pause players when tab hidden, resume when visible
@@ -638,12 +702,6 @@
       tabVisible = !document.hidden;
     };
     document.addEventListener('visibilitychange', visibilityHandler);
-
-    const tourTimer = window.setInterval(() => {
-      if (!tourOn || assignedCameraIds.length === 0) return;
-      tourIndex = (tourIndex + 1) % assignedCameraIds.length;
-      expandedCameraId = assignedCameraIds[tourIndex];
-    }, 8000);
 
     const stopEvents = subscribeNvrEvents({}, (ev: NvrEvent) => {
       if (!ev.camera_id) return;
@@ -672,7 +730,6 @@
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
       document.removeEventListener('visibilitychange', visibilityHandler);
       stopEvents();
-      window.clearInterval(tourTimer);
       window.fetch = originalFetch;
       reconnectCoordinator.dispose();
     };
@@ -794,8 +851,12 @@
                 {/if}
               </div>
               {#if assigned}
+                {@const sourceStatus = wallSourceStatus(assigned)}
                 <p class="text-sm th-text-primary truncate font-medium">{assigned.name}</p>
-                <p class="text-[10px] th-text-muted font-mono truncate">{assigned.id}</p>
+                <div class="flex items-center gap-1.5 min-w-0">
+                  <p class="text-[10px] th-text-muted font-mono truncate">{assigned.id}</p>
+                  <span class="badge {sourceStatus.badgeClass} text-[9px] px-1 py-0.5 shrink-0">{sourceStatus.label}</span>
+                </div>
               {:else}
                 <p class="text-xs th-text-muted">{t('dashboard.emptySlot')}</p>
               {/if}
@@ -820,6 +881,7 @@
             <p class="text-sm th-text-muted text-center py-6">{t('dashboard.noSearchResults')}</p>
           {:else}
             {#each filteredConfigSources() as source}
+              {@const sourceStatus = wallSourceStatus(source)}
               <button
                 class="w-full flex items-center gap-2 px-2 py-2 rounded-md hover:bg-[var(--bg-tertiary)] transition-colors text-left"
                 onclick={() => {
@@ -831,7 +893,10 @@
               >
                 <LayoutGrid size={14} class="th-text-muted shrink-0" />
                 <span class="text-sm th-text-primary truncate">{source.name}</span>
-                <span class="text-xs th-text-muted ml-auto shrink-0">{wallSourceLabel(source)}</span>
+                <span class="ml-auto flex shrink-0 flex-col items-end gap-1">
+                  <span class="badge {sourceStatus.badgeClass} text-[9px] px-1 py-0.5">{sourceStatus.label}</span>
+                  <span class="text-xs th-text-muted">{wallSourceLabel(source)}</span>
+                </span>
               </button>
             {/each}
           {/if}
@@ -841,8 +906,8 @@
           <button class="btn btn-ghost text-sm px-3 py-1.5" onclick={() => { configOpen = false; editingSlotIndex = null; }}>
             {t('common.dismiss')}
           </button>
-          <button class="btn btn-primary text-sm px-3 py-1.5" onclick={applyLayoutConfig}>
-            {t('dashboard.apply')}
+          <button class="btn btn-primary text-sm px-3 py-1.5" onclick={applyLayoutConfig} disabled={applyingLayout}>
+            {applyingLayout ? t('common.loading') : t('dashboard.apply')}
           </button>
         </div>
       </div>
@@ -887,7 +952,8 @@
           {@const camera = cameraId ? cameraById.get(cameraId) : null}
           {@const stream = cameraId && !camera ? streamById.get(cameraId) : undefined}
           {#if camera}
-            {@const status = getStatusBadge(camera)}
+            {@const cameraStream = streamForCamera(camera)}
+            {@const status = getStreamStatusBadge(cameraStream)}
             {@const mode = getCameraMode(camera)}
             {@const StatusIcon = status.icon}
             <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -904,7 +970,13 @@
               onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleCellClick(camera); } }}
               ondblclick={() => handleCellDblClick(camera)}
             >
-            {#if mode === 'snapshot'}
+            {#if cameraStream && !cameraStream.active}
+              <div class="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/85 px-4 text-center">
+                <WifiOff size={26} class="text-amber-400" />
+                <p class="text-sm font-medium text-white">{t('dashboard.streamOfflineWaiting')}</p>
+                <p class="text-xs text-white/60">{t('dashboard.streamOfflineAutoRestore')}</p>
+              </div>
+            {:else if mode === 'snapshot'}
               <!-- Snapshot thumbnail mode (HTTP_JPEG cameras) -->
               {#if snapshotLoading[camera.id] && !snapshotUrls[camera.id]}
                 <!-- Initial loading -->
@@ -964,6 +1036,7 @@
               <WebRTCPlayer
                 cameraId={camera.id}
                 cameraName={camera.name || camera.id}
+                whepUrl={getCameraPlayURL(camera.id, 'webrtc', streamMediaURL(streamIdFor(camera.id), 'webrtc'))}
                 expanded={expandedCameraId === camera.id}
                 {tabVisible}
               />
@@ -972,7 +1045,7 @@
               <FlvPlayer
                 cameraId={camera.id}
                 cameraName={camera.name || camera.id}
-                streamUrl={getProtocolPlayURL(camera.id, mode === 'ws-flv' ? 'ws-flv' : 'flv')}
+                streamUrl={getCameraPlayURL(camera.id, mode, mode === 'flv' ? streamMediaURL(streamIdFor(camera.id), 'flv') : '')}
                 protocol={mode === 'ws-flv' ? 'ws-flv' : 'flv'}
                 expanded={expandedCameraId === camera.id}
                 {tabVisible}
@@ -983,6 +1056,7 @@
                 <WasmPlayer
                   cameraId={camera.id}
                   cameraName={camera.name || camera.id}
+                    wsPath={getCameraPlayURL(camera.id, 'wasm', streamMediaURL(streamIdFor(camera.id), 'ws'))}
                   expanded={expandedCameraId === camera.id}
                   tabVisible={tabVisible}
                 />
@@ -1009,6 +1083,7 @@
                 <FMP4Player
                   cameraId={camera.id}
                   cameraName={camera.name || camera.id}
+                  streamUrl={getCameraPlayURL(camera.id, 'fmp4', streamMediaURL(streamIdFor(camera.id), 'fmp4'))}
                   expanded={expandedCameraId === camera.id}
                   tabVisible={tabVisible}
                 />
@@ -1080,16 +1155,13 @@
             {/if}
 
             <!-- Health indicator dot + status -->
-            {#if healthStatuses[camera.id] !== undefined}
-              {@const hStatus = healthStatuses[camera.id]}
-              <span
-                class="absolute top-2 left-2 z-10 flex items-center gap-1 bg-black/60 text-white text-[10px] font-medium px-1.5 py-0.5 rounded-full select-none"
-                title={healthDotLabel(hStatus)}
-              >
-                <span class="w-2 h-2 rounded-full flex-shrink-0" style="background-color: {healthDotColor(hStatus)}"></span>
-                {healthDotLabel(hStatus)}
-              </span>
-            {/if}
+            <span
+              class="absolute top-2 left-2 z-10 flex items-center gap-1 bg-black/60 text-white text-[10px] font-medium px-1.5 py-0.5 rounded-full select-none"
+              title={status.text}
+            >
+              <StatusIcon size={10} />
+              {status.text}
+            </span>
 
             <!-- PTZ Overlay for PTZ-capable cameras -->
             {#if ptzOpenIndex === slotIndex && getProtocolCapabilities(camera.protocol, protocolsMap).ptz}
@@ -1127,7 +1199,13 @@
               onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleStreamClick(stream.stream_id); } }}
               ondblclick={() => { if (expandedCameraId === stream.stream_id) shrinkToGrid(); }}
             >
-              {#if mode === 'hls'}
+              {#if !stream.active}
+                <div class="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/85 px-4 text-center">
+                  <WifiOff size={26} class="text-amber-400" />
+                  <p class="text-sm font-medium text-white">{t('dashboard.streamOfflineWaiting')}</p>
+                  <p class="text-xs text-white/60">{t('dashboard.streamOfflineAutoRestore')}</p>
+                </div>
+              {:else if mode === 'hls'}
                 <VideoPlayer
                   cameraId={stream.stream_id}
                   cameraName={title}

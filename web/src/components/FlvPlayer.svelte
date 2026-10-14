@@ -247,9 +247,18 @@ let videoEventAc: AbortController | null = null;
     zombieInterval = setInterval(() => {
       if (!videoEl) return;
 
+      // The dashboard intentionally pauses FLV when its tab is hidden. A
+      // paused/hidden video cannot advance currentTime, so it must not be
+      // mistaken for a dead upstream and reconnected by the watchdog.
+      if (!tabVisible || document.hidden || videoEl.paused) {
+        lastPlaybackTime = videoEl.currentTime;
+        zombieCount = 0;
+        return;
+      }
+
       if (videoEl.readyState === 0) {
         zombieCount++;
-      if (zombieCount >= 4) {
+        if (zombieCount >= 4) {
           console.warn(`FLV zombie detected for ${cameraId}, reconnecting`);
           zombieCount = 0;
           reconnectAttempts = 0;

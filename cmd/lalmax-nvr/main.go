@@ -864,6 +864,7 @@ func (a *App) buildRouter() http.Handler {
 		if a.mediaEngine != nil {
 			a.hlsPuller = media.NewHLSPullManager(a.mediaEngine)
 			a.hlsPuller.SetSessionCallback(a.historyMgr.RecordHLSPullSessionState)
+			a.hlsPuller.SetPullErrorCallback(a.historyMgr.RecordHLSPullAttemptError)
 			a.hlsPuller.SetMaxTasks(a.cfg.IPTV.MaxConcurrentPulls)
 			puller = a.hlsPuller
 		}
@@ -878,6 +879,7 @@ func (a *App) buildRouter() http.Handler {
 			if a.hlsPuller == nil {
 				a.hlsPuller = media.NewHLSPullManager(a.mediaEngine)
 				a.hlsPuller.SetSessionCallback(a.historyMgr.RecordHLSPullSessionState)
+				a.hlsPuller.SetPullErrorCallback(a.historyMgr.RecordHLSPullAttemptError)
 				a.hlsPuller.SetMaxTasks(a.cfg.IPTV.MaxConcurrentPulls)
 			}
 			puller = a.hlsPuller
@@ -1323,6 +1325,7 @@ func (a *App) Start() error {
 	}
 	if a.iptvSvc != nil {
 		a.recSched.SetSourceReconciler(a.iptvSvc.ReconcileSources)
+		a.iptvSvc.StartRefreshLoop(ctx)
 	}
 	a.recSched.Start(ctx)
 	if a.apiHandler != nil {
