@@ -597,6 +597,10 @@ HLS 播放与录像拉流相互独立：关闭 `hls.enabled` 或启用按需切�
 - **类型**: integer
 - **描述**: 外部 lal 的协议端口（`media.mode: http` 时用于生成播放地址）。默认 RTMP **11935**、RTSP **15544**、HTTP-FLV/HLS-TS **18080**。embedded 模式的 RTMP 推流端口由 `rtmp.port` 设置；RTSP 和 HTTP 监听使用内嵌引擎默认端口。请把 `media.lalmax_public_url` 设成客户端可访问的主机名。
 
+### RTSP 服务端鉴权
+
+`media.rtsp_auth_enable` 控制是否对 RTSP 播放启用鉴权。要正常使用鉴权，需要同时配置 `media.rtsp_username` 和 `media.rtsp_password`；`media.rtsp_auth_method` 为 `0`（Basic）或 `1`（Digest）。配置加密密钥启用后，保存配置时会加密 RTSP 密码。
+
 ## DLNA 配置
 
 可选的局域网 MediaServer，默认关闭。`dlna.port` 默认 **8200**，与 `server.listen` 分开；`include_live` 和 `include_recordings` 默认开启。可用 `interface` 指定网卡、`allowed_cidrs` 限制客户端网段。`max_browse_count` 默认 **200**，`gop_cache` 默认 **1**。`max_media_viewers` 已提供配置项，但当前未用于限制连接数。使用方法见 [DLNA 指南](dlna.md)。

@@ -103,6 +103,20 @@ type MediaConfig struct {
 	RTSPPassword   string `yaml:"rtsp_password,omitempty"`    // RTSP server password
 }
 
+// ValidateRTSPAuth checks that enabled RTSP authentication has usable credentials.
+func (cfg MediaConfig) ValidateRTSPAuth() error {
+	if !cfg.RTSPAuthEnable {
+		return nil
+	}
+	if strings.TrimSpace(cfg.RTSPUsername) == "" || cfg.RTSPPassword == "" {
+		return fmt.Errorf("media.rtsp_username and media.rtsp_password are required when RTSP authentication is enabled")
+	}
+	if cfg.RTSPAuthMethod != 0 && cfg.RTSPAuthMethod != 1 {
+		return fmt.Errorf("media.rtsp_auth_method must be 0 (Basic) or 1 (Digest)")
+	}
+	return nil
+}
+
 type CameraConfig struct {
 	ID   string `yaml:"id"`
 	Name string `yaml:"name"`
