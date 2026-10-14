@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import {
-    getStats, listCameras, healthCheck, getSystemStats, getMergeStatus, getMergePending,
+    getStats, listCameras, healthDetails, getSystemStats, getMergeStatus, getMergePending,
     getLocalNetworkInterfaces, getStatsTrends,
     getSystemMetricsHistory, getHourlyStats, getCameraUptimeStats, getAPIObservability, getRecentTraces, getTrace,
   } from '$lib/api';
@@ -179,7 +179,7 @@
   }
 
   async function loadHealth() {
-    try { health = await healthCheck(); }
+    try { health = await healthDetails(); }
     catch (e) { console.error(e); }
   }
 

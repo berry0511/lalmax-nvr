@@ -109,13 +109,9 @@ export interface StabilityDataResponse {
   cameras: { [cameraId: string]: StabilityMetrics };
 }
 
-// Fetch health cameras (public, no auth required)
+// Fetch health cameras (requires authentication)
 export async function getHealthCameras(): Promise<HealthCamerasResponse> {
-  const response = await fetch('/api/health/cameras');
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
-  }
-  return response.json();
+  return apiRequest<HealthCamerasResponse>('/health/cameras');
 }
 
 // Fetch stability data (auth required)

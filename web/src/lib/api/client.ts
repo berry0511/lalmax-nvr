@@ -43,6 +43,11 @@ export interface HealthResponse {
   setup_required?: boolean;
 }
 
+export interface HealthProbeResponse {
+  status: string;
+  setup_required: boolean;
+}
+
 export interface SystemStats {
   cpu: {
     total: number;
@@ -203,9 +208,14 @@ export async function logout(): Promise<void> {
 }
 
 // Health check (no auth required)
-export async function healthCheck(signal?: AbortSignal): Promise<HealthResponse> {
+export async function healthCheck(signal?: AbortSignal): Promise<HealthProbeResponse> {
   const response = await fetch('/api/health', { signal });
   return response.json();
+}
+
+// Detailed health data is private and is intended for the authenticated UI.
+export async function healthDetails(signal?: AbortSignal): Promise<HealthResponse> {
+  return apiRequest<HealthResponse>('/health/details', { signal });
 }
 
 // System stats endpoint

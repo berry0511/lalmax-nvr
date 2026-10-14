@@ -65,7 +65,7 @@ type HealthCheck struct {
 	Message string `json:"message,omitempty"`
 }
 
-// HealthResponse is the response from /api/health.
+// HealthResponse is the authenticated detailed health response.
 type HealthResponse struct {
 	Status        string                 `json:"status"` // "ok" | "degraded" | "unhealthy"
 	Checks        map[string]HealthCheck `json:"checks"`
@@ -75,7 +75,7 @@ type HealthResponse struct {
 	Cameras       *CameraHealthSummary   `json:"cameras,omitempty"`
 }
 
-// CameraHealthSummary provides aggregated camera health in the /api/health response.
+// CameraHealthSummary provides aggregated camera health details.
 type CameraHealthSummary struct {
 	Total        int                  `json:"total"`
 	Recording    int                  `json:"recording"`
@@ -85,7 +85,7 @@ type CameraHealthSummary struct {
 	Details      []CameraHealthDetail `json:"details"`
 }
 
-// CameraHealthDetail is a per-camera summary included in /api/health.
+// CameraHealthDetail is a per-camera summary included in authenticated health responses.
 type CameraHealthDetail struct {
 	ID     string `json:"id"`
 	Name   string `json:"name"`
@@ -350,7 +350,6 @@ func (h *Handler) Routes() http.Handler {
 		})
 		r.Use(rl)
 		r.Get("/api/health", h.handleHealth)
-		r.Get("/api/health/cameras", h.handleHealthCameras)
 		r.Get("/api/readyz", h.handleReadyz)
 		r.Get("/api/capabilities", h.handleCapabilities)
 		// ONNX models are public, immutable runtime assets; auth headers are not
@@ -369,6 +368,8 @@ func (h *Handler) Routes() http.Handler {
 			r.Use(h.authMW)
 		}
 		r.Post("/api/auth/logout", h.handleLogout)
+		r.Get("/api/health/cameras", h.handleHealthCameras)
+		r.Get("/api/health/details", h.handleHealthDetails)
 		r.Route("/api/recordings", func(r chi.Router) {
 			r.Get("/", h.handleListRecordings)
 			r.Get("/timeline", h.handleRecordingsTimeline)
