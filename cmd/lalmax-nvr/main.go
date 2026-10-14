@@ -753,7 +753,7 @@ func NewApp(cfg *config.Config, configPath string) (*App, error) {
 	// Step 10: Optional FTP server
 	if cfg.FTP.Enabled != nil && *cfg.FTP.Enabled {
 		ftpAddr := fmt.Sprintf(":%d", cfg.FTP.Port)
-		a.ftpServer = ftp.NewServer(ftpAddr, cfg.FTP.PassivePortRange, cfg.Auth.Username, cfg.Auth.Password, store, db)
+		a.ftpServer = ftp.NewServerWithHash(ftpAddr, cfg.FTP.PassivePortRange, cfg.Auth.Username, cfg.Auth.Password, cfg.Auth.PasswordHash, store, db)
 	}
 
 	// Step 11.5: OpenTelemetry providers. The local API dashboard works without

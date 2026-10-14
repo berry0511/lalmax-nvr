@@ -283,7 +283,7 @@ docker compose logs lalmax-nvr
 
 **FTP 无法连接**
 
-先检查控制端口 `2121` 与被动端口范围 `2122-2140` 是否映射、放行。当前 FTP 仅校验 `auth.password` 明文，而首次初始化会保存哈希并清空明文，因此常规配置下也可能出现登录失败；详见 [FTP 指南](ftp-integration.md)。
+先检查控制端口 `2121` 与被动端口范围 `2122-2140` 是否映射、放行。FTP 使用配置的全局 NVR 账号，支持明文密码或 `password_hash`；FTP 是明文协议，没有 TLS，建议仅向可信网络开放。详见 [FTP 指南](ftp-integration.md)。
 
 **时区不正确**
 

@@ -15,6 +15,7 @@ import (
 	ftpserverlib "github.com/fclairamb/ftpserverlib"
 	"github.com/google/uuid"
 	"github.com/spf13/afero"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/lalmax-pro/lalmax-nvr/internal/model"
 	"github.com/lalmax-pro/lalmax-nvr/internal/storage"
@@ -26,25 +27,34 @@ var logger = slog.Default().With("component", "ftp")
 // It satisfies the ftpserverlib.MainDriver interface for authentication and
 // delegates file operations to clientDriver (afero.Fs + extensions).
 type Server struct {
-	addr       string
-	portRange  string
-	username   string
-	password   string
-	storageMgr *storage.Manager
-	db         storage.RecordingRepository
-	ftpServer  *ftpserverlib.FtpServer
+	addr         string
+	portRange    string
+	username     string
+	password     string
+	passwordHash string
+	storageMgr   *storage.Manager
+	db           storage.RecordingRepository
+	ftpServer    *ftpserverlib.FtpServer
 }
 
 // NewServer creates a new FTP server bound to addr with the given credentials.
 // portRange should be in "start-end" format (e.g. "50000-50100") for passive transfers.
 func NewServer(addr, portRange, username, password string, storageMgr *storage.Manager, db storage.RecordingRepository) *Server {
+	return NewServerWithHash(addr, portRange, username, password, "", storageMgr, db)
+}
+
+// NewServerWithHash creates an FTP server that can authenticate using the
+// configured NVR password hash. When passwordHash is present it takes
+// precedence over password; password is retained for legacy configurations.
+func NewServerWithHash(addr, portRange, username, password, passwordHash string, storageMgr *storage.Manager, db storage.RecordingRepository) *Server {
 	return &Server{
-		addr:       addr,
-		portRange:  portRange,
-		username:   username,
-		password:   password,
-		storageMgr: storageMgr,
-		db:         db,
+		addr:         addr,
+		portRange:    portRange,
+		username:     username,
+		password:     password,
+		passwordHash: passwordHash,
+		storageMgr:   storageMgr,
+		db:           db,
 	}
 }
 
@@ -110,7 +120,14 @@ func (s *Server) AuthUser(cc ftpserverlib.ClientContext, user, pass string) (ftp
 	if user == "" || pass == "" {
 		return nil, fmt.Errorf("ftp: authentication requires username and password")
 	}
-	if user != s.username || pass != s.password {
+	if user != s.username {
+		return nil, fmt.Errorf("ftp: invalid credentials")
+	}
+	if s.passwordHash != "" {
+		if bcrypt.CompareHashAndPassword([]byte(s.passwordHash), []byte(pass)) != nil {
+			return nil, fmt.Errorf("ftp: invalid credentials")
+		}
+	} else if pass != s.password {
 		return nil, fmt.Errorf("ftp: invalid credentials")
 	}
 	cc.SetPath("/")
