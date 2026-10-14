@@ -2,10 +2,15 @@ package gb28181
 
 import (
 	"crypto/md5"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/emiago/sipgo"
@@ -22,6 +27,8 @@ type GB28181API struct {
 	client      *sipgo.Client
 	mediaEngine media.Engine
 	hub         *WSHub
+	digestMu    sync.Mutex
+	digestNonce map[string]time.Time
 }
 
 // NewGB28181API creates a new GB28181API instance.
@@ -33,6 +40,7 @@ func NewGB28181API(cfg *Config, store *DeviceStore, client *sipgo.Client, mediaE
 		client:      client,
 		mediaEngine: mediaEngine,
 		hub:         store.hub,
+		digestNonce: make(map[string]time.Time),
 	}
 }
 
@@ -62,24 +70,19 @@ func (g *GB28181API) handlerRegister(req *sip.Request, tx sip.ServerTransaction)
 	})
 
 	password := g.cfg.Password
-	if password != "" && password != "#" {
-		authHdr := req.GetHeader("Authorization")
-		if authHdr == nil {
-			slog.Info("[SIP] REGISTER - requesting auth", "device_id", deviceID)
-			res := sip.NewResponseFromRequest(req, 401, "Unauthorized", nil)
-			nonce := fmt.Sprintf("%d", time.Now().UnixMicro())
-			res.AppendHeader(sip.NewHeader("WWW-Authenticate",
-				fmt.Sprintf(`Digest realm="%s",qop="auth",nonce="%s"`, g.cfg.GetDomain(), nonce)))
-			tx.Respond(res)
-			return
-		}
-		if !verifyDigestAuth(req, password, g.cfg.GetDomain()) {
-			slog.Warn("[SIP] REGISTER rejected - auth failed", "device_id", deviceID)
-			tx.Respond(sip.NewResponseFromRequest(req, 401, "Unauthorized", nil))
-			return
-		}
-		slog.Info("[SIP] REGISTER auth success", "device_id", deviceID)
+	if strings.TrimSpace(password) == "" || strings.TrimSpace(password) == "#" {
+		slog.Error("[SIP] REGISTER rejected - no GB28181 password configured", "device_id", deviceID)
+		tx.Respond(sip.NewResponseFromRequest(req, 403, "GB28181 authentication is not configured", nil))
+		return
 	}
+	if req.GetHeader("Authorization") == nil || !g.verifyDigestAuth(req, password, g.cfg.GetDomain()) {
+		if req.GetHeader("Authorization") != nil {
+			slog.Warn("[SIP] REGISTER rejected - auth failed", "device_id", deviceID)
+		}
+		g.respondDigestChallenge(req, tx)
+		return
+	}
+	slog.Info("[SIP] REGISTER auth success", "device_id", deviceID)
 
 	expiresHdr := req.GetHeader("Expires")
 	expire := 3600
@@ -157,18 +160,164 @@ func (g *GB28181API) logout(deviceID string) {
 	}
 }
 
-func verifyDigestAuth(req *sip.Request, password, realm string) bool {
+const digestNonceTTL = 5 * time.Minute
+
+func (g *GB28181API) respondDigestChallenge(req *sip.Request, tx sip.ServerTransaction) {
+	nonceBytes := make([]byte, 24)
+	if _, err := rand.Read(nonceBytes); err != nil {
+		slog.Error("[SIP] failed to create digest nonce", "error", err)
+		tx.Respond(sip.NewResponseFromRequest(req, 500, "Server Error", nil))
+		return
+	}
+	nonce := base64.RawURLEncoding.EncodeToString(nonceBytes)
+	g.digestMu.Lock()
+	now := time.Now()
+	for existing, expiresAt := range g.digestNonce {
+		if !now.Before(expiresAt) {
+			delete(g.digestNonce, existing)
+		}
+	}
+	if g.digestNonce == nil {
+		g.digestNonce = make(map[string]time.Time)
+	}
+	if len(g.digestNonce) >= 8192 {
+		var oldest string
+		var earliest time.Time
+		for existing, expiresAt := range g.digestNonce {
+			if oldest == "" || expiresAt.Before(earliest) {
+				oldest, earliest = existing, expiresAt
+			}
+		}
+		delete(g.digestNonce, oldest)
+	}
+	g.digestNonce[nonce] = now.Add(digestNonceTTL)
+	g.digestMu.Unlock()
+
+	res := sip.NewResponseFromRequest(req, 401, "Unauthorized", nil)
+	res.AppendHeader(sip.NewHeader("WWW-Authenticate", fmt.Sprintf(
+		`Digest realm="%s",qop="auth",algorithm=MD5,nonce="%s"`, g.cfg.GetDomain(), nonce)))
+	tx.Respond(res)
+}
+
+func (g *GB28181API) verifyDigestAuth(req *sip.Request, password, realm string) bool {
 	authHdr := req.GetHeader("Authorization")
 	if authHdr == nil {
 		return false
 	}
-	authValue := authHdr.Value()
-	_ = authValue
-	_ = password
-	_ = realm
+	params, ok := parseDigestAuthorization(authHdr.Value())
+	if !ok {
+		return false
+	}
+	username := params["username"]
+	nonce := params["nonce"]
+	uri := params["uri"]
+	response := params["response"]
+	qop := strings.ToLower(params["qop"])
+	nc := params["nc"]
+	cnonce := params["cnonce"]
+	if username == "" || username != req.From().Address.User ||
+		params["realm"] != realm || nonce == "" || uri != req.Recipient.String() ||
+		!strings.EqualFold(params["algorithm"], "MD5") || qop != "auth" || cnonce == "" ||
+		len(nc) != 8 || len(response) != md5.Size*2 {
+		return false
+	}
+	nonceCount, err := strconv.ParseUint(nc, 16, 32)
+	if err != nil || nonceCount == 0 {
+		return false
+	}
+	if !g.consumeDigestNonce(nonce) {
+		return false
+	}
+	if _, err := hex.DecodeString(response); err != nil {
+		return false
+	}
+	ha1 := md5sum(username + ":" + realm + ":" + password)
+	ha2 := md5sum(req.Method.String() + ":" + uri)
+	want := md5sum(ha1 + ":" + nonce + ":" + nc + ":" + cnonce + ":" + qop + ":" + ha2)
+	gotBytes, _ := hex.DecodeString(response)
+	wantBytes, _ := hex.DecodeString(want)
+	if subtle.ConstantTimeCompare(gotBytes, wantBytes) != 1 {
+		return false
+	}
 	return true
 }
 
+func parseDigestAuthorization(header string) (map[string]string, bool) {
+	header = strings.TrimSpace(header)
+	scheme, rest, ok := strings.Cut(header, " ")
+	if !ok || !strings.EqualFold(scheme, "Digest") {
+		return nil, false
+	}
+	params := make(map[string]string)
+	for rest = strings.TrimSpace(rest); rest != ""; {
+		key, value, found := strings.Cut(rest, "=")
+		if !found {
+			return nil, false
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "" {
+			return nil, false
+		}
+		rest = strings.TrimLeft(value, " \t")
+		var parsed string
+		if strings.HasPrefix(rest, `"`) {
+			rest = rest[1:]
+			var b strings.Builder
+			closed := false
+			for i := 0; i < len(rest); i++ {
+				switch rest[i] {
+				case '\\':
+					i++
+					if i >= len(rest) {
+						return nil, false
+					}
+					b.WriteByte(rest[i])
+				case '"':
+					parsed = b.String()
+					rest = rest[i+1:]
+					closed = true
+					i = len(rest)
+				default:
+					b.WriteByte(rest[i])
+				}
+			}
+			if !closed {
+				return nil, false
+			}
+		} else {
+			if parsed, rest, _ = strings.Cut(rest, ","); rest == "" {
+				// The final parameter has no trailing comma.
+			} else {
+				rest = "," + rest
+			}
+			parsed = strings.TrimSpace(parsed)
+		}
+		if _, duplicate := params[key]; duplicate {
+			return nil, false
+		}
+		params[key] = parsed
+		rest = strings.TrimLeft(rest, " \t")
+		if rest == "" {
+			break
+		}
+		if rest[0] != ',' {
+			return nil, false
+		}
+		rest = strings.TrimSpace(rest[1:])
+	}
+	return params, true
+}
+
+func (g *GB28181API) consumeDigestNonce(nonce string) bool {
+	g.digestMu.Lock()
+	defer g.digestMu.Unlock()
+	expiresAt, ok := g.digestNonce[nonce]
+	delete(g.digestNonce, nonce)
+	return ok && time.Now().Before(expiresAt)
+}
+
+// calcDigestResponse computes the legacy no-qop response used when this NVR
+// registers with an upstream GB28181 platform.
 func calcDigestResponse(username, realm, password, method, uri, nonce string) string {
 	ha1 := md5sum(username + ":" + realm + ":" + password)
 	ha2 := md5sum(method + ":" + uri)

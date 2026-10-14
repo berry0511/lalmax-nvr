@@ -213,7 +213,7 @@ webdav:
 #   enabled: true
 #   port: 5060                          # SIP listen port (default: 5060)
 #   id: "34020000002000000001"          # 20-digit platform SIP ID (required)
-#   password: ""                        # Global device registration password (optional)
+#   password: "replace-with-a-private-secret" # Required for device registration digest auth
 #   media_ip: "192.168.1.100"           # IP for SDP media reception (required, your server's IP)
 #   host: ""                            # SIP listen host (optional, auto-detect from media_ip)
 #   standard_version: "2016"             # GB28181 standard version: 2016 or 2022

@@ -139,9 +139,11 @@ gb28181:
   port: 5060                  # SIP port
   media_ip: "192.168.1.100"   # IP devices push PS/RTP to (must be reachable)
   media_port: 30000           # RTP port; 0 = per-session random
-  password: "12345678"        # Device REGISTER password
+  password: "replace-with-a-private-secret" # Required device REGISTER Digest password
   standard_version: "2016"    # 2016 or 2022
 ```
+
+When GB28181 is enabled, `password` is required; an empty value fails startup validation. REGISTER uses SIP Digest `qop=auth` and verifies the device ID, realm, request URI, and response digest. Random nonces expire after five minutes and cannot be replayed after successful use. The password is encrypted at rest when a configuration encryption key is enabled.
 
 ### 2. Add Device
 

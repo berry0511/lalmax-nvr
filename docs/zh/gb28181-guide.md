@@ -139,9 +139,11 @@ gb28181:
   port: 5060                  # SIP 端口
   media_ip: "192.168.1.100"   # 设备推 PS/RTP 的目标 IP（设备必须能访问）
   media_port: 30000           # RTP 端口；0 表示每路随机
-  password: "12345678"        # 设备 REGISTER 密码
+  password: "replace-with-a-private-secret" # 必填；设备 REGISTER Digest 密码
   standard_version: "2016"    # 2016 或 2022
 ```
+
+启用 GB28181 时必须配置非空 `password`；留空会导致服务启动校验失败。REGISTER 使用 SIP Digest `qop=auth` 校验设备 ID、realm、请求 URI 和响应摘要，随机 nonce 有效期为 5 分钟且成功后不可重放。启用配置加密密钥后，此密码会加密保存。
 
 ### 2. 添加设备
 
