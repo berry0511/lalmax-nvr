@@ -458,11 +458,12 @@ type SRTConfig struct {
 }
 
 // RTMPConfig configures the RTMP ingest server.
-// RTMP is served by lalmax on its default port (:11935).
+// RTMP is served by lalmax on its default port (:11935). Each stream ID must
+// have a publish token in StreamKeys; publishers pass it as stream_key.
 type RTMPConfig struct {
 	Enabled    *bool             `yaml:"enabled"` // default false
 	Port       int               `yaml:"port,omitempty"`
-	StreamKeys map[string]string `yaml:"stream_keys"` // camera_id → stream_key
+	StreamKeys map[string]string `yaml:"stream_keys"` // stream_id → publish token
 }
 
 // WHIPConfig configures WebRTC-HTTP ingest (WHIP).
@@ -659,6 +660,7 @@ func Save(path string, cfg *Config) error {
 	saveCfg := *cfg
 	saveCfg.Cameras = nil
 	saveCfg.VoIP = cfg.VoIP.Clone()
+	saveCfg.RTMP.StreamKeys = cloneStringMap(cfg.RTMP.StreamKeys)
 	if cfg.Storage.MigrationTarget != nil {
 		target := *cfg.Storage.MigrationTarget
 		saveCfg.Storage.MigrationTarget = &target

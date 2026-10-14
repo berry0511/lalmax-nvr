@@ -179,14 +179,13 @@ webdav:
 
 # RTMP ingest — receive pushed streams from cameras or encoders
 # RTMP is served by the embedded media engine on port 11935 by default when enabled.
-# stream_keys maps camera_id -> stream_key for push URL resolution.
-# Push URL format: rtmp://<host>:11935/live/<stream_key>
-# You can also push directly with camera ID as stream key: rtmp://<host>:11935/live/<camera_id>
+# stream_keys maps stream_id -> required publish token.
+# Push URL format: rtmp://<host>:11935/live/<stream_id>?stream_key=<token>
 # rtmp:
 #   enabled: true
 #   port: 11935
 #   stream_keys:
-#     front-door: "my-stream-key"
+#     front-door: "generate-a-long-random-token"
 
 # SRT ingest — receive MPEG-TS pushed streams from cameras or encoders
 # SRT is served by lalmax on port 19000 (managed by the media engine).

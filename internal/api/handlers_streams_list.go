@@ -674,6 +674,26 @@ func (h *Handler) externalIngestProtocols() []string {
 func (h *Handler) buildIngestURLs(ctx context.Context, streamID, appName string) []streamPlayURL {
 	out := make([]streamPlayURL, 0, 3)
 	for _, protocol := range h.externalIngestProtocols() {
+		if protocol == "rtmp" {
+			streamKey := ""
+			if h.config != nil {
+				streamKey = h.config.RTMP.StreamKeys[streamID]
+			}
+			if streamKey == "" {
+				continue
+			}
+			urls := h.buildStreamURLs(ctx, streamID, appName, []string{protocol})
+			for i := range urls {
+				if u, err := url.Parse(urls[i].URL); err == nil {
+					q := u.Query()
+					q.Set("stream_key", streamKey)
+					u.RawQuery = q.Encode()
+					urls[i].URL = u.String()
+				}
+			}
+			out = append(out, urls...)
+			continue
+		}
 		if protocol == "srt" {
 			if u := h.buildSRTIngestURL(ctx, streamID); u != "" {
 				out = append(out, streamPlayURL{Protocol: "srt", URL: u, Backend: "lalmax"})

@@ -611,6 +611,7 @@ func NewApp(cfg *config.Config, configPath string) (*App, error) {
 
 	// Create ban manager before media engine (provides IAuthentication)
 	a.banMgr = ban.NewManager(db)
+	a.banMgr.SetRTMPStreamKeys(cfg.RTMP.StreamKeys)
 
 	// Create media engine with ban manager's auth for proactive rejection
 	engine, err := newMediaEngine(cfg, lalmaxserver.WithAuthentication(a.banMgr))
@@ -1418,17 +1419,8 @@ func (a *App) Start() error {
 
 		// Wire RTMP ingest via lalmax
 		if a.cfg.RTMP.Enabled != nil && *a.cfg.RTMP.Enabled {
-			keyToCamera := media.BuildReverseMap(a.cfg.RTMP.StreamKeys)
 			resolver := func(streamName string) (string, bool) {
-				if camID, ok := keyToCamera[streamName]; ok {
-					return camID, true
-				}
-				for _, cam := range a.cfg.Cameras {
-					if cam.ID == streamName {
-						return cam.ID, true
-					}
-				}
-				return "", false
+				return streamName, true
 			}
 
 			a.rtmpIngest = media.NewRTMPIngestHandler(a.mediaEngine, resolver, nil, nil)
