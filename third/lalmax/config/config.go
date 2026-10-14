@@ -33,12 +33,13 @@ type SrtConfig struct {
 }
 
 type JT1078Config struct {
-	Enable           bool   `json:"enable"`               // jt1078 收流使能
-	Addr             string `json:"addr"`                 // TCP 监听地址，默认 :1078
-	UDPEnable        *bool  `json:"udp_enable,omitempty"` // UDP 收流；缺省时跟随 enable
-	UDPAddr          string `json:"udp_addr,omitempty"`   // UDP 监听地址，空则与 addr 相同
-	UDPIdleTimeoutMs int    `json:"udp_idle_timeout_ms"`  // UDP 流空闲超时，默认 15000
-	PhoneLen         int    `json:"phone_len,omitempty"`  // 0 自动，6=2016，10=2019
+	Enable           bool     `json:"enable"`                    // jt1078 收流使能
+	Addr             string   `json:"addr"`                      // TCP 监听地址，默认 :1078
+	UDPEnable        *bool    `json:"udp_enable,omitempty"`      // UDP 收流；缺省时跟随 enable
+	UDPAddr          string   `json:"udp_addr,omitempty"`        // UDP 监听地址，空则与 addr 相同
+	UDPIdleTimeoutMs int      `json:"udp_idle_timeout_ms"`       // UDP 流空闲超时，默认 15000
+	PhoneLen         int      `json:"phone_len,omitempty"`       // 0 自动，6=2016，10=2019
+	AllowedStreams   []string `json:"allowed_streams,omitempty"` // 静态允许的 SIM_channel 流 ID
 }
 
 // FixedPhoneLen returns 6 or 10 when the operator pinned a terminal-phone width.
@@ -283,6 +284,7 @@ func (c *Config) Clone() *Config {
 	cfg.RtcConfig.ICEHostNATToIPs = append([]string(nil), cfg.RtcConfig.ICEHostNATToIPs...)
 	cfg.HttpConfig.CtrlAuthWhitelist.IPs = append([]string(nil), cfg.HttpConfig.CtrlAuthWhitelist.IPs...)
 	cfg.HttpConfig.CtrlAuthWhitelist.Secrets = append([]string(nil), cfg.HttpConfig.CtrlAuthWhitelist.Secrets...)
+	cfg.JT1078Config.AllowedStreams = append([]string(nil), cfg.JT1078Config.AllowedStreams...)
 	if cfg.JT1078Config.UDPEnable != nil {
 		enabled := *cfg.JT1078Config.UDPEnable
 		cfg.JT1078Config.UDPEnable = &enabled

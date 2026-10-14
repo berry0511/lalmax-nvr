@@ -687,7 +687,8 @@ Configure it in `lalmax.conf.json`:
       "udp_enable": true,
       "udp_addr": ":1078",
       "udp_idle_timeout_ms": 15000,
-      "phone_len": 0
+      "phone_len": 0,
+      "allowed_streams": ["1003_1"]
     }
   }
 }
@@ -710,7 +711,9 @@ jt808:
   # ftp_password: ""        # optional plaintext; required on upload if only password_hash is set
 ```
 
-After registration and authentication, the following routes require an authenticated caller; all POST routes additionally require the super_admin role. Playback URLs stay on the existing HLS / FLV / WebRTC paths, for example `http://host:18080/live/1003_1.flv`. Once JT808 is enabled, a `{SIM}_{channel}` may publish on `:1078` only after a live or playback command has granted it.
+JT1078 publishing uses an exact `{SIM}_{channel}` allowlist. When JT808 is enabled, streams granted by a live or playback command are also allowed. With JT808 disabled, only IDs in `allowed_streams` can publish; an empty list denies all JT1078 publishers. This setting is in `lalmax.conf.json`.
+
+After registration and authentication, the following routes require an authenticated caller; all POST routes additionally require the super_admin role. Playback URLs stay on the existing HLS / FLV / WebRTC paths, for example `http://host:18080/live/1003_1.flv`.
 
 - `GET /api/jt808/terminals` lists terminals.
 - `POST /api/jt808/play` sends 0x9101. `data_type`: 0 audio+video, 1 video, 2 intercom, 3 listen, 4 broadcast. `stream`: 0 main, 1 sub.

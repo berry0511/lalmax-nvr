@@ -302,6 +302,7 @@ JT/T 1078 单端口 TCP/UDP 收流。终端连入后按包头 `SIM + 逻辑通�
 - `udp_addr`：UDP 监听地址，空则与 TCP 相同
 - `udp_idle_timeout_ms`：UDP 流空闲回收时间，默认 15000 毫秒
 - `phone_len`：终端手机号 BCD 宽度。0 自动识别 2016（6 字节）和 2019（10 字节），6 或 10 固定一种
+- `allowed_streams`：静态允许发布的 `{SIM}_{channel}` 流 ID。空数组拒绝所有静态来源；NVR 启用 JT808 时，动态获得播放授权的流也允许发布
 
 示例：
 

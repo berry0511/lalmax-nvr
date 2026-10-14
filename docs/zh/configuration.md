@@ -687,7 +687,8 @@ JT/T 1078 由内嵌 lalmax 在 **TCP 与 UDP `:1078`** 收流，按包头 `SIM +
       "udp_enable": true,
       "udp_addr": ":1078",
       "udp_idle_timeout_ms": 15000,
-      "phone_len": 0
+      "phone_len": 0,
+      "allowed_streams": ["1003_1"]
     }
   }
 }
@@ -710,7 +711,9 @@ jt808:
   # ftp_password: ""        # 可选明文；只配了 password_hash 时上传请求必须自带密码
 ```
 
-终端注册/鉴权后，已鉴权接口如下；所有 POST 接口还要求 super_admin 操作权限。播放地址走现有 HLS / FLV / WebRTC，例如 `http://host:18080/live/1003_1.flv`。启用 JT808 后，只有先下发直播或回放的 `{SIM}_{通道}` 才允许从 `:1078` 推上来。
+JT1078 发布采用精确匹配的 `{SIM}_{通道}` 白名单。启用 JT808 时，已通过直播或回放指令授权的流也允许发布；关闭 JT808 时，只允许 `allowed_streams` 中配置的 ID，空白名单会拒绝所有 JT1078 发布。该字段配置在 `lalmax.conf.json`。
+
+终端注册/鉴权后，已鉴权接口如下；所有 POST 接口还要求 super_admin 操作权限。播放地址走现有 HLS / FLV / WebRTC，例如 `http://host:18080/live/1003_1.flv`。
 
 - `GET /api/jt808/terminals` 列出终端。
 - `POST /api/jt808/play` 下发 0x9101。`data_type`：0 音视频、1 视频、2 对讲、3 监听、4 广播。`stream`：0 主码流、1 子码流。

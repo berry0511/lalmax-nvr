@@ -56,6 +56,39 @@ type StreamAuthorizer interface {
 	AllowStream(name string) bool
 }
 
+// StreamAuthorizerFunc adapts a function to StreamAuthorizer.
+type StreamAuthorizerFunc func(name string) bool
+
+func (f StreamAuthorizerFunc) AllowStream(name string) bool { return f(name) }
+
+// NewAllowlistAuthorizer creates an exact-match stream allowlist. An empty
+// list denies every stream.
+func NewAllowlistAuthorizer(names []string) StreamAuthorizer {
+	allowed := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if name != "" {
+			allowed[name] = struct{}{}
+		}
+	}
+	return StreamAuthorizerFunc(func(name string) bool {
+		_, ok := allowed[name]
+		return ok
+	})
+}
+
+// AnyAuthorizer permits a stream when at least one configured authorizer
+// permits it. With no authorizers, it denies all streams.
+func AnyAuthorizer(authorizers ...StreamAuthorizer) StreamAuthorizer {
+	return StreamAuthorizerFunc(func(name string) bool {
+		for _, authorizer := range authorizers {
+			if authorizer != nil && authorizer.AllowStream(name) {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 type Server struct {
 	addr       string
 	udpAddr    string
