@@ -9,7 +9,7 @@ ftp:
   passive_port_range: "2122-2140"
 ```
 
-FTP 实现是**明文 FTP**，没有 TLS。认证只接受配置的全局 `auth.username` 和 `auth.password`，不支持匿名访问。当前启动流程通常会把明文密码转换成 `password_hash` 并清空 `auth.password`，而 FTP 尚不能校验哈希密码；因此常规初始化后的 FTP 登录可能失败。这是当前实现限制，不能通过 Web UI 账号或只填 `password_hash` 解决。
+FTP 实现是**明文 FTP**，没有 TLS。认证只接受配置的全局 `auth.username` 和 NVR 密码（支持 `auth.password` 明文和 `auth.password_hash` 哈希），不支持匿名访问。常规初始化会将密码哈希后保存；FTP 会校验该哈希，因此不需要在配置中保留明文密码。FTP 不使用 Web UI 的多用户账号。
 
 FTP 文件系统支持列目录、下载及写入、删除等操作，因此应只向可信网络开放。通过 FTP 上传录像时，目标路径必须是 `/{camera_id}/{filename}`。服务端会将文件改名为 `{camera_id}_{timestamp_ms}.{ext}` 并写入该摄像头目录，传输结束后登记一条录像记录。其他文件操作直接作用于存储根目录，不会自动维护所有相关数据库状态。
 
