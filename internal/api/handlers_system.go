@@ -847,6 +847,25 @@ func (h *Handler) handleUpdateStreamingSettings(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if body.RTSPServer != nil {
+		candidate := h.config.Media
+		if body.RTSPServer.AuthEnabled != nil {
+			candidate.RTSPAuthEnable = *body.RTSPServer.AuthEnabled
+		}
+		if body.RTSPServer.AuthMethod != nil {
+			candidate.RTSPAuthMethod = *body.RTSPServer.AuthMethod
+		}
+		if body.RTSPServer.Username != nil {
+			candidate.RTSPUsername = *body.RTSPServer.Username
+		}
+		if body.RTSPServer.Password != nil {
+			candidate.RTSPPassword = *body.RTSPServer.Password
+		}
+		if err := candidate.ValidateRTSPAuth(); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 
 	if body.DefaultProtocol != nil {
 		h.config.Streaming.DefaultProtocol = *body.DefaultProtocol

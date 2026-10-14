@@ -442,6 +442,9 @@ type App struct {
 // correct order. It opens the database, runs migrations, creates storage
 // and all managers but does NOT start any goroutines — call Start() for that.
 func NewApp(cfg *config.Config, configPath string) (*App, error) {
+	if err := cfg.Media.ValidateRTSPAuth(); err != nil {
+		return nil, fmt.Errorf("invalid media config: %w", err)
+	}
 	a := &App{
 		cfg:        cfg,
 		configPath: configPath,

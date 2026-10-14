@@ -597,6 +597,10 @@ HLS playback is independent of recording pulls: disabling `hls.enabled` or using
 - **Type**: integer
 - **Description**: External lal protocol ports used to build playback URLs in `media.mode: http`. Defaults: RTMP **11935**, RTSP **15544**, HTTP-FLV/HLS-TS **18080**. In embedded mode, set the RTMP ingest port with `rtmp.port`; the embedded engine uses its default RTSP and HTTP listen ports. Set `media.lalmax_public_url` to a hostname clients can reach.
 
+### RTSP server authentication
+
+`media.rtsp_auth_enable` enables authentication for RTSP playback. To use it, configure both `media.rtsp_username` and `media.rtsp_password`; `media.rtsp_auth_method` is `0` for Basic or `1` for Digest. The password is encrypted in the saved config when a configuration encryption key is enabled.
+
 ## DLNA configuration
 
 The optional LAN MediaServer is disabled by default. `dlna.port` defaults to **8200**, separate from `server.listen`; `include_live` and `include_recordings` default to true. Use `interface` to select a network interface and `allowed_cidrs` to restrict clients. `max_browse_count` defaults to **200**, and `gop_cache` to **1**. The `max_media_viewers` setting exists but is not currently enforced. See the [DLNA guide](dlna.md).

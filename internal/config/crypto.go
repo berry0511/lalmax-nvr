@@ -276,6 +276,9 @@ func decryptConfig(cfg *Config, key []byte) {
 	if v, err := Decrypt(cfg.Auth.Password, key); err == nil {
 		cfg.Auth.Password = v
 	} // if decrypt fails, leave as-is (might be plaintext)
+	if v, err := Decrypt(cfg.Media.RTSPPassword, key); err == nil {
+		cfg.Media.RTSPPassword = v
+	}
 
 	// MQTT password
 	if v, err := Decrypt(cfg.MQTT.Password, key); err == nil {
@@ -354,6 +357,12 @@ func encryptConfig(cfg *Config, key []byte) []string {
 		if v, err := Encrypt(cfg.Auth.Password, key); err == nil {
 			cfg.Auth.Password = v
 			encrypted = append(encrypted, "auth.password")
+		}
+	}
+	if cfg.Media.RTSPPassword != "" && !IsEncrypted(cfg.Media.RTSPPassword) {
+		if v, err := Encrypt(cfg.Media.RTSPPassword, key); err == nil {
+			cfg.Media.RTSPPassword = v
+			encrypted = append(encrypted, "media.rtsp_password")
 		}
 	}
 
@@ -454,6 +463,9 @@ func SensitiveFieldPaths(cfg *Config) []string {
 	if cfg.Auth.Password != "" && !IsEncrypted(cfg.Auth.Password) {
 		fields = append(fields, "auth.password")
 	}
+	if cfg.Media.RTSPPassword != "" && !IsEncrypted(cfg.Media.RTSPPassword) {
+		fields = append(fields, "media.rtsp_password")
+	}
 	if cfg.MQTT.Password != "" && !IsEncrypted(cfg.MQTT.Password) {
 		fields = append(fields, "mqtt.password")
 	}
@@ -513,6 +525,7 @@ type sensitiveSnapshot struct {
 	SRTStreamKeys        map[string]string
 	WHIPPublishTokens    map[string]string
 	AuthPassword         string
+	RTSPPassword         string
 	MQTTPassword         string
 	XiaomiUserID         string
 	XiaomiToken          string
@@ -528,6 +541,7 @@ func snapshotSensitive(cfg *Config) sensitiveSnapshot {
 		SRTStreamKeys:        cloneStringMap(cfg.SRT.StreamKeys),
 		WHIPPublishTokens:    cloneStringMap(cfg.WHIP.PublishTokens),
 		AuthPassword:         cfg.Auth.Password,
+		RTSPPassword:         cfg.Media.RTSPPassword,
 		MQTTPassword:         cfg.MQTT.Password,
 		XiaomiUserID:         cfg.Xiaomi.UserID,
 		XiaomiToken:          cfg.Xiaomi.Token,
@@ -553,6 +567,7 @@ func (s sensitiveSnapshot) restore(cfg *Config) {
 		}
 	}
 	cfg.Auth.Password = s.AuthPassword
+	cfg.Media.RTSPPassword = s.RTSPPassword
 	cfg.RTMP.StreamKeys = cloneStringMap(s.RTMPStreamKeys)
 	cfg.SRT.StreamKeys = cloneStringMap(s.SRTStreamKeys)
 	cfg.WHIP.PublishTokens = cloneStringMap(s.WHIPPublishTokens)
