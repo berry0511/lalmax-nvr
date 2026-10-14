@@ -824,7 +824,7 @@ metrics_auth:
   # password_hash: "$2a$10$..."
 ```
 
-> 当配置了 `username` 和 `password`（或 `password_hash`）时，`/metrics` 端点需要 Basic 认证。未配置时，`/metrics` 保持公开访问。
+> 配置了 `username` 和 `password`（或 `password_hash`）时，`/metrics` 使用这组 Basic Auth 凭据；未配置时使用 NVR API 凭据。`/metrics` 不再公开访问。
 
 ## AI 检测配置
 

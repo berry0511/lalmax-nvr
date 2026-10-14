@@ -1056,7 +1056,8 @@ func (a *App) buildRouter() http.Handler {
 	r.Use(authmw.SecurityHeaders)
 	r.Use(authmw.COOPHeaders)
 
-	// Prometheus metrics — independent auth when configured, public otherwise
+	// Use dedicated metrics credentials when configured; otherwise require the
+	// same credentials as the NVR API.
 	if cfg.MetricsAuth.IsConfigured() {
 		metricsAuthMW, _ := authmw.NewAuthMiddleware(authmw.AuthProvider{
 			GetUsername: func() string { return cfg.MetricsAuth.Username },
@@ -1064,7 +1065,7 @@ func (a *App) buildRouter() http.Handler {
 		}, cfg.MetricsAuth.Password)
 		r.With(metricsAuthMW).Handle("/metrics", promhttp.HandlerFor(a.metrics.Registry, promhttp.HandlerOpts{ErrorHandling: promhttp.ContinueOnError}))
 	} else {
-		r.Handle("/metrics", promhttp.HandlerFor(a.metrics.Registry, promhttp.HandlerOpts{ErrorHandling: promhttp.ContinueOnError}))
+		r.With(a.authMW).Handle("/metrics", promhttp.HandlerFor(a.metrics.Registry, promhttp.HandlerOpts{ErrorHandling: promhttp.ContinueOnError}))
 	}
 
 	r.Get("/docs", func(w http.ResponseWriter, r *http.Request) {

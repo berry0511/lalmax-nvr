@@ -209,6 +209,14 @@ func (h *Handler) handleCameraUptimeStats(w http.ResponseWriter, r *http.Request
 // --- Public endpoints ---
 
 func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
+	setupRequired := h.config != nil && h.config.Auth.PasswordHash == "" && h.config.Auth.Password == ""
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":         "ok",
+		"setup_required": setupRequired,
+	})
+}
+
+func (h *Handler) handleHealthDetails(w http.ResponseWriter, r *http.Request) {
 	resp := HealthResponse{Checks: make(map[string]HealthCheck)}
 	hasWarning, hasError := false, false
 
@@ -218,7 +226,7 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		err := h.db.Ping(ctx)
 		if err != nil {
-			resp.Checks["database"] = HealthCheck{Status: "error", Message: err.Error()}
+			resp.Checks["database"] = HealthCheck{Status: "error", Message: "database check failed"}
 			hasError = true
 		} else {
 			resp.Checks["database"] = HealthCheck{Status: "ok"}
@@ -232,14 +240,14 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if h.store != nil {
 		total, used, err := h.store.GetDiskUsage()
 		if err != nil {
-			resp.Checks["storage"] = HealthCheck{Status: "error", Message: err.Error()}
+			resp.Checks["storage"] = HealthCheck{Status: "error", Message: "storage check failed"}
 			hasError = true
 		} else {
 			pct := 0
 			if total > 0 {
 				pct = int(float64(used) / float64(total) * 100)
 			}
-			msg := fmt.Sprintf("%d%% used (%d / %d bytes)", pct, used, total)
+			msg := fmt.Sprintf("%d%% used", pct)
 			if pct > 95 {
 				resp.Checks["storage"] = HealthCheck{Status: "error", Message: msg}
 				hasError = true
@@ -258,10 +266,10 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// Goroutine check
 	numGoroutines := runtime.NumGoroutine()
 	if numGoroutines > 1000 {
-		resp.Checks["goroutines"] = HealthCheck{Status: "error", Message: fmt.Sprintf("%d goroutines (threshold: 1000)", numGoroutines)}
+		resp.Checks["goroutines"] = HealthCheck{Status: "error", Message: "goroutine count above threshold"}
 		hasError = true
 	} else {
-		resp.Checks["goroutines"] = HealthCheck{Status: "ok", Message: fmt.Sprintf("%d goroutines", numGoroutines)}
+		resp.Checks["goroutines"] = HealthCheck{Status: "ok"}
 	}
 
 	// Camera health aggregation (influences overall status)
@@ -375,27 +383,20 @@ func (h *Handler) cameraHealthWithConfiguredCameras(r *http.Request) map[string]
 }
 
 func (h *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
-	checks := make(map[string]HealthCheck)
-
 	// Database must be ok
 	allOK := true
 	if h.db == nil {
-		checks["database"] = HealthCheck{Status: "error", Message: "database not configured"}
 		allOK = false
 	} else {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
 		if err := h.db.Ping(ctx); err != nil {
-			checks["database"] = HealthCheck{Status: "error", Message: err.Error()}
 			allOK = false
-		} else {
-			checks["database"] = HealthCheck{Status: "ok"}
 		}
 	}
 
 	// Storage must be < 95%
 	if h.store == nil {
-		checks["storage"] = HealthCheck{Status: "error", Message: "storage not configured"}
 		allOK = false
 	} else {
 		var total, used int64
@@ -406,7 +407,6 @@ func (h *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 			total, used, err = h.store.GetDiskUsage()
 		}
 		if err != nil {
-			checks["storage"] = HealthCheck{Status: "error", Message: err.Error()}
 			allOK = false
 		} else {
 			pct := 0
@@ -414,10 +414,7 @@ func (h *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 				pct = int(float64(used) / float64(total) * 100)
 			}
 			if pct >= 95 {
-				checks["storage"] = HealthCheck{Status: "error", Message: fmt.Sprintf("%d%% used (threshold: 95%%)", pct)}
 				allOK = false
-			} else {
-				checks["storage"] = HealthCheck{Status: "ok"}
 			}
 		}
 	}
@@ -425,16 +422,13 @@ func (h *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	// Goroutines must be < 5000
 	numGoroutines := runtime.NumGoroutine()
 	if numGoroutines >= 5000 {
-		checks["goroutines"] = HealthCheck{Status: "error", Message: fmt.Sprintf("%d goroutines (threshold: 5000)", numGoroutines)}
 		allOK = false
-	} else {
-		checks["goroutines"] = HealthCheck{Status: "ok"}
 	}
 
 	if allOK {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	} else {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not ready", "checks": checks})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready"})
 	}
 }
 

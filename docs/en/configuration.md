@@ -824,7 +824,7 @@ metrics_auth:
   # password_hash: "$2a$10$..."
 ```
 
-> When `username` and `password` (or `password_hash`) are set, the `/metrics` endpoint requires Basic Auth. When empty, `/metrics` remains public.
+> When `username` and `password` (or `password_hash`) are set, `/metrics` uses those Basic Auth credentials. When empty, it requires the NVR API credentials. `/metrics` is never public.
 
 ## AI Detection Configuration
 

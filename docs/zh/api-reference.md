@@ -2,7 +2,7 @@
 
 默认 Web/API 地址为 `http://localhost:9090`，可通过 `server.listen` 修改。运行中的 NVR 在 `/docs/` 提供可浏览的 [OpenAPI 规范](../../internal/docsportal/openapi.yaml)。以下列出常用接口；完整路由以 [`internal/api/handler.go`](../../internal/api/handler.go) 的注册代码为准。
 
-受保护接口需要登录凭据；以下示例使用 HTTP Basic Auth。修改、删除和部分诊断接口还需要操作权限。健康检查与就绪检查为公开接口。
+受保护接口需要登录凭据；以下示例使用 HTTP Basic Auth。修改、删除和部分诊断接口还需要操作权限。`/api/health` 与 `/api/readyz` 公开，但只返回状态；详细健康数据和单摄像头健康状态需要登录。
 
 ## 健康与日志
 
@@ -10,6 +10,8 @@
 |------|------|------|
 | GET | `/api/health` | NVR 健康状态 |
 | GET | `/api/readyz` | 就绪状态 |
+| GET | `/api/health/details` | NVR 与摄像头详细健康数据；需要登录 |
+| GET | `/api/health/cameras` | 单摄像头健康状态；需要登录 |
 | GET | `/api/capabilities` | 功能能力 |
 | GET | `/api/service-logs` | 服务日志；需要操作权限 |
 

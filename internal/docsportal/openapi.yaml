@@ -28,8 +28,8 @@ tags:
       Authentication. Validates username/password with HTTP Basic Auth.
   - name: Health
     description: |
-      健康与就绪探测，无需登录。
-      Liveness and readiness probes. No authentication.
+      `/api/health` 和 `/api/readyz` 是公开探针；详细健康信息需要登录。
+      `/api/health` and `/api/readyz` are public probes; detailed health data requires authentication.
   - name: Cameras
     description: |
       摄像头增删改查、启停录像、云台与地图坐标。
@@ -262,35 +262,46 @@ paths:
     get:
       tags: [Health]
       security: []
-      summary: 健康检查 · Health check
+      summary: 存活探针 · Liveness probe
       description: |
-        进程健康总览：数据库、磁盘、协程数、摄像头聚合状态。即使 `status` 为 `degraded` / `unhealthy` 仍返回 HTTP 200。
-        Overall process health (database, disk, goroutines, camera rollup). HTTP 200 even when status is `degraded` or `unhealthy`.
-      operationId: getHealth
+        公开的最小状态接口，仅用于判断进程是否存活以及是否需要首次设置，不暴露组件或摄像头详情。
+        Public minimal status for liveness and first-run setup detection; it does not expose subsystem or camera details.
+      operationId: getHealthProbe
       responses:
         "200":
-          description: 系统健康 / System health
+          description: 进程存活 / Process is alive
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthProbe"
+              example: { status: ok, setup_required: false }
+  /api/health/details:
+    get:
+      tags: [Health]
+      summary: 详细健康信息 · Detailed health
+      description: 需要登录。返回组件检查和摄像头健康详情。 / Authenticated endpoint with subsystem and camera health details.
+      operationId: getHealthDetails
+      responses:
+        "200":
+          description: 详细健康信息 / Detailed health
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Health"
-              example:
-                status: ok
-                checks:
-                  database: { status: ok }
-                  storage: { status: ok, message: "12% used (12884901888 / 107374182400 bytes)" }
-                  goroutines: { status: ok, message: "42 goroutines" }
-                uptime: 2h34m15s
-                start_time: "2026-09-11T08:00:00Z"
-                setup_required: false
-                cameras:
-                  total: 2
-                  recording: 1
-                  reconnecting: 0
-                  error: 0
-                  offline: 1
-                  details:
-                    - { id: front-door, name: Front Door, status: recording }
+  /api/health/cameras:
+    get:
+      tags: [Health]
+      summary: 摄像头健康状态 · Camera health
+      description: 需要登录。 / Authenticated endpoint.
+      operationId: getCameraHealthMap
+      responses:
+        "200":
+          description: 摄像头健康映射 / Camera health map
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
   /api/readyz:
     get:
       tags: [Health]
@@ -1973,11 +1984,22 @@ components:
         message:
           type: string
           description: 补充说明，如磁盘占用百分比 / Extra detail such as disk usage
+    HealthProbe:
+      title: 存活探针 · Liveness probe
+      type: object
+      required: [status, setup_required]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        setup_required:
+          type: boolean
+          description: 是否仍需首次设置 / Whether first-run setup is required
     Health:
       title: 系统健康 · Health
       description: |
-        `/api/health` 响应。`status` 为总评；`checks` 为分项。
-        `/api/health` response. `status` is the rollup; `checks` are per-subsystem.
+        `/api/health/details` 响应。`status` 为总评；`checks` 为分项。
+        `/api/health/details` response. `status` is the rollup; `checks` are per-subsystem.
       type: object
       required: [status, checks, uptime]
       properties:
