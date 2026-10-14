@@ -1414,9 +1414,6 @@ func (cfg *Config) ApplyDefaults() {
 	if cfg.GB28181.ID == "" {
 		cfg.GB28181.ID = "34020000002000000001"
 	}
-	if cfg.GB28181.Password == "" {
-		cfg.GB28181.Password = "12345678"
-	}
 	if cfg.GB28181.StandardVersion == "" {
 		cfg.GB28181.StandardVersion = "2016"
 	}

@@ -288,6 +288,9 @@ func decryptConfig(cfg *Config, key []byte) {
 	if v, err := Decrypt(cfg.Xiaomi.Token, key); err == nil {
 		cfg.Xiaomi.Token = v
 	}
+	if v, err := Decrypt(cfg.GB28181.Password, key); err == nil {
+		cfg.GB28181.Password = v
+	}
 
 	// Camera passwords
 	for i := range cfg.Cameras {
@@ -375,6 +378,12 @@ func encryptConfig(cfg *Config, key []byte) []string {
 			encrypted = append(encrypted, "xiaomi.token")
 		}
 	}
+	if cfg.GB28181.Password != "" && !IsEncrypted(cfg.GB28181.Password) {
+		if v, err := Encrypt(cfg.GB28181.Password, key); err == nil {
+			cfg.GB28181.Password = v
+			encrypted = append(encrypted, "gb28181.password")
+		}
+	}
 
 	// Camera passwords
 	for i := range cfg.Cameras {
@@ -454,6 +463,9 @@ func SensitiveFieldPaths(cfg *Config) []string {
 	if cfg.Xiaomi.Token != "" && !IsEncrypted(cfg.Xiaomi.Token) {
 		fields = append(fields, "xiaomi.token")
 	}
+	if cfg.GB28181.Password != "" && !IsEncrypted(cfg.GB28181.Password) {
+		fields = append(fields, "gb28181.password")
+	}
 	for i := range cfg.Cameras {
 		if cfg.Cameras[i].Password != "" && !IsEncrypted(cfg.Cameras[i].Password) {
 			fields = append(fields, fmt.Sprintf("cameras[%d].password", i))
@@ -504,6 +516,7 @@ type sensitiveSnapshot struct {
 	MQTTPassword         string
 	XiaomiUserID         string
 	XiaomiToken          string
+	GB28181Password      string
 	CameraPasswords      []string
 	MetricsAuthPassword  string
 	AutoDiscoverPassword string
@@ -518,6 +531,7 @@ func snapshotSensitive(cfg *Config) sensitiveSnapshot {
 		MQTTPassword:         cfg.MQTT.Password,
 		XiaomiUserID:         cfg.Xiaomi.UserID,
 		XiaomiToken:          cfg.Xiaomi.Token,
+		GB28181Password:      cfg.GB28181.Password,
 		CameraPasswords:      make([]string, len(cfg.Cameras)),
 		VoIPPasswords:        make([]string, len(cfg.VoIP.Users)),
 		MetricsAuthPassword:  cfg.MetricsAuth.Password,
@@ -545,6 +559,7 @@ func (s sensitiveSnapshot) restore(cfg *Config) {
 	cfg.MQTT.Password = s.MQTTPassword
 	cfg.Xiaomi.UserID = s.XiaomiUserID
 	cfg.Xiaomi.Token = s.XiaomiToken
+	cfg.GB28181.Password = s.GB28181Password
 	for i := range cfg.Cameras {
 		if i < len(s.CameraPasswords) {
 			cfg.Cameras[i].Password = s.CameraPasswords[i]

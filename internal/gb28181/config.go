@@ -44,11 +44,19 @@ func (c *Config) Validate() error {
 	if len(c.ID) < 10 || len(c.ID) > 20 {
 		return fmt.Errorf("gb28181.id must be 10-20 digits, got %d", len(c.ID))
 	}
+	for _, digit := range c.ID {
+		if digit < '0' || digit > '9' {
+			return fmt.Errorf("gb28181.id must contain only digits")
+		}
+	}
 	if c.Port <= 0 || c.Port > 65535 {
 		return fmt.Errorf("gb28181.port must be 1-65535, got %d", c.Port)
 	}
 	if c.MediaIP == "" {
 		return fmt.Errorf("gb28181.media_ip is required")
+	}
+	if strings.TrimSpace(c.Password) == "" || strings.TrimSpace(c.Password) == "#" {
+		return fmt.Errorf("gb28181.password is required when GB28181 is enabled")
 	}
 	if version := c.GBVersion(); version == GBVersionUnknown {
 		return fmt.Errorf("gb28181.standard_version must be 2016 or 2022, got %s", c.StandardVersion)
