@@ -19,9 +19,9 @@ var logger = slog.Default().With("component", "ban")
 // Manager enforces stream bans via lal's IAuthentication interface.
 // All protocols (RTMP, RTSP, SRT, WHIP, GB28181) are checked uniformly.
 type Manager struct {
-	db             storage.StreamBanRepository
-	kickFunc       func(ctx context.Context, sessionID string) error
-	rtmpStreamKeys map[string]string
+	db            storage.StreamBanRepository
+	kickFunc      func(ctx context.Context, sessionID string) error
+	publishTokens map[string]map[string]string
 }
 
 func NewManager(db storage.StreamBanRepository) *Manager {
@@ -35,36 +35,63 @@ func (m *Manager) SetKickFunc(fn func(ctx context.Context, sessionID string) err
 
 // SetRTMPStreamKeys installs the required publish token for each RTMP stream ID.
 func (m *Manager) SetRTMPStreamKeys(keys map[string]string) {
-	m.rtmpStreamKeys = make(map[string]string, len(keys))
-	for streamID, token := range keys {
-		m.rtmpStreamKeys[streamID] = token
+	m.SetPublishTokens("rtmp", keys)
+}
+
+// SetPublishTokens installs per-stream publish credentials for one protocol.
+func (m *Manager) SetPublishTokens(protocol string, keys map[string]string) {
+	if m.publishTokens == nil {
+		m.publishTokens = make(map[string]map[string]string)
 	}
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	cloned := make(map[string]string, len(keys))
+	for streamID, token := range keys {
+		cloned[streamID] = token
+	}
+	m.publishTokens[protocol] = cloned
 }
 
 // OnPubStart checks if the stream is banned. Returns error to reject the session.
 func (m *Manager) OnPubStart(info base.PubStartInfo) error {
 	if strings.EqualFold(info.Protocol, base.SessionProtocolRtmpStr) {
-		want, ok := m.rtmpStreamKeys[info.StreamName]
-		if !ok || want == "" {
-			return fmt.Errorf("RTMP publishing is not configured for stream %q", info.StreamName)
-		}
 		params, err := url.ParseQuery(info.UrlParam)
-		if err != nil || !secureTokenEqual(params.Get("stream_key"), want) {
-			return fmt.Errorf("invalid RTMP publish token for stream %q", info.StreamName)
+		if err != nil {
+			return fmt.Errorf("invalid RTMP publish parameters for stream %q", info.StreamName)
 		}
+		return m.AuthorizePublish("rtmp", info.StreamName, params.Get("stream_key"))
 	}
-	ban, err := m.db.GetStreamBan(context.Background(), info.StreamName)
+	return m.rejectBannedStream(info.StreamName, info.Protocol, false)
+}
+
+// AuthorizePublish checks a protocol token and rejects banned stream IDs.
+func (m *Manager) AuthorizePublish(protocol, streamID, token string) error {
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	want := m.publishTokens[protocol][streamID]
+	if want == "" {
+		return fmt.Errorf("%s publishing is not configured for stream %q", protocol, streamID)
+	}
+	if !secureTokenEqual(token, want) {
+		return fmt.Errorf("invalid %s publish token for stream %q", protocol, streamID)
+	}
+	return m.rejectBannedStream(streamID, protocol, true)
+}
+
+func (m *Manager) rejectBannedStream(streamID, protocol string, failClosed bool) error {
+	ban, err := m.db.GetStreamBan(context.Background(), streamID)
 	if err != nil {
-		logger.Error("failed to check ban", "stream", info.StreamName, "error", err)
-		return nil // don't block on DB errors
+		logger.Error("failed to check ban", "stream", streamID, "error", err)
+		if !failClosed {
+			return nil
+		}
+		return fmt.Errorf("failed to authorize %s stream %q", protocol, streamID)
 	}
 	if ban != nil {
 		reason := ban.Reason
 		if reason == "" {
 			reason = "banned"
 		}
-		logger.Info("rejected banned stream", "stream", info.StreamName, "protocol", info.Protocol, "reason", reason)
-		return fmt.Errorf("stream %q is banned: %s", info.StreamName, reason)
+		logger.Info("rejected banned stream", "stream", streamID, "protocol", protocol, "reason", reason)
+		return fmt.Errorf("stream %q is banned: %s", streamID, reason)
 	}
 	return nil
 }

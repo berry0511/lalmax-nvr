@@ -664,9 +664,11 @@ RTMP 发布必须在 URL 查询参数中携带对应的 `stream_key`，例如 `r
 srt:
   enabled: false         # 默认 false；启用后内嵌媒体引擎默认监听 19000
   port: 19000            # 可选，SRT 推流端口
+  stream_keys:           # 每个 stream_id 必须配置一个推流令牌
+    cam1: "generate-a-long-random-token"
 ```
 
-> **推流格式**：SRT 推流应使用 streamid 格式：`#!::h=<camera_id>,m=publish`
+SRT 发布应在 streamid 的 `u` 字段携带对应令牌：`#!::h=<stream_id>,m=publish,u=<token>`。未配置令牌或校验失败时会在接受发布连接前拒绝。流管理 API 只为已配置令牌的流生成 SRT 地址。配置加密功能启用且密钥可用时，令牌会加密保存。
 
 ## JT1078 推流配置
 
@@ -736,9 +738,11 @@ whip:
   enabled: true          # 默认 true；关闭只隐藏接入 URL，不影响 WHEP 播放
   stream_keys:           # camera_id → streamid 映射（可选）
     cam1: "obs-front"
+  publish_tokens:        # stream_id → publish token
+    cam1: "generate-a-long-random-token"
 ```
 
-> **推流地址**：`http://<host>:12090/webrtc/whip?streamid=<camera_id>`（OBS → 设置 → 推流 → WHIP）。ICE 复用端口 **4888/udp**（及 TCP）需对推流端可达。Docker 请映射 `12090` 与 `4888`。`media.lalmax_public_url` 必须是对外 hostname。
+WHIP 发布地址携带 `stream_key` 查询参数，或使用 `Authorization: Bearer <token>` 请求头；API 返回的地址会附带令牌。仅接受为该 stream ID 配置的令牌，鉴权在创建媒体会话前执行。配置加密功能启用且密钥可用时，令牌会加密保存。ICE 复用端口 **4888/udp**（及 TCP）需对推流端可达。Docker 请映射 `12090` 与 `4888`。`media.lalmax_public_url` 必须是对外 hostname。
 
 ## 健康监控配置
 

@@ -63,7 +63,8 @@ type LalMaxServer struct {
 type LalMaxServerOption func(*lalMaxServerOptions)
 
 type lalMaxServerOptions struct {
-	authentication logic.IAuthentication
+	authentication      logic.IAuthentication
+	publisherAuthorizer func(protocol, streamID, token string) error
 }
 
 // WithAuthentication injects a custom IAuthentication into the underlying lal server.
@@ -71,6 +72,14 @@ type lalMaxServerOptions struct {
 func WithAuthentication(auth logic.IAuthentication) LalMaxServerOption {
 	return func(o *lalMaxServerOptions) {
 		o.authentication = auth
+	}
+}
+
+// WithPublisherAuthorizer installs per-stream authorization for SRT and WHIP,
+// whose custom publishers do not pass through RTMP/RTSP session callbacks.
+func WithPublisherAuthorizer(authorizer func(protocol, streamID, token string) error) LalMaxServerOption {
+	return func(o *lalMaxServerOptions) {
+		o.publisherAuthorizer = authorizer
 	}
 }
 
@@ -147,6 +156,11 @@ func NewLalMaxServer(conf *config.Config, opts ...LalMaxServerOption) (*LalMaxSe
 			option.Latency = 300
 			option.PeerLatency = 300
 		})
+		if serverOpts.publisherAuthorizer != nil {
+			maxsvr.srtsvr.SetPublisherAuthorizer(func(streamID, token string) error {
+				return serverOpts.publisherAuthorizer("srt", streamID, token)
+			})
+		}
 	}
 
 	if conf.JT1078Config.Enable {
@@ -166,6 +180,11 @@ func NewLalMaxServer(conf *config.Config, opts ...LalMaxServerOption) (*LalMaxSe
 		if err != nil {
 			nazalog.Error("create rtc svr failed, err:", err)
 			return nil, err
+		}
+		if serverOpts.publisherAuthorizer != nil {
+			maxsvr.rtcsvr.SetPublisherAuthorizer(func(streamID, token string) error {
+				return serverOpts.publisherAuthorizer("whip", streamID, token)
+			})
 		}
 		maxsvr.rtcsvr.SetStreamNotFoundFn(func(app, stream, schema string) {
 			notifyHub.NotifyStreamNotFound(ZlmOnStreamNotFoundPayload{

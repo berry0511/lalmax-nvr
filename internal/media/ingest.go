@@ -316,6 +316,21 @@ func BuildReverseMap(streamKeys map[string]string) map[string]string {
 	return reverse
 }
 
+// SRTStreamName extracts the published media stream ID from an SRT stream ID.
+// Plain stream IDs remain unchanged for clients that do not use the SRT format.
+func SRTStreamName(streamID string) string {
+	if !strings.HasPrefix(streamID, "#!::") {
+		return streamID
+	}
+	for _, field := range strings.Split(strings.TrimPrefix(streamID, "#!::"), ",") {
+		key, value, ok := strings.Cut(field, "=")
+		if ok && (key == "h" || key == "r") && value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func ingestProtocolMatch(want, got string) bool {
 	got = strings.ToLower(strings.TrimSpace(got))
 	if got == "" {

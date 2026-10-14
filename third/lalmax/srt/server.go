@@ -2,7 +2,6 @@ package srt
 
 import (
 	"context"
-	"strings"
 	"sync"
 	"time"
 
@@ -13,13 +12,22 @@ import (
 )
 
 type SrtServer struct {
-	addr      string
-	lalServer logic.ILalServer
-	srtOpt    SrtOption
+	addr       string
+	lalServer  logic.ILalServer
+	srtOpt     SrtOption
+	authorizer func(streamID, token string) error
 
 	mu       sync.Mutex
 	listener srt.Listener
 }
+
+// SetPublisherAuthorizer installs an admission check for SRT publishers.
+func (s *SrtServer) SetPublisherAuthorizer(authorizer func(streamID, token string) error) {
+	s.mu.Lock()
+	s.authorizer = authorizer
+	s.mu.Unlock()
+}
+
 type SrtOption struct {
 	Latency           int
 	RecvLatency       int
@@ -104,6 +112,17 @@ func (s *SrtServer) Run(ctx context.Context) {
 		var info StreamInfo
 		conn, mode, err := srtlistener.Accept(func(req srt.ConnRequest) srt.ConnType {
 			info = getStreamInfo(req.StreamId())
+			if info.Mode == srt.PUBLISH {
+				s.mu.Lock()
+				authorizer := s.authorizer
+				s.mu.Unlock()
+				if authorizer != nil {
+					if err := authorizer(info.StreamName, info.Token); err != nil {
+						nazalog.Warnf("reject unauthorized SRT publisher, stream:%s, error:%v", info.StreamName, err)
+						info.Mode = srt.REJECT
+					}
+				}
+			}
 			return info.Mode
 		})
 
@@ -162,6 +181,7 @@ func (s *SrtServer) Remove(host string, ss logic.ICustomizePubSessionContext) {
 
 type StreamInfo struct {
 	StreamName string
+	Token      string
 	Mode       srt.ConnType
 }
 
@@ -170,22 +190,20 @@ func getStreamInfo(streamid string) StreamInfo {
 		Mode: srt.REJECT,
 	}
 
-	s := strings.TrimLeft(streamid, "#!::")
-	values := strings.Split(s, ",")
-	for _, v := range values {
-		ss := strings.Split(v, "=")
-		name := ss[0]
-		switch name {
-		case "h":
-			info.StreamName = ss[1]
-		case "m":
-			switch ss[1] {
-			case "publish":
-				info.Mode = srt.PUBLISH
-			case "request":
-				info.Mode = srt.SUBSCRIBE
-			}
-		}
+	parsed, err := parseStreamID(streamid)
+	if err != nil {
+		return info
+	}
+	info.StreamName = parsed.Host
+	if info.StreamName == "" {
+		info.StreamName = parsed.Resource
+	}
+	info.Token = parsed.User
+	switch parsed.Mode {
+	case "publish":
+		info.Mode = srt.PUBLISH
+	case "request":
+		info.Mode = srt.SUBSCRIBE
 	}
 
 	return info

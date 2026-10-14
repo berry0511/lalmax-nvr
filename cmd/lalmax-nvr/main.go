@@ -611,10 +611,15 @@ func NewApp(cfg *config.Config, configPath string) (*App, error) {
 
 	// Create ban manager before media engine (provides IAuthentication)
 	a.banMgr = ban.NewManager(db)
-	a.banMgr.SetRTMPStreamKeys(cfg.RTMP.StreamKeys)
+	a.banMgr.SetPublishTokens("rtmp", cfg.RTMP.StreamKeys)
+	a.banMgr.SetPublishTokens("srt", cfg.SRT.StreamKeys)
+	a.banMgr.SetPublishTokens("whip", cfg.WHIP.PublishTokens)
 
 	// Create media engine with ban manager's auth for proactive rejection
-	engine, err := newMediaEngine(cfg, lalmaxserver.WithAuthentication(a.banMgr))
+	engine, err := newMediaEngine(cfg,
+		lalmaxserver.WithAuthentication(a.banMgr),
+		lalmaxserver.WithPublisherAuthorizer(a.banMgr.AuthorizePublish),
+	)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("media engine: %w", err)
@@ -1432,8 +1437,9 @@ func (a *App) Start() error {
 		// Wire SRT ingest via lalmax
 		if a.cfg.SRT.Enabled != nil && *a.cfg.SRT.Enabled {
 			srtResolver := func(streamName string) (string, bool) {
+				streamName = media.SRTStreamName(streamName)
 				for _, cam := range a.cfg.Cameras {
-					if cam.ID == streamName {
+					if cam.ID == streamName || config.IngestStreamID(cam) == streamName {
 						return cam.ID, true
 					}
 				}
