@@ -2,8 +2,11 @@ package ban
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"log/slog"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/lalmax-pro/lalmax-nvr/internal/storage"
@@ -16,8 +19,9 @@ var logger = slog.Default().With("component", "ban")
 // Manager enforces stream bans via lal's IAuthentication interface.
 // All protocols (RTMP, RTSP, SRT, WHIP, GB28181) are checked uniformly.
 type Manager struct {
-	db       storage.StreamBanRepository
-	kickFunc func(ctx context.Context, sessionID string) error
+	db             storage.StreamBanRepository
+	kickFunc       func(ctx context.Context, sessionID string) error
+	rtmpStreamKeys map[string]string
 }
 
 func NewManager(db storage.StreamBanRepository) *Manager {
@@ -29,8 +33,26 @@ func (m *Manager) SetKickFunc(fn func(ctx context.Context, sessionID string) err
 	m.kickFunc = fn
 }
 
+// SetRTMPStreamKeys installs the required publish token for each RTMP stream ID.
+func (m *Manager) SetRTMPStreamKeys(keys map[string]string) {
+	m.rtmpStreamKeys = make(map[string]string, len(keys))
+	for streamID, token := range keys {
+		m.rtmpStreamKeys[streamID] = token
+	}
+}
+
 // OnPubStart checks if the stream is banned. Returns error to reject the session.
 func (m *Manager) OnPubStart(info base.PubStartInfo) error {
+	if strings.EqualFold(info.Protocol, base.SessionProtocolRtmpStr) {
+		want, ok := m.rtmpStreamKeys[info.StreamName]
+		if !ok || want == "" {
+			return fmt.Errorf("RTMP publishing is not configured for stream %q", info.StreamName)
+		}
+		params, err := url.ParseQuery(info.UrlParam)
+		if err != nil || !secureTokenEqual(params.Get("stream_key"), want) {
+			return fmt.Errorf("invalid RTMP publish token for stream %q", info.StreamName)
+		}
+	}
 	ban, err := m.db.GetStreamBan(context.Background(), info.StreamName)
 	if err != nil {
 		logger.Error("failed to check ban", "stream", info.StreamName, "error", err)
@@ -45,6 +67,10 @@ func (m *Manager) OnPubStart(info base.PubStartInfo) error {
 		return fmt.Errorf("stream %q is banned: %s", info.StreamName, reason)
 	}
 	return nil
+}
+
+func secureTokenEqual(got, want string) bool {
+	return got != "" && len(got) == len(want) && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 // OnSubStart allows all subscriptions.

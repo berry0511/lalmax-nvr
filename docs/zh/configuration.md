@@ -652,9 +652,11 @@ websocket:
 rtmp:
   enabled: false         # 默认 false；启用后内嵌媒体引擎默认监听 11935
   port: 11935            # 可选，RTMP 推流端口
-  stream_keys:           # camera_id → stream_key 映射
-    cam1: "your_secret_key"
+  stream_keys:           # 每个 stream_id 必须配置一个推流令牌
+    cam1: "generate-a-long-random-token"
 ```
+
+RTMP 发布必须在 URL 查询参数中携带对应的 `stream_key`，例如 `rtmp://host:11935/live/cam1?stream_key=<token>`。未配置令牌或令牌不匹配的发布会在建立媒体流前被拒绝。流管理 API 只为已配置令牌的流返回 RTMP 推流地址。配置加密功能启用且密钥可用时，令牌会加密保存；RTMP 本身不提供传输加密，请在可信网络或加密隧道中使用。
 
 ## SRT 推流配置
 

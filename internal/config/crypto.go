@@ -295,6 +295,11 @@ func decryptConfig(cfg *Config, key []byte) {
 			cfg.Cameras[i].Password = v
 		}
 	}
+	for streamID, token := range cfg.RTMP.StreamKeys {
+		if v, err := Decrypt(token, key); err == nil {
+			cfg.RTMP.StreamKeys[streamID] = v
+		}
+	}
 	for i := range cfg.VoIP.Users {
 		if v, err := Decrypt(cfg.VoIP.Users[i].Password, key); err == nil {
 			cfg.VoIP.Users[i].Password = v
@@ -370,6 +375,14 @@ func encryptConfig(cfg *Config, key []byte) []string {
 			}
 		}
 	}
+	for streamID, token := range cfg.RTMP.StreamKeys {
+		if token != "" && !IsEncrypted(token) {
+			if v, err := Encrypt(token, key); err == nil {
+				cfg.RTMP.StreamKeys[streamID] = v
+				encrypted = append(encrypted, fmt.Sprintf("rtmp.stream_keys[%s]", streamID))
+			}
+		}
+	}
 	for i := range cfg.VoIP.Users {
 		if password := cfg.VoIP.Users[i].Password; password != "" && !IsEncrypted(password) {
 			if v, err := Encrypt(password, key); err == nil {
@@ -420,6 +433,11 @@ func SensitiveFieldPaths(cfg *Config) []string {
 			fields = append(fields, fmt.Sprintf("cameras[%d].password", i))
 		}
 	}
+	for streamID, token := range cfg.RTMP.StreamKeys {
+		if token != "" && !IsEncrypted(token) {
+			fields = append(fields, fmt.Sprintf("rtmp.stream_keys[%s]", streamID))
+		}
+	}
 	if cfg.MetricsAuth.Password != "" && !IsEncrypted(cfg.MetricsAuth.Password) {
 		fields = append(fields, "metrics_auth.password")
 	}
@@ -443,6 +461,7 @@ func SensitiveFieldPaths(cfg *Config) []string {
 // so they can be restored after an encrypted save.
 type sensitiveSnapshot struct {
 	VoIPPasswords        []string
+	RTMPStreamKeys       map[string]string
 	AuthPassword         string
 	MQTTPassword         string
 	XiaomiUserID         string
@@ -454,6 +473,7 @@ type sensitiveSnapshot struct {
 
 func snapshotSensitive(cfg *Config) sensitiveSnapshot {
 	s := sensitiveSnapshot{
+		RTMPStreamKeys:       cloneStringMap(cfg.RTMP.StreamKeys),
 		AuthPassword:         cfg.Auth.Password,
 		MQTTPassword:         cfg.MQTT.Password,
 		XiaomiUserID:         cfg.Xiaomi.UserID,
@@ -479,6 +499,7 @@ func (s sensitiveSnapshot) restore(cfg *Config) {
 		}
 	}
 	cfg.Auth.Password = s.AuthPassword
+	cfg.RTMP.StreamKeys = cloneStringMap(s.RTMPStreamKeys)
 	cfg.MQTT.Password = s.MQTTPassword
 	cfg.Xiaomi.UserID = s.XiaomiUserID
 	cfg.Xiaomi.Token = s.XiaomiToken
@@ -489,4 +510,15 @@ func (s sensitiveSnapshot) restore(cfg *Config) {
 	}
 	cfg.MetricsAuth.Password = s.MetricsAuthPassword
 	cfg.AutoDiscover.DefaultPassword = s.AutoDiscoverPassword
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
 }
