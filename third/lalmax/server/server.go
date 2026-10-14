@@ -33,22 +33,23 @@ import (
 )
 
 type LalMaxServer struct {
-	lalsvr      logic.ILalServer
-	conf        *config.Config
-	stats       *maxlogic.StatAggregator
-	notifyHub   *HttpNotify
-	srtsvr      *srt.SrtServer
-	jt1078svr   *jt1078.Server
-	rtcsvr      *rtc.RtcServer
-	router      *gin.Engine
-	routerTls   *gin.Engine
-	httpServer  *http.Server
-	httpsServer *http.Server
-	httpfmp4svr *httpfmp4.HttpFmp4Server
-	hlssvr      *hls.HlsServer
-	rtpPubMgr   *rtppub.Manager
-	udptsMgr    *udpts.Manager
-	recorder    *ffmpegRecorder
+	lalsvr          logic.ILalServer
+	conf            *config.Config
+	stats           *maxlogic.StatAggregator
+	notifyHub       *HttpNotify
+	srtsvr          *srt.SrtServer
+	jt1078svr       *jt1078.Server
+	jt1078Allowlist jt1078.StreamAuthorizer
+	rtcsvr          *rtc.RtcServer
+	router          *gin.Engine
+	routerTls       *gin.Engine
+	httpServer      *http.Server
+	httpsServer     *http.Server
+	httpfmp4svr     *httpfmp4.HttpFmp4Server
+	hlssvr          *hls.HlsServer
+	rtpPubMgr       *rtppub.Manager
+	udptsMgr        *udpts.Manager
+	recorder        *ffmpegRecorder
 
 	configMu sync.RWMutex
 	mu       sync.Mutex
@@ -94,13 +95,14 @@ func (s *LalMaxServer) DelCustomizePubSession(ctx logic.ICustomizePubSessionCont
 	s.lalsvr.DelCustomizePubSession(ctx)
 }
 
-// SetJT1078Authorizer attaches the NVR allowlist. A nil server or a nil
-// authorizer leaves JT1078 open, which is the standalone lalmax behavior.
+// SetJT1078Authorizer attaches dynamic JT808 grants while retaining the
+// configured static allowlist. An empty static allowlist and nil dynamic
+// authorizer deny all JT1078 streams.
 func (s *LalMaxServer) SetJT1078Authorizer(a jt1078.StreamAuthorizer) {
 	if s == nil || s.jt1078svr == nil {
 		return
 	}
-	s.jt1078svr.SetAuthorizer(a)
+	s.jt1078svr.SetAuthorizer(jt1078.AnyAuthorizer(s.jt1078Allowlist, a))
 }
 
 // PushJT1078 writes one packet on the terminal's inbound TCP media connection.
@@ -172,6 +174,8 @@ func NewLalMaxServer(conf *config.Config, opts ...LalMaxServerOption) (*LalMaxSe
 			opts = append(opts, jt1078.WithPhoneLen(n))
 		}
 		maxsvr.jt1078svr = jt1078.NewServer(conf.JT1078Config.Addr, lalsvr, opts...)
+		maxsvr.jt1078Allowlist = jt1078.NewAllowlistAuthorizer(conf.JT1078Config.AllowedStreams)
+		maxsvr.jt1078svr.SetAuthorizer(maxsvr.jt1078Allowlist)
 	}
 
 	if conf.RtcConfig.Enable {
