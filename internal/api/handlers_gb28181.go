@@ -72,17 +72,13 @@ func (h *Handler) ensureGB28181Camera(ctx context.Context, deviceID, channelID, 
 	if h.db == nil {
 		return fmt.Errorf("database unavailable")
 	}
-	if h.camMgr != nil {
-		if cam := h.camMgr.GetCameraConfig(streamID); cam != nil && cam.Enabled {
-			return nil
-		}
-	}
+
 	existing, err := h.db.GetCamera(ctx, streamID)
 	if err != nil {
 		return err
 	}
 	if existing != nil && !existing.Archived {
-		return nil
+		return h.db.SetCameraStream(ctx, streamID, streamID)
 	}
 
 	cameraURL := ""
@@ -99,12 +95,24 @@ func (h *Handler) ensureGB28181Camera(ctx context.Context, deviceID, channelID, 
 	if cameraURL == "" {
 		cameraURL = fmt.Sprintf("rtsp://127.0.0.1:5544/live/%s", streamID)
 	}
+
 	if existing != nil && existing.Archived {
 		if err := h.db.UnarchiveCameraDB(ctx, streamID); err != nil {
 			return err
 		}
 	}
-	return h.db.UpsertCamera(ctx, streamID, fmt.Sprintf("GB28181 %s", channelID), "gb28181", "h264", cameraURL, "", "", true, "", "", "")
+
+	if err := h.db.UpsertCamera(
+		ctx,
+		streamID,
+		fmt.Sprintf("GB28181 %s", channelID),
+		"gb28181", "h264", cameraURL,
+		"", "", true, "", "", "",
+	); err != nil {
+		return err
+	}
+
+	return h.db.SetCameraStream(ctx, streamID, streamID)
 }
 
 func (h *Handler) handleGB28181StopPlay(w http.ResponseWriter, r *http.Request) {

@@ -105,6 +105,7 @@ func (g *GB28181API) handlerRegister(req *sip.Request, tx sip.ServerTransaction)
 func (g *GB28181API) login(req *sip.Request, deviceID string) {
 	slog.Info("device online", "device_id", deviceID)
 	address := req.Source()
+	transport := strings.ToUpper(req.Transport())
 	wasOnline := false
 	if dev, ok := g.store.Load(deviceID); ok {
 		wasOnline = dev.IsOnline
@@ -114,6 +115,7 @@ func (g *GB28181API) login(req *sip.Request, deviceID string) {
 		d.LastRegisterAt = time.Now()
 		d.LastKeepaliveAt = time.Now()
 		d.Address = address
+		d.Transport = transport
 	})
 	// Persist to database (upsert ensures device exists even on first registration)
 	if dev, ok := g.store.Load(deviceID); ok {
@@ -208,6 +210,20 @@ func (g *GB28181API) handlerMessage(req *sip.Request, tx sip.ServerTransaction) 
 	deviceID := req.From().Address.User
 	source := req.Source()
 	body := req.Body()
+
+	// Refresh the runtime transport and address from an authenticated,
+	// known device's incoming SIP signaling.
+	// Do not create device records from unsolicited MESSAGE requests.
+	if dev, ok := g.store.Load(deviceID); ok && dev.IsOnline {
+		transport := strings.ToUpper(req.Transport())
+
+		if transport == "TCP" || transport == "UDP" {
+			_ = g.store.Change(deviceID, func(d *Device) {
+				d.Transport = transport
+				d.Address = source
+			})
+		}
+	}
 
 	slog.Info("[SIP] MESSAGE received",
 		"device_id", deviceID,

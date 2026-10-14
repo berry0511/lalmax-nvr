@@ -23,9 +23,10 @@ import (
 const lalErrorCodeGroupNotFound = 1001
 
 type LalmaxHTTPConfig struct {
-	BaseURL    string
-	PublicURL  string
-	HTTPClient *http.Client
+	BaseURL           string
+	PublicURL         string
+	HTTPClient        *http.Client
+	InternalAuthToken string // NVR 内部控制接口认证
 	// Lal protocol ports (for lal-backed protocols like RTMP, RTSP, HTTP-FLV)
 	RTMPPort int
 	RTSPPort int
@@ -33,9 +34,10 @@ type LalmaxHTTPConfig struct {
 }
 
 type LalmaxHTTP struct {
-	baseURL   *url.URL
-	publicURL *url.URL
-	client    *http.Client
+	baseURL           *url.URL
+	publicURL         *url.URL
+	client            *http.Client
+	internalAuthToken string
 	// Lal protocol ports
 	rtmpPort int
 	rtspPort int
@@ -76,13 +78,20 @@ func NewLalmaxHTTP(cfg LalmaxHTTPConfig) (*LalmaxHTTP, error) {
 		httpPort = config.DefaultLalHTTPPort
 	}
 	return &LalmaxHTTP{
-		baseURL:   baseURL,
-		publicURL: publicURL,
-		client:    client,
-		rtmpPort:  rtmpPort,
-		rtspPort:  rtspPort,
-		httpPort:  httpPort,
+		baseURL:           baseURL,
+		publicURL:         publicURL,
+		client:            client,
+		internalAuthToken: cfg.InternalAuthToken,
+		rtmpPort:          rtmpPort,
+		rtspPort:          rtspPort,
+		httpPort:          httpPort,
 	}, nil
+}
+
+func (e *LalmaxHTTP) setInternalAuth(req *http.Request) {
+	if e.internalAuthToken != "" {
+		req.Header.Set("X-Lalmax-Internal-Token", e.internalAuthToken)
+	}
 }
 
 func (e *LalmaxHTTP) Start(ctx context.Context) error    { return e.Ready(ctx) }
@@ -397,6 +406,9 @@ func (e *LalmaxHTTP) SubscribeEvents(ctx context.Context, filter EventFilter) (<
 	if err != nil {
 		return nil, err
 	}
+
+	e.setInternalAuth(req)
+
 	// Use a client with no timeout for SSE connections (long-lived)
 	sseClient := &http.Client{Timeout: 0}
 	resp, err := sseClient.Do(req)
@@ -445,6 +457,7 @@ func (e *LalmaxHTTP) doJSON(req *http.Request, out any) (retErr error) {
 	ctx, span := observability.StartHTTPClientSpan(req.Context(), req)
 	defer func() { observability.EndBusinessSpan(span, retErr) }()
 	req = req.WithContext(ctx)
+	e.setInternalAuth(req)
 	resp, err := e.client.Do(req)
 	if err != nil {
 		return err
