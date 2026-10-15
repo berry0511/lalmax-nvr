@@ -211,20 +211,6 @@ func (g *GB28181API) handlerMessage(req *sip.Request, tx sip.ServerTransaction) 
 	source := req.Source()
 	body := req.Body()
 
-	// Refresh the runtime transport and address from an authenticated,
-	// known device's incoming SIP signaling.
-	// Do not create device records from unsolicited MESSAGE requests.
-	if dev, ok := g.store.Load(deviceID); ok && dev.IsOnline {
-		transport := strings.ToUpper(req.Transport())
-
-		if transport == "TCP" || transport == "UDP" {
-			_ = g.store.Change(deviceID, func(d *Device) {
-				d.Transport = transport
-				d.Address = source
-			})
-		}
-	}
-
 	slog.Info("[SIP] MESSAGE received",
 		"device_id", deviceID,
 		"source", source,

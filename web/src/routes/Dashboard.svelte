@@ -1,7 +1,19 @@
 <script lang="ts">
   import { onDestroy, onMount, setContext } from 'svelte';
-  import { getDashboardCameras, getCredentials, listProtocols, DEFAULT_PROTOCOLS, buildProtocolsMap, normalizeProtocol, getProtocolCapabilities, apiRequest, subscribeNvrEvents, streamMediaURL, listStreams } from '$lib/api';
-  import type { NvrEvent } from '$lib/api';
+  import {
+    getDashboardCameras,
+    getCredentials,
+    listProtocols,
+    DEFAULT_PROTOCOLS,
+    buildProtocolsMap,
+    normalizeProtocol,
+    getProtocolCapabilities,
+    apiRequest,
+    subscribeNvrEvents,
+    streamMediaURL,
+    listStreams,
+    playGB28181Stream,
+  } from '$lib/api';  import type { NvrEvent } from '$lib/api';
   import type { Camera, ProtocolInfo, StreamInfo } from '$lib/api';
   import { t } from '$lib/i18n';
   import { showToast } from '$lib/toast';
@@ -53,7 +65,15 @@
   let dashboardDisposed = false;
   onDestroy(() => {
     dashboardDisposed = true;
-    if (streamStatusTimer !== undefined) window.clearInterval(streamStatusTimer);
+
+    if (streamStatusTimer !== undefined) {
+      window.clearInterval(streamStatusTimer);
+    }
+
+    for (const timer of gbPlayTimers.values()) {
+      clearTimeout(timer);
+    }
+    gbPlayTimers.clear();
   });
 
   interface WallSource {
@@ -111,6 +131,141 @@
     [...new Set(slotAssignments.filter((id): id is string => !!id))]
   );
   let hasAnyAssignment = $derived(slotAssignments.some(id => !!id));
+
+  type GBPlayState = 'starting' | 'ready' | 'error';
+
+  let gbPlayStates = $state<Record<string, GBPlayState>>({});
+  let gbPlayErrors = $state<Record<string, string>>({});
+
+  const gbPlayInFlight = new Set<string>();
+  const gbPlayTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  function isGB28181WallCamera(camera: Camera): boolean {
+    return normalizeProtocol(camera.protocol || '') === 'gb28181';
+  }
+
+  function getGB28181Ids(camera: Camera): {
+    deviceId: string;
+    channelId: string;
+  } | null {
+    if (!isGB28181WallCamera(camera)) return null;
+
+    const parts = camera.id.split(':');
+    if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+
+    return {
+      deviceId: parts[0],
+      channelId: parts[1],
+    };
+  }
+
+  function clearGBPlayTimer(cameraId: string): void {
+    const timer = gbPlayTimers.get(cameraId);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      gbPlayTimers.delete(cameraId);
+    }
+  }
+
+  async function ensureDashboardGBPlay(
+    camera: Camera,
+    attempt = 0,
+  ): Promise<void> {
+    const ids = getGB28181Ids(camera);
+    if (!ids || dashboardDisposed) return;
+
+    const cameraId = camera.id;
+    if (gbPlayInFlight.has(cameraId)) return;
+
+    // Ignore work for cameras no longer assigned to the wall.
+    if (!slotAssignments.includes(cameraId)) return;
+
+    gbPlayInFlight.add(cameraId);
+    gbPlayStates[cameraId] = 'starting';
+    delete gbPlayErrors[cameraId];
+
+    try {
+      const result = await playGB28181Stream({
+        device_id: ids.deviceId,
+        channel_id: ids.channelId,
+        stream_id: streamIdFor(cameraId),
+        ensure: true,
+      });
+
+      if (dashboardDisposed || !slotAssignments.includes(cameraId)) {
+        return;
+      }
+
+      if (result.state === 'ready') {
+        clearGBPlayTimer(cameraId);
+        gbPlayStates[cameraId] = 'ready';
+        return;
+      }
+
+      // Bounded readiness polling: no repeated INVITE because ensure=true.
+      if (attempt >= 14) {
+        gbPlayStates[cameraId] = 'error';
+        gbPlayErrors[cameraId] =
+          'GB28181 点播已请求，但等待视频流就绪超时';
+        return;
+      }
+
+      clearGBPlayTimer(cameraId);
+
+      gbPlayTimers.set(
+        cameraId,
+        setTimeout(() => {
+          gbPlayTimers.delete(cameraId);
+
+          if (!dashboardDisposed && slotAssignments.includes(cameraId)) {
+            void ensureDashboardGBPlay(camera, attempt + 1);
+          }
+        }, 1000),
+      );
+    } catch (err) {
+      if (dashboardDisposed || !slotAssignments.includes(cameraId)) {
+        return;
+      }
+
+      clearGBPlayTimer(cameraId);
+
+      gbPlayStates[cameraId] = 'error';
+      gbPlayErrors[cameraId] =
+        err instanceof Error ? err.message : String(err);
+    } finally {
+      gbPlayInFlight.delete(cameraId);
+    }
+  }
+
+  function retryDashboardGBPlay(camera: Camera): void {
+    clearGBPlayTimer(camera.id);
+    delete gbPlayErrors[camera.id];
+    gbPlayStates[camera.id] = 'starting';
+
+    void ensureDashboardGBPlay(camera);
+  }
+
+  // Start newly assigned GB28181 cameras only.
+  // Existing sessions remain owned by the backend.
+  $effect(() => {
+    const ids = assignedCameraIds;
+    const cameras = cameraById;
+
+    for (const cameraId of ids) {
+      const camera = cameras.get(cameraId);
+      if (!camera || !isGB28181WallCamera(camera)) continue;
+
+      if (!gbPlayStates[cameraId] && !gbPlayInFlight.has(cameraId)) {
+        void ensureDashboardGBPlay(camera);
+      }
+    }
+
+    for (const cameraId of Array.from(gbPlayTimers.keys())) {
+      if (!ids.includes(cameraId)) {
+        clearGBPlayTimer(cameraId);
+      }
+    }
+  });
 
   // Snapshot state
   let snapshotUrls = $state<Record<string, string>>({});
@@ -1033,13 +1188,44 @@
               />
 
             {:else if mode === 'webrtc'}
-              <WebRTCPlayer
-                cameraId={camera.id}
-                cameraName={camera.name || camera.id}
-                whepUrl={getCameraPlayURL(camera.id, 'webrtc', streamMediaURL(streamIdFor(camera.id), 'webrtc'))}
-                expanded={expandedCameraId === camera.id}
-                {tabVisible}
-              />
+              {#if isGB28181WallCamera(camera) && gbPlayStates[camera.id] !== 'ready'}
+                <div class="absolute inset-0 flex items-center justify-center bg-black/85 px-4">
+                  <div class="flex flex-col items-center gap-3 text-center">
+                    {#if gbPlayStates[camera.id] === 'error'}
+                      <p class="text-sm text-red-400">
+                        GB28181 视频启动失败
+                      </p>
+
+                      <p class="text-xs text-white/60">
+                        {gbPlayErrors[camera.id] || '视频流暂不可用'}
+                      </p>
+
+                      <button
+                        type="button"
+                        class="px-3 py-1.5 rounded bg-blue-600 text-white text-sm"
+                        onclick={(event) => {
+                          event.stopPropagation();
+                          retryDashboardGBPlay(camera);
+                        }}
+                      >
+                        重试点播
+                      </button>
+                    {:else}
+                      <div class="spinner spinner-sm"></div>
+                      <p class="text-sm text-white/70">
+                        正在启动 GB28181 视频流...
+                      </p>
+                    {/if}
+                  </div>
+                </div>
+              {:else}
+                <WebRTCPlayer
+                  cameraId={camera.id}
+                  cameraName={camera.name || camera.id}
+                  expanded={expandedCameraId === camera.id}
+                  {tabVisible}
+                />
+              {/if}
 
             {:else if mode === 'flv' || mode === 'ws-flv'}
               <FlvPlayer

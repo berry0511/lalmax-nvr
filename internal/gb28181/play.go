@@ -96,10 +96,20 @@ func (g *GB28181API) handlerBye(req *sip.Request, tx sip.ServerTransaction) {
 	slog.Info("[SIP] BYE response sent", "device_id", deviceID)
 }
 
-// Play sends a GB28181 INVITE so the device can push PS/RTP to the platform.
+// Play explicitly starts or restarts a GB28181 stream.
 func (g *GB28181API) Play(in *PlayInput) (string, error) {
+	return g.play(in, false)
+}
+
+// EnsurePlay reuses an existing session instead of restarting it.
+// Media readiness must be checked separately.
+func (g *GB28181API) EnsurePlay(in *PlayInput) (string, error) {
+	return g.play(in, true)
+}
+
+func (g *GB28181API) play(in *PlayInput, reuseExisting bool) (string, error) {
 	log := slog.With("device_id", in.DeviceID, "channel_id", in.ChannelID)
-	log.Info("starting play")
+	log.Info("starting play", "reuse_existing", reuseExisting)
 
 	ch, ok := g.store.GetChannel(in.DeviceID, in.ChannelID)
 	if !ok {
@@ -113,11 +123,22 @@ func (g *GB28181API) Play(in *PlayInput) (string, error) {
 		return "", ErrDeviceOffline
 	}
 
-	// Stop existing stream if any
-	key := "play:" + in.DeviceID + ":" + in.ChannelID
+	key := playStreamKey(in.DeviceID, in.ChannelID)
+
 	if existing, ok := g.streams.loadStream(key); ok {
+		if reuseExisting {
+			log.Info(
+				"reusing existing GB28181 session",
+				"ssrc", existing.SSRC,
+				"session_id", existing.SessionID,
+			)
+			return existing.SSRC, nil
+		}
+
 		log.Debug("stopping existing stream before re-play")
-		g.stopPlay(existing)
+		if err := g.stopPlay(existing); err != nil {
+			return "", fmt.Errorf("stop existing play failed: %w", err)
+		}
 	}
 
 	// Step 1: Open RTP server on lalmax
@@ -491,10 +512,25 @@ func (g *GB28181API) sipPlaybackInvite(ch *Channel, in *PlaybackInput, port int)
 }
 
 func (g *GB28181API) doInvite(req *sip.Request, ch *Channel) (*InviteResult, error) {
+	// Use the transport established during the device's REGISTER.
+	transport := strings.ToUpper(ch.device.Transport)
+	slog.Info("[SIP] INVITE transport diagnostic",
+		"channel_id", ch.ChannelID,
+		"device_id", ch.device.DeviceID,
+		"device_transport", ch.device.Transport,
+		"selected_transport", transport,
+		"device_address", ch.device.Address,
+		"request_transport", req.Transport(),
+	)
+	if transport == "TCP" || transport == "UDP" {
+		req.SetTransport(transport)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	slog.Info("[SIP] INVITE sending", "recipient", req.Recipient.String())
+	slog.Info("[SIP] INVITE sending", "recipient", req.Recipient.String(), "transport", req.Transport())
+
 	tx, err := g.client.TransactionRequest(ctx, req)
 	if err != nil {
 		slog.Error("[SIP] INVITE send failed", "error", err)
@@ -531,6 +567,7 @@ func (g *GB28181API) doInvite(req *sip.Request, ch *Channel) (*InviteResult, err
 				}
 
 				ack := sip.NewRequest(sip.ACK, ackRecipient)
+				ack.SetTransport(req.Transport())
 				ack.AppendHeader(sip.HeaderClone(req.From()))
 				ack.AppendHeader(sip.HeaderClone(res.To()))
 				ack.AppendHeader(sip.HeaderClone(req.CallID()))
