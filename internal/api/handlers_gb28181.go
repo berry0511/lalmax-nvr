@@ -97,10 +97,12 @@ func (h *Handler) handleGB28181Play(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if info != nil &&
-			info.Active &&
-			info.Publisher != nil &&
-			info.InFPS > 0 {
+		if info != nil && info.Active && info.Publisher != nil &&
+			(info.InFPS > 0 || (!info.LastFrameTime.IsZero() &&
+				time.Since(info.LastFrameTime) >= 0 && time.Since(info.LastFrameTime) <= 15*time.Second)) {
+			// Same readiness contract as GB28181 EnsurePlay: a currently
+			// publishing stream is ready if sampled FPS is positive OR a
+			// recent frame is observed. Neither criterion alone is mandatory.
 			state = "ready"
 		}
 	}

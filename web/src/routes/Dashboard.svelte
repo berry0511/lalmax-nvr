@@ -70,10 +70,6 @@
       window.clearInterval(streamStatusTimer);
     }
 
-    for (const timer of gbPlayTimers.values()) {
-      clearTimeout(timer);
-    }
-    gbPlayTimers.clear();
   });
 
   interface WallSource {
@@ -137,8 +133,10 @@
   let gbPlayStates = $state<Record<string, GBPlayState>>({});
   let gbPlayErrors = $state<Record<string, string>>({});
 
+  // The GB28181 signaling request is independent of WebRTC playback.
+  // WebRTCPlayer itself handles WHEP startup and reconnection; do not block
+  // its creation on sampled FPS/Publisher statistics from EnsurePlay.
   const gbPlayInFlight = new Set<string>();
-  const gbPlayTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   function isGB28181WallCamera(camera: Camera): boolean {
     return normalizeProtocol(camera.protocol || '') === 'gb28181';
@@ -159,25 +157,12 @@
     };
   }
 
-  function clearGBPlayTimer(cameraId: string): void {
-    const timer = gbPlayTimers.get(cameraId);
-    if (timer !== undefined) {
-      clearTimeout(timer);
-      gbPlayTimers.delete(cameraId);
-    }
-  }
-
-  async function ensureDashboardGBPlay(
-    camera: Camera,
-    attempt = 0,
-  ): Promise<void> {
+  async function ensureDashboardGBPlay(camera: Camera): Promise<void> {
     const ids = getGB28181Ids(camera);
     if (!ids || dashboardDisposed) return;
 
     const cameraId = camera.id;
     if (gbPlayInFlight.has(cameraId)) return;
-
-    // Ignore work for cameras no longer assigned to the wall.
     if (!slotAssignments.includes(cameraId)) return;
 
     gbPlayInFlight.add(cameraId);
@@ -185,84 +170,48 @@
     delete gbPlayErrors[cameraId];
 
     try {
-      const result = await playGB28181Stream({
+      // EnsurePlay creates/reuses a SIP/RTP session. Its "starting" result
+      // does not mean WHEP must wait: WebRTCPlayer probes the real endpoint
+      // and retries on initial 404/connection failures by itself.
+      await playGB28181Stream({
         device_id: ids.deviceId,
         channel_id: ids.channelId,
         stream_id: streamIdFor(cameraId),
         ensure: true,
       });
 
-      if (dashboardDisposed || !slotAssignments.includes(cameraId)) {
-        return;
-      }
-
-      if (result.state === 'ready') {
-        clearGBPlayTimer(cameraId);
+      if (!dashboardDisposed && slotAssignments.includes(cameraId)) {
         gbPlayStates[cameraId] = 'ready';
-        return;
       }
-
-      // Bounded readiness polling: no repeated INVITE because ensure=true.
-      if (attempt >= 14) {
-        gbPlayStates[cameraId] = 'error';
-        gbPlayErrors[cameraId] =
-          'GB28181 点播已请求，但等待视频流就绪超时';
-        return;
-      }
-
-      clearGBPlayTimer(cameraId);
-
-      gbPlayTimers.set(
-        cameraId,
-        setTimeout(() => {
-          gbPlayTimers.delete(cameraId);
-
-          if (!dashboardDisposed && slotAssignments.includes(cameraId)) {
-            void ensureDashboardGBPlay(camera, attempt + 1);
-          }
-        }, 1000),
-      );
     } catch (err) {
-      if (dashboardDisposed || !slotAssignments.includes(cameraId)) {
-        return;
+      if (!dashboardDisposed && slotAssignments.includes(cameraId)) {
+        // Do not unmount an already-working WHEP player because of a SIP or
+        // media-stat API error. Display a non-blocking retry indication.
+        gbPlayStates[cameraId] = 'error';
+        gbPlayErrors[cameraId] = err instanceof Error ? err.message : String(err);
       }
-
-      clearGBPlayTimer(cameraId);
-
-      gbPlayStates[cameraId] = 'error';
-      gbPlayErrors[cameraId] =
-        err instanceof Error ? err.message : String(err);
     } finally {
       gbPlayInFlight.delete(cameraId);
     }
   }
 
   function retryDashboardGBPlay(camera: Camera): void {
-    clearGBPlayTimer(camera.id);
+    if (gbPlayInFlight.has(camera.id)) return;
     delete gbPlayErrors[camera.id];
     gbPlayStates[camera.id] = 'starting';
-
     void ensureDashboardGBPlay(camera);
   }
 
-  // Start newly assigned GB28181 cameras only.
-  // Existing sessions remain owned by the backend.
+  // One EnsurePlay per assigned camera on Dashboard mount/assignment.
+  // Status polling must NOT repeatedly restart the underlying SIP/RTP stream.
   $effect(() => {
     const ids = assignedCameraIds;
     const cameras = cameraById;
-
     for (const cameraId of ids) {
       const camera = cameras.get(cameraId);
       if (!camera || !isGB28181WallCamera(camera)) continue;
-
       if (!gbPlayStates[cameraId] && !gbPlayInFlight.has(cameraId)) {
         void ensureDashboardGBPlay(camera);
-      }
-    }
-
-    for (const cameraId of Array.from(gbPlayTimers.keys())) {
-      if (!ids.includes(cameraId)) {
-        clearGBPlayTimer(cameraId);
       }
     }
   });
@@ -792,15 +741,19 @@
     let streamErr = '';
     const saved = loadSavedLayout();
     const camerasPromise = getDashboardCameras();
-    const [cameraResult, streamResult, protocolResult, settingsResult, playURLsResult] = await Promise.allSettled([
+    // Protocol URL discovery is non-critical and can be slow for large walls.
+    // It must not hold up first render or the camera-scoped WebRTC proxy.
+    void camerasPromise.then((cameraList) => loadCameraPlayURLs(
+      getAssignedIds(saved.slots),
+      new Set(cameraList.filter((camera) => camera.enabled !== false).map((camera) => camera.id)),
+    )).catch((reason) => {
+      console.warn('Failed to load camera playback URLs:', reason);
+    });
+    const [cameraResult, streamResult, protocolResult, settingsResult] = await Promise.allSettled([
       camerasPromise,
       loadWallStreams(),
       listProtocols(),
       getStreamingSettings(),
-      camerasPromise.then((cameraList) => loadCameraPlayURLs(
-        getAssignedIds(saved.slots),
-        new Set(cameraList.filter((camera) => camera.enabled !== false).map((camera) => camera.id)),
-      )),
     ]);
     if (cameraResult.status === 'fulfilled') {
       cameras = cameraResult.value.filter(c => c.enabled !== false);
@@ -822,9 +775,6 @@
       defaultProtocol = settingsResult.value.default_protocol;
     } else if (settingsResult.status === 'rejected') {
       console.warn('Failed to load streaming settings:', settingsResult.reason);
-    }
-    if (playURLsResult.status === 'rejected') {
-      console.warn('Failed to load camera playback URLs:', playURLsResult.reason);
     }
     if (cameraErr && streamErr) {
       error = cameraErr;
@@ -1188,43 +1138,26 @@
               />
 
             {:else if mode === 'webrtc'}
-              {#if isGB28181WallCamera(camera) && gbPlayStates[camera.id] !== 'ready'}
-                <div class="absolute inset-0 flex items-center justify-center bg-black/85 px-4">
-                  <div class="flex flex-col items-center gap-3 text-center">
-                    {#if gbPlayStates[camera.id] === 'error'}
-                      <p class="text-sm text-red-400">
-                        GB28181 视频启动失败
-                      </p>
-
-                      <p class="text-xs text-white/60">
-                        {gbPlayErrors[camera.id] || '视频流暂不可用'}
-                      </p>
-
-                      <button
-                        type="button"
-                        class="px-3 py-1.5 rounded bg-blue-600 text-white text-sm"
-                        onclick={(event) => {
-                          event.stopPropagation();
-                          retryDashboardGBPlay(camera);
-                        }}
-                      >
-                        重试点播
-                      </button>
-                    {:else}
-                      <div class="spinner spinner-sm"></div>
-                      <p class="text-sm text-white/70">
-                        正在启动 GB28181 视频流...
-                      </p>
-                    {/if}
-                  </div>
+              <!-- Same immediate WHEP playback path as the single-camera page.
+                   SIP EnsurePlay runs in parallel and never gates the player. -->
+              <WebRTCPlayer
+                cameraId={camera.id}
+                cameraName={camera.name || camera.id}
+                expanded={expandedCameraId === camera.id}
+                {tabVisible}
+              />
+              {#if isGB28181WallCamera(camera) && gbPlayStates[camera.id] === 'error'}
+                <div class="absolute top-2 right-2 z-20 max-w-[80%] rounded bg-red-950/85 px-2 py-1.5 text-xs text-white/90 shadow-lg">
+                  <span class="text-red-300">GB28181 点播请求失败</span>
+                  <button
+                    type="button"
+                    class="ml-2 rounded bg-blue-600 px-2 py-0.5 text-white"
+                    onclick={(event) => {
+                      event.stopPropagation();
+                      retryDashboardGBPlay(camera);
+                    }}
+                  >重试</button>
                 </div>
-              {:else}
-                <WebRTCPlayer
-                  cameraId={camera.id}
-                  cameraName={camera.name || camera.id}
-                  expanded={expandedCameraId === camera.id}
-                  {tabVisible}
-                />
               {/if}
 
             {:else if mode === 'flv' || mode === 'ws-flv'}

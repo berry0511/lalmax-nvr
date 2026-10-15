@@ -6,6 +6,7 @@
   import type { PTZCapabilitiesDetailed } from '$lib/api/cameras';
   import { Pencil, Play, Square, RotateCw, Eye, MoreVertical, Archive, Trash2, Image, Bell, Move, Mic, MicOff, Camera as CameraIcon, ZoomIn, Home, CalendarClock, CircleOff, KeyRound, Search, Copy, GitBranch } from 'lucide-svelte';
   import { showToast } from '$lib/toast';
+  import { copyTextWithFallback } from '$lib/clipboard';
   import CameraFlowTree from '$lib/components/CameraFlowTree.svelte';
 
   interface Props {
@@ -154,8 +155,9 @@
         showToast(t('cameras.rtspUnavailable'), 'info');
         return;
       }
-      await navigator.clipboard.writeText(rtsp.PlayURL);
-      showToast(t('cameras.rtspCopied'), 'success');
+      if (await copyTextWithFallback(rtsp.PlayURL)) {
+        showToast(t('cameras.rtspCopied'), 'success');
+      }
     } catch (e) {
       showToast(e instanceof Error ? e.message : t('cameras.rtspCopyFailed'), 'error');
     } finally {

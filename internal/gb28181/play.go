@@ -124,21 +124,57 @@ func (g *GB28181API) play(in *PlayInput, reuseExisting bool) (string, error) {
 	}
 
 	key := playStreamKey(in.DeviceID, in.ChannelID)
-
-	if existing, ok := g.streams.loadStream(key); ok {
-		if reuseExisting {
-			log.Info(
-				"reusing existing GB28181 session",
-				"ssrc", existing.SSRC,
-				"session_id", existing.SessionID,
-			)
+	if in.InternalID == "" {
+		in.InternalID = StreamID(in.DeviceID, in.ChannelID)
+	}
+	existing, hasExisting := g.streams.loadStream(key)
+	if hasExisting && reuseExisting {
+		if g.mediaEngine == nil {
+			return "", fmt.Errorf("media engine unavailable")
+		}
+		info, err := g.mediaEngine.GetStream(context.Background(), in.InternalID)
+		if err != nil {
+			return "", fmt.Errorf("query media status: %w", err)
+		}
+		// Match the API readiness rule: FPS is a sampled metric and may be
+		// zero even while the publisher is delivering frames. Do not tear down
+		// a live SIP dialog just because one sampled counter is zero.
+		if info != nil && info.Active && info.Publisher != nil &&
+			(info.InFPS > 0 || (!info.LastFrameTime.IsZero() &&
+				time.Since(info.LastFrameTime) >= 0 && time.Since(info.LastFrameTime) <= 15*time.Second)) {
+			g.recoveryAttempts.Delete(key)
 			return existing.SSRC, nil
 		}
-
-		log.Debug("stopping existing stream before re-play")
-		if err := g.stopPlay(existing); err != nil {
-			return "", fmt.Errorf("stop existing play failed: %w", err)
+		// Give a newly invited device time to publish before initiating
+		// another INVITE. One slow/missing media snapshot is not a fault.
+		if !existing.StartedAt.IsZero() && time.Since(existing.StartedAt) < 45*time.Second {
+			log.Debug("GB28181 publisher pending; keeping existing session", "session_id", existing.SessionID)
+			return existing.SSRC, nil
 		}
+		if last, ok := g.recoveryAttempts.Load(key); ok {
+			if at, ok := last.(time.Time); ok && time.Since(at) < 60*time.Second {
+				// Cooldown is a non-fatal state. Return the current session and
+				// allow the dashboard to continue polling instead of returning 500.
+				log.Debug("GB28181 recovery cooling down", "session_id", existing.SessionID)
+				return existing.SSRC, nil
+			}
+		}
+		log.Warn("GB28181 publisher unavailable beyond grace period; restarting", "session_id", existing.SessionID)
+	}
+	// Never silently downgrade SIP signaling to UDP when transport is unknown.
+	// RTP StreamMode is independent and remains unchanged.
+	transport := strings.ToUpper(strings.TrimSpace(ch.device.Transport))
+	if transport != "TCP" && transport != "UDP" {
+		return "", fmt.Errorf("GB28181 SIP transport unknown for %s; awaiting REGISTER or verified TCP route", in.DeviceID)
+	}
+	if hasExisting {
+		if reuseExisting {
+			g.recoveryAttempts.Store(key, time.Now())
+		}
+		if err := g.stopPlay(existing); err != nil {
+			return "", fmt.Errorf("stop previous RTP receiver: %w", err)
+		}
+		g.streams.deleteStream(key)
 	}
 
 	// Step 1: Open RTP server on lalmax
@@ -192,6 +228,7 @@ func (g *GB28181API) play(in *PlayInput, reuseExisting bool) (string, error) {
 		FromTag:   inviteResult.FromTag,
 		ToTag:     inviteResult.ToTag,
 		RemoteURI: inviteResult.RemoteURI,
+		StartedAt: time.Now(),
 	}
 	g.streams.storeStream(key, stream)
 

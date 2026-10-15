@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/emiago/sipgo"
@@ -15,14 +16,15 @@ import (
 
 // GB28181API is the core API for GB28181 signaling.
 type GB28181API struct {
-	cfg          *Config
-	store        *DeviceStore
-	streams      *streamsManager
-	svr          *Server
-	client       *sipgo.Client
-	mediaEngine  media.Engine
-	hub          *WSHub
-	digestNonces *coreauth.DigestNonceStore
+	cfg              *Config
+	store            *DeviceStore
+	streams          *streamsManager
+	svr              *Server
+	client           *sipgo.Client
+	mediaEngine      media.Engine
+	hub              *WSHub
+	digestNonces     *coreauth.DigestNonceStore
+	recoveryAttempts sync.Map // stream key -> last automatic restart attempt
 }
 
 // NewGB28181API creates a new GB28181API instance.
@@ -245,7 +247,7 @@ func (g *GB28181API) handlerMessage(req *sip.Request, tx sip.ServerTransaction) 
 	case "RecordInfo":
 		g.handleRecordInfoResponse(deviceID, body)
 	case "Keepalive":
-		g.handleKeepalive(deviceID, source, "OK")
+		g.handleKeepaliveFromRequest(deviceID, source, "OK", req.Transport())
 	case "Alarm":
 		if g.svr != nil && g.svr.alarm != nil {
 			g.svr.alarm.HandleAlarm(deviceID, body)
