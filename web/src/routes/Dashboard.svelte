@@ -1053,7 +1053,7 @@
         onexpand={(e: CustomEvent) => expandToHls(e.detail.cameraId)}
         onshrink={(e: CustomEvent) => shrinkToGrid()}
       >
-        {#each slotAssignments as cameraId, slotIndex}
+        {#each slotAssignments as cameraId, slotIndex (`${slotIndex}:${cameraId ?? ''}`)}
           {@const camera = cameraId ? cameraById.get(cameraId) : null}
           {@const stream = cameraId && !camera ? streamById.get(cameraId) : undefined}
           {#if camera}
