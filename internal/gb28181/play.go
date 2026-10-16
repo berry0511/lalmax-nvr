@@ -467,9 +467,9 @@ func (g *GB28181API) sendSIPInfo(stream *Streams, body string, contentType strin
 func (g *GB28181API) StopPlay(in *StopPlayInput) error {
 	key := playStreamKey(in.DeviceID, in.ChannelID)
 	stream, ok := g.streams.loadStream(key)
-	if !ok {
-		return nil
-	}
+	if !ok { return nil }
+	ch, found := g.store.GetChannel(in.DeviceID, in.ChannelID)
+	if found { ch.device.playMutex.Lock(); defer ch.device.playMutex.Unlock() }
 	if err := g.stopPlay(stream); err != nil { return err }
 	g.streams.deleteStream(key)
 	return nil
@@ -486,7 +486,7 @@ func (g *GB28181API) stopPlay(stream *Streams) error {
 }
 
 func (g *GB28181API) sendPlayBye(stream *Streams) error {
-	if stream.CallID == "" || stream.FromTag == "" || stream.ToTag == "" || stream.InviteCSeq == 0 { return fmt.Errorf("missing confirmed SIP dialog for %s:%s", stream.DeviceID, stream.ChannelID) }
+	if stream.CallID == "" || stream.FromTag == "" || stream.ToTag == "" { return fmt.Errorf("missing confirmed SIP dialog for %s:%s", stream.DeviceID, stream.ChannelID) }
 	dev, ok := g.store.Load(stream.DeviceID)
 	if !ok { return fmt.Errorf("device unavailable for BYE: %s", stream.DeviceID) }
 	recipient := sip.Uri{Scheme: "sip", User: stream.ChannelID, Host: getHost(dev.Address), Port: getPort(dev.Address)}
