@@ -13,8 +13,6 @@ import (
 	"time"
 
 	"github.com/q191201771/lalmax/jt1078"
-	"github.com/q191201771/lal/pkg/base"
-	"github.com/q191201771/naza/pkg/nazalog"
 )
 
 type rejectingJT1078Gate struct{ calls atomic.Int32 }
@@ -22,18 +20,7 @@ type rejectingJT1078Gate struct{ calls atomic.Int32 }
 func (g *rejectingJT1078Gate) AllowStream(string) bool { g.calls.Add(1); return false }
 
 func TestRestartPreservesJT1078Authorizer(t *testing.T) {
-	// The embedded lal logger is process-global. Ensure its file backend is
-	// detached before the temporary working directory is removed on Windows.
-	// Register after t.Chdir so this callback runs first (LIFO).
 	t.Chdir(t.TempDir())
-	oldLogOption := base.Log.GetOption()
-	t.Cleanup(func() {
-		_ = base.Log.Init(func(opt *nazalog.Option) {
-			*opt = oldLogOption
-			opt.IsToFile = false
-			opt.Filename = ""
-		})
-	})
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -58,7 +45,7 @@ func TestRestartPreservesJT1078Authorizer(t *testing.T) {
 	lal["rtsp"] = map[string]any{"enable": false}
 	lal["httpflv"] = map[string]any{"enable": false}
 	lal["httpts"] = map[string]any{"enable": true, "http_listen_addr": "127.0.0.1:0", "url_pattern": "/live/"}
-	lal["log"] = map[string]any{"is_to_file": false, "is_to_stdout": false, "level": 5}
+	lal["log"] = map[string]any{"filename": "", "is_to_file": false, "is_to_stdout": false, "level": 5}
 	raw, err = json.Marshal(conf)
 	if err != nil {
 		t.Fatal(err)
