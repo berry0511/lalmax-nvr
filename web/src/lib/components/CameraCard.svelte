@@ -6,7 +6,6 @@
   import type { PTZCapabilitiesDetailed } from '$lib/api/cameras';
   import { Pencil, Play, Square, RotateCw, Eye, MoreVertical, Archive, Trash2, Image, Bell, Move, Mic, MicOff, Camera as CameraIcon, ZoomIn, Home, CalendarClock, CircleOff, KeyRound, Search, Copy, GitBranch } from 'lucide-svelte';
   import { showToast } from '$lib/toast';
-  import { copyTextWithFallback } from '$lib/clipboard';
   import CameraFlowTree from '$lib/components/CameraFlowTree.svelte';
 
   interface Props {
@@ -56,7 +55,8 @@
   let activating = $state(false);
   let rediscovering = $state(false);
   let showFlow = $state(false);
-  let copyingRtsp = $state(false);
+  let loadingRtsp = $state(false);
+  let displayedRtspUrl = $state('');
 
   let ingestLive = $derived(
     camera.status === 'recording' || camera.status === 'paused' || isRecordingPaused
@@ -144,8 +144,12 @@
     }
   }
 
-  async function copyRtspUrl() {
-    copyingRtsp = true;
+  async function showRtspUrl() {
+    if (displayedRtspUrl) {
+      displayedRtspUrl = '';
+      return;
+    }
+    loadingRtsp = true;
     try {
       const res = await apiRequest<{ protocols: { Protocol: string; PlayURL?: string }[] }>(
         `/cameras/${encodeURIComponent(camera.id)}/protocols`
@@ -155,13 +159,11 @@
         showToast(t('cameras.rtspUnavailable'), 'info');
         return;
       }
-      if (await copyTextWithFallback(rtsp.PlayURL)) {
-        showToast(t('cameras.rtspCopied'), 'success');
-      }
+      displayedRtspUrl = rtsp.PlayURL;
     } catch (e) {
       showToast(e instanceof Error ? e.message : t('cameras.rtspCopyFailed'), 'error');
     } finally {
-      copyingRtsp = false;
+      loadingRtsp = false;
     }
   }
 
@@ -468,12 +470,19 @@
 
         <button
           class="btn btn-ghost px-2 py-1 text-sm"
-          onclick={copyRtspUrl}
-          disabled={copyingRtsp}
-          title={t('cameras.copyRtsp')}
+          onclick={showRtspUrl}
+          disabled={loadingRtsp}
+          title="显示 RTSP 地址"
         >
-          <Copy size={14} />
+          <Eye size={14} />
         </button>
+        {#if displayedRtspUrl}
+          <div class="absolute right-0 top-full z-50 mt-2 w-[min(80vw,34rem)] rounded-lg border border-[var(--border)] bg-[var(--bg-elevated)] p-3 shadow-xl" role="group" aria-label="RTSP 地址">
+            <div class="mb-2 text-xs text-[var(--text-secondary)]">RTSP 播放地址（选中后按 Ctrl+C 复制）</div>
+            <input type="text" readonly value={displayedRtspUrl} onclick={(event) => event.currentTarget.select()} onfocus={(event) => event.currentTarget.select()} class="w-full rounded border border-[var(--border)] bg-[var(--bg-secondary)] px-2 py-2 text-xs text-[var(--text-primary)]" aria-label="RTSP 播放地址" />
+            <button type="button" class="mt-2 text-xs underline" onclick={() => { displayedRtspUrl = ''; }}>关闭</button>
+          </div>
+        {/if}
         <button
           class="btn btn-ghost px-2 py-1 text-sm"
           onclick={() => { showFlow = !showFlow; }}
