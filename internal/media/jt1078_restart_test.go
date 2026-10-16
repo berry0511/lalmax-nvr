@@ -24,8 +24,8 @@ func (g *rejectingJT1078Gate) AllowStream(string) bool { g.calls.Add(1); return 
 func TestRestartPreservesJT1078Authorizer(t *testing.T) {
 	// The embedded lal logger is process-global. Ensure its file backend is
 	// detached before the temporary working directory is removed on Windows.
-	// Register this before t.Chdir so it runs after the directory cleanup's
-	// own callbacks that are registered later (LIFO).
+	// Register after t.Chdir so this callback runs first (LIFO).
+	t.Chdir(t.TempDir())
 	oldLogOption := base.Log.GetOption()
 	t.Cleanup(func() {
 		_ = base.Log.Init(func(opt *nazalog.Option) {
@@ -34,7 +34,6 @@ func TestRestartPreservesJT1078Authorizer(t *testing.T) {
 			opt.Filename = ""
 		})
 	})
-	t.Chdir(t.TempDir())
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
