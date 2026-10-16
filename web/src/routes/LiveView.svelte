@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { getCamera, listProtocols, DEFAULT_PROTOCOLS, buildProtocolsMap, normalizeProtocol, getProtocolCapabilities, getDeviceCapabilities, playGB28181Stream, getONVIFProfiles, ptzMove, buildPTZRelativeMove, streamMediaURL, cameraStreamID } from '$lib/api';
   import type { Camera, ProtocolInfo, DeviceCapabilitiesInfo } from '$lib/api';
-  import { ArrowLeft, Maximize, Minimize, AlertCircle, RefreshCw, ChevronDown, ChevronRight, Image, Move, Activity, Mic, MicOff, Info, Settings, Video, Copy } from 'lucide-svelte';
+  import { ArrowLeft, Maximize, Minimize, AlertCircle, RefreshCw, ChevronDown, ChevronRight, Image, Move, Activity, Mic, MicOff, Info, Settings, Video, Eye } from 'lucide-svelte';
   import PtzControl from '../components/PtzControl.svelte';
   import VideoPlayer from '../components/VideoPlayer.svelte';
   import WebRTCPlayer from '../components/WebRTCPlayer.svelte';
@@ -34,6 +34,7 @@
   let streamingProtocol = $state<StreamingProtocol>('hls');
   let switchingProtocol = $state(false);
   let streamPlayURLs = $state<Record<string, string>>({});
+  let showRtspAddress = $state(false);
   let availableProtocols = $state<string[]>([]);
 
   // Lazy-loaded WasmPlayer component
@@ -346,17 +347,11 @@
           {#if streamPlayURLs['rtsp']}
             <button
               class="btn btn-ghost btn-sm flex items-center gap-1"
-              title={t('cameras.copyRtsp')}
-              onclick={async () => {
-                try {
-                  await navigator.clipboard.writeText(streamPlayURLs['rtsp']);
-                  showToast(t('cameras.rtspCopied'), 'success');
-                } catch {
-                  showToast(t('cameras.rtspCopyFailed'), 'error');
-                }
-              }}
+              title="显示 RTSP 地址"
+              aria-expanded={showRtspAddress}
+              onclick={() => { showRtspAddress = !showRtspAddress; }}
             >
-              <Copy size={16} />
+              <Eye size={16} />
               RTSP
             </button>
           {/if}
@@ -372,6 +367,12 @@
           </button>
         {/if}
       </div>
+      {#if showRtspAddress && streamPlayURLs['rtsp']}
+        <div class="mt-2 w-full rounded-lg border border-[var(--border)] bg-[var(--bg-elevated)] p-3">
+          <label for="live-rtsp-address" class="mb-2 block text-sm">RTSP 播放地址（点击文本框全选，按 Ctrl+C 复制）</label>
+          <input id="live-rtsp-address" type="text" readonly value={streamPlayURLs['rtsp']} onclick={(event) => event.currentTarget.select()} onfocus={(event) => event.currentTarget.select()} class="w-full rounded border border-[var(--border)] bg-[var(--bg-secondary)] px-3 py-2 text-sm" />
+        </div>
+      {/if}
 
       {#if isHlsSupported(camera)}
         <!-- Main content: Player + Controls -->
