@@ -4,7 +4,7 @@
   import type { Camera, ProtocolInfo } from '$lib/api';
   import type { CameraHealth } from '$lib/api/health';
   import type { PTZCapabilitiesDetailed } from '$lib/api/cameras';
-  import { Pencil, Play, Square, RotateCw, Eye, MoreVertical, Archive, Trash2, Image, Bell, Move, Mic, MicOff, Camera as CameraIcon, ZoomIn, Home, CalendarClock, CircleOff, KeyRound, Search, Copy, GitBranch } from 'lucide-svelte';
+  import { Pencil, Play, Square, RotateCw, Eye, MoreVertical, Archive, Trash2, Image, Bell, Move, Mic, MicOff, Camera as CameraIcon, ZoomIn, Home, CalendarClock, CircleOff, KeyRound, Search, GitBranch } from 'lucide-svelte';
   import { showToast } from '$lib/toast';
   import CameraFlowTree from '$lib/components/CameraFlowTree.svelte';
 
