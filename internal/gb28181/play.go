@@ -38,6 +38,8 @@ type InviteResult struct {
 	FromTag   string
 	ToTag     string
 	RemoteURI string
+	InviteCSeq uint32
+	Transport string
 }
 
 // PlaySpeedInput contains parameters for changing playback speed.
@@ -228,6 +230,8 @@ func (g *GB28181API) play(in *PlayInput, reuseExisting bool) (string, error) {
 		FromTag:   inviteResult.FromTag,
 		ToTag:     inviteResult.ToTag,
 		RemoteURI: inviteResult.RemoteURI,
+		InviteCSeq: inviteResult.InviteCSeq,
+		Transport: inviteResult.Transport,
 		StartedAt: time.Now(),
 	}
 	g.streams.storeStream(key, stream)
@@ -308,6 +312,8 @@ func (g *GB28181API) Playback(in *PlaybackInput) (string, error) {
 		FromTag:   inviteResult.FromTag,
 		ToTag:     inviteResult.ToTag,
 		RemoteURI: inviteResult.RemoteURI,
+		InviteCSeq: inviteResult.InviteCSeq,
+		Transport: inviteResult.Transport,
 	}
 	g.streams.storeStream(key, stream)
 
@@ -459,21 +465,49 @@ func (g *GB28181API) sendSIPInfo(stream *Streams, body string, contentType strin
 
 // StopPlay stops a GB28181 play session by sending BYE.
 func (g *GB28181API) StopPlay(in *StopPlayInput) error {
-	key := "play:" + in.DeviceID + ":" + in.ChannelID
-	stream, ok := g.streams.deleteStream(key)
-	if !ok {
-		return nil
-	}
-	return g.stopPlay(stream)
+	key := playStreamKey(in.DeviceID, in.ChannelID)
+	stream, ok := g.streams.loadStream(key)
+	if !ok { return nil }
+	ch, found := g.store.GetChannel(in.DeviceID, in.ChannelID)
+	if found { ch.device.playMutex.Lock(); defer ch.device.playMutex.Unlock() }
+	if err := g.stopPlay(stream); err != nil { return err }
+	g.streams.deleteStream(key)
+	return nil
 }
 
 func (g *GB28181API) stopPlay(stream *Streams) error {
+	// Terminate the remote SIP dialog before releasing its RTP receiver.
+	// On failure retain the session so recovery does not issue another INVITE.
+	if err := g.sendPlayBye(stream); err != nil { return err }
 	if stream.SessionID != "" && g.mediaEngine != nil {
-		_ = g.mediaEngine.StopRTPReceive(context.Background(), stream.SessionID)
+		if err := g.mediaEngine.StopRTPReceive(context.Background(), stream.SessionID); err != nil { return fmt.Errorf("stop RTP receiver: %w", err) }
 	}
-	// Note: For sipgo, we'd need to track the INVITE request/response to send BYE.
-	// For now, just stop the RTP session. A proper implementation would store
-	// the dialog state and send BYE through the client.
+	return nil
+}
+
+func (g *GB28181API) sendPlayBye(stream *Streams) error {
+	if stream.CallID == "" || stream.FromTag == "" || stream.ToTag == "" { return fmt.Errorf("missing confirmed SIP dialog for %s:%s", stream.DeviceID, stream.ChannelID) }
+	dev, ok := g.store.Load(stream.DeviceID)
+	if !ok { return fmt.Errorf("device unavailable for BYE: %s", stream.DeviceID) }
+	recipient := sip.Uri{Scheme: "sip", User: stream.ChannelID, Host: getHost(dev.Address), Port: getPort(dev.Address)}
+	if stream.RemoteURI != "" { var uri sip.Uri; if err := sip.ParseUri(stream.RemoteURI, &uri); err == nil { recipient = uri } }
+	req := sip.NewRequest(sip.BYE, recipient)
+	transport := stream.Transport
+	if transport == "" { transport = strings.ToUpper(dev.Transport) }
+	if transport == "TCP" || transport == "UDP" { req.SetTransport(transport) }
+	req.AppendHeader(&sip.FromHeader{Address: sip.Uri{Scheme: "sip", User: g.cfg.ID, Host: g.cfg.Host}, Params: sip.HeaderParams(sip.NewParams())})
+	req.From().Params.Add("tag", stream.FromTag)
+	req.AppendHeader(&sip.ToHeader{Address: sip.Uri{Scheme: "sip", User: stream.ChannelID, Host: getHost(dev.Address)}, Params: sip.HeaderParams(sip.NewParams())})
+	req.To().Params.Add("tag", stream.ToTag)
+	callID := sip.CallIDHeader(stream.CallID)
+	req.AppendHeader(&callID)
+	req.AppendHeader(&sip.CSeqHeader{SeqNo: stream.InviteCSeq + 1, MethodName: sip.BYE})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := g.client.Do(ctx, req)
+	if err != nil { return fmt.Errorf("SIP BYE %s: %w", stream.CallID, err) }
+	if !resp.IsSuccess() { return fmt.Errorf("SIP BYE rejected %s: %d %s", stream.CallID, resp.StatusCode, resp.Reason) }
+	slog.Info("[SIP] BYE acknowledged", "call_id", stream.CallID, "device_id", stream.DeviceID, "channel_id", stream.ChannelID)
 	return nil
 }
 
@@ -652,12 +686,16 @@ func (g *GB28181API) doInvite(req *sip.Request, ch *Channel) (*InviteResult, err
 				}
 
 				slog.Info("[SIP] INVITE completed", "ssrc", ssrc)
+				inviteSeq := uint32(0)
+				if h := req.CSeq(); h != nil { inviteSeq = h.SeqNo }
 				return &InviteResult{
 					SSRC:      ssrc,
 					CallID:    callID,
 					FromTag:   fromTag,
 					ToTag:     toTag,
 					RemoteURI: remoteURI,
+					InviteCSeq: inviteSeq,
+					Transport: req.Transport(),
 				}, nil
 			}
 			slog.Warn("[SIP] INVITE rejected", "status", res.StatusCode, "reason", res.Reason)
