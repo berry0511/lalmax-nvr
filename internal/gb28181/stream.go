@@ -17,6 +17,8 @@ type Streams struct {
 	FromTag   string
 	ToTag     string
 	RemoteURI string
+	InviteCSeq uint32
+	Transport string
 	StartedAt time.Time
 }
 
