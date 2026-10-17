@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/lalmax-pro/lalmax-nvr/internal/config"
 )
 
 func TestInternalMediaControlAuth(t *testing.T) {
@@ -49,6 +51,42 @@ func TestInternalMediaControlAuth(t *testing.T) {
 
 			if rec.Code != tc.want {
 				t.Fatalf("status = %d, want %d", rec.Code, tc.want)
+			}
+		})
+	}
+}
+
+func TestMediaHTTPPlaybackAuthSwitch(t *testing.T) {
+	deny := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+		})
+	}
+	allow := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	trueValue := true
+	falseValue := false
+	tests := []struct {
+		name     string
+		setting  *bool
+		expected int
+	}{
+		{"unset remains protected", nil, http.StatusUnauthorized},
+		{"true remains protected", &trueValue, http.StatusUnauthorized},
+		{"false opens direct playback", &falseValue, http.StatusOK},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mw := mediaHTTPPlaybackAuth(config.MediaConfig{HTTPPlayAuthEnabled: tc.setting}, deny)
+			var handler http.Handler = allow
+			if mw != nil {
+				handler = mw(handler)
+			}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/webrtc/whep?streamid=cam1", nil))
+			if w.Code != tc.expected {
+				t.Fatalf("status = %d, want %d", w.Code, tc.expected)
 			}
 		})
 	}

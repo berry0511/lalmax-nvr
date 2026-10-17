@@ -644,7 +644,7 @@ func NewApp(cfg *config.Config, configPath string) (*App, error) {
 			}
 			return a.mediaAuth.AuthorizePlayback(protocol, streamID, token)
 		}),
-		lalmaxserver.WithHTTPPlayAuth(a.multiUserMW),
+		lalmaxserver.WithHTTPPlayAuth(mediaHTTPPlaybackAuth(cfg.Media, a.multiUserMW)),
 		lalmaxserver.WithHTTPControlAuth(
 			newInternalMediaControlAuth(internalMediaToken, a.multiUserMW),
 		),
@@ -1698,6 +1698,21 @@ func (a *App) Stop() error {
 	}
 
 	return nil
+}
+
+
+// mediaHTTPPlaybackAuth retains account authentication unless the operator
+// explicitly disables it for embedded lalmax's direct HTTP playback routes.
+// NVR API authentication, internal media controls, and publishing credentials
+// are configured separately and remain unchanged.
+func mediaHTTPPlaybackAuth(
+	cfg config.MediaConfig,
+	userAuth func(http.Handler) http.Handler,
+) func(http.Handler) http.Handler {
+	if cfg.HTTPPlayAuthEnabled != nil && !*cfg.HTTPPlayAuthEnabled {
+		return nil
+	}
+	return userAuth
 }
 
 func newInternalMediaControlAuth(

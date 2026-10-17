@@ -62,6 +62,25 @@ func TestDefaultsApplied(t *testing.T) {
 	require.Equal(t, "/dav", cfg.WebDAV.PathPrefix)
 }
 
+func TestMediaHTTPPlaybackAuthDefaultAndExplicitOptOut(t *testing.T) {
+	cfg := &Config{}
+	cfg.ApplyDefaults()
+	require.NotNil(t, cfg.Media.HTTPPlayAuthEnabled)
+	require.True(t, *cfg.Media.HTTPPlayAuthEnabled)
+
+	off := false
+	cfg = &Config{Media: MediaConfig{HTTPPlayAuthEnabled: &off}}
+	cfg.ApplyDefaults()
+	require.NotNil(t, cfg.Media.HTTPPlayAuthEnabled)
+	require.False(t, *cfg.Media.HTTPPlayAuthEnabled)
+	require.NoError(t, Validate(cfg))
+
+	on := true
+	cfg = &Config{Media: MediaConfig{HTTPPlayAuthEnabled: &on}}
+	cfg.ApplyDefaults()
+	require.True(t, *cfg.Media.HTTPPlayAuthEnabled)
+}
+
 func TestFrameWatchdogTimeoutDefaultEmpty(t *testing.T) {
 	cfg := &Config{Cameras: []CameraConfig{{ID: "cam1", URL: "rtsp://localhost/stream"}}}
 	cfg.ApplyDefaults()
