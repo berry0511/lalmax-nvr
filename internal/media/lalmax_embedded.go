@@ -399,7 +399,7 @@ func (e *EmbeddedLalmax) Restart(ctx context.Context, rtmpPort, srtPort int, rtm
 	if cfgPath != "" {
 		if _, err := os.Stat(cfgPath); err == nil {
 			// File exists 闁?patch only rtmp/srt fields
-			if err := patchLalmaxConfig(cfgPath, rtmpEnabled, srtEnabled, rtmpAddr, srtAddr, e.cfg.HTTPTSGOPNum); err != nil {
+			if err := patchLalmaxConfig(cfgPath, rtmpEnabled, srtEnabled, rtmpAddr, srtAddr, e.cfg.HTTPTSGOPNum, e.cfg.RTSPAuthEnable); err != nil {
 				return fmt.Errorf("patch lalmax config: %w", err)
 			}
 		} else {
@@ -561,6 +561,7 @@ func loadEmbeddedLalmaxConfig(cfg EmbeddedLalmaxConfig) (*lalmaxconfig.Config, e
 				fmt.Sprintf(":%d", rtmpPort),
 				fmt.Sprintf(":%d", srtPort),
 				cfg.HTTPTSGOPNum,
+				cfg.RTSPAuthEnable,
 			); err != nil {
 				return nil, fmt.Errorf("sync lalmax protocol config: %w", err)
 			}
@@ -631,7 +632,7 @@ func httptsGopNum(n int) int {
 // patchLalmaxConfig reads the existing lalmax config JSON file, patches only
 // the RTMP/SRT enable and addr fields in the lal/lalmax sections, and writes
 // it back. This preserves all user customizations.
-func patchLalmaxConfig(path string, rtmpEnabled, srtEnabled bool, rtmpAddr, srtAddr string, gopNum int) error {
+func patchLalmaxConfig(path string, rtmpEnabled, srtEnabled bool, rtmpAddr, srtAddr string, gopNum int, rtspAuthEnabled bool) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read lalmax config: %w", err)
@@ -670,6 +671,9 @@ func patchLalmaxConfig(path string, rtmpEnabled, srtEnabled bool, rtmpAddr, srtA
 		}
 	}
 	rtsp["addr"] = fmt.Sprintf(":%d", config.DefaultLalRTSPPort)
+	// The NVR media YAML is authoritative for native RTSP Basic/Digest auth,
+	// even when an existing lalmax.conf.json is reused across restarts.
+	rtsp["auth_enable"] = rtspAuthEnabled
 	patchedRTSP, err := json.Marshal(rtsp)
 	if err != nil {
 		return fmt.Errorf("marshal rtsp config: %w", err)
