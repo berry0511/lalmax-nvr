@@ -484,7 +484,7 @@
         </button>
         {#if displayedURLs}
           <div class="absolute right-0 top-full z-50 mt-2 w-[min(80vw,40rem)] rounded-lg border border-[var(--border)] bg-[var(--bg-elevated)] p-3 shadow-xl">
-            <PlaybackURLs rtspUrl={displayedURLs.rtsp} webrtcUrl={displayedURLs.webrtc} />
+            <PlaybackURLs idPrefix={camera.id} rtspUrl={displayedURLs.rtsp} webrtcUrl={displayedURLs.webrtc} />
             <button type="button" class="mt-2 text-xs underline" onclick={() => { displayedURLs = null; }}>关闭</button>
           </div>
         {/if}
