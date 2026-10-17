@@ -81,6 +81,39 @@ func TestMediaHTTPPlaybackAuthDefaultAndExplicitOptOut(t *testing.T) {
 	require.True(t, *cfg.Media.HTTPPlayAuthEnabled)
 }
 
+func TestRTMPPublishAuthDefaultAndExplicitOptOut(t *testing.T) {
+	cfg := &Config{}
+	if !cfg.RTMP.RTMPPublishAuthEnabled() {
+		t.Fatal("RTMP publisher auth must default to enabled before ApplyDefaults")
+	}
+	cfg.ApplyDefaults()
+	require.NotNil(t, cfg.RTMP.PublishAuthEnabled)
+	require.True(t, *cfg.RTMP.PublishAuthEnabled)
+
+	off := false
+	cfg = &Config{RTMP: RTMPConfig{PublishAuthEnabled: &off}}
+	cfg.ApplyDefaults()
+	require.False(t, cfg.RTMP.RTMPPublishAuthEnabled())
+	require.NotNil(t, cfg.RTMP.PublishAuthEnabled)
+	require.False(t, *cfg.RTMP.PublishAuthEnabled)
+	require.NoError(t, Validate(cfg))
+
+	on := true
+	cfg = &Config{RTMP: RTMPConfig{PublishAuthEnabled: &on}}
+	cfg.ApplyDefaults()
+	require.True(t, cfg.RTMP.RTMPPublishAuthEnabled())
+}
+
+func TestRTMPPublishAuthConfigLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lalmax-nvr.yaml")
+	content := "rtmp:\\n  enabled: true\\n  port: 11935\\n  publish_auth_enabled: false\\n"
+	require.NoError(t, os.WriteFile(path, []byte(content), 0600))
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.RTMP.PublishAuthEnabled)
+	require.False(t, cfg.RTMP.RTMPPublishAuthEnabled())
+}
+
 func TestFrameWatchdogTimeoutDefaultEmpty(t *testing.T) {
 	cfg := &Config{Cameras: []CameraConfig{{ID: "cam1", URL: "rtsp://localhost/stream"}}}
 	cfg.ApplyDefaults()
