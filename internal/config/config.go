@@ -479,12 +479,19 @@ type SRTConfig struct {
 }
 
 // RTMPConfig configures the RTMP ingest server.
-// RTMP is served by lalmax on its default port (:11935). Each stream ID must
-// have a publish token in StreamKeys; publishers pass it as stream_key.
+// By default RTMP publishers authenticate using per-stream tokens passed as
+// ?stream_key=<token>. Anonymous publishing must be explicitly enabled.
 type RTMPConfig struct {
-	Enabled    *bool             `yaml:"enabled"` // default false
-	Port       int               `yaml:"port,omitempty"`
-	StreamKeys map[string]string `yaml:"stream_keys"` // stream_id → publish token
+	Enabled            *bool             `yaml:"enabled"` // default false
+	Port               int               `yaml:"port,omitempty"`
+	PublishAuthEnabled *bool             `yaml:"publish_auth_enabled,omitempty"` // default true; false allows anonymous RTMP publishing
+	StreamKeys         map[string]string `yaml:"stream_keys"` // stream_id → publish token
+}
+
+// RTMPPublishAuthEnabled preserves the existing fail-closed default even for
+// configs that have not yet applied defaults.
+func (cfg RTMPConfig) RTMPPublishAuthEnabled() bool {
+	return cfg.PublishAuthEnabled == nil || *cfg.PublishAuthEnabled
 }
 
 // WHIPConfig configures WebRTC-HTTP ingest (WHIP).
@@ -1394,6 +1401,10 @@ func (cfg *Config) ApplyDefaults() {
 	}
 	if cfg.RTMP.Port == 0 {
 		cfg.RTMP.Port = DefaultLalRTMPPort
+	}
+	if cfg.RTMP.PublishAuthEnabled == nil {
+		enabled := true
+		cfg.RTMP.PublishAuthEnabled = &enabled
 	}
 	if cfg.RTMP.StreamKeys == nil {
 		cfg.RTMP.StreamKeys = make(map[string]string)
