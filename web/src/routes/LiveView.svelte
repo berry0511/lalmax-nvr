@@ -8,6 +8,7 @@
   import WebRTCPlayer from '../components/WebRTCPlayer.svelte';
   import FlvPlayer from '../components/FlvPlayer.svelte';
   import ProtocolSwitcher from '../components/ProtocolSwitcher.svelte';
+  import PlaybackURLs from '$lib/components/PlaybackURLs.svelte';
   import type { StreamingProtocol } from '../components/ProtocolSwitcher.svelte';
   import SnapshotButton from '../components/SnapshotButton.svelte';
   import ImagingPanel from '$lib/components/ImagingPanel.svelte';
@@ -34,7 +35,7 @@
   let streamingProtocol = $state<StreamingProtocol>('hls');
   let switchingProtocol = $state(false);
   let streamPlayURLs = $state<Record<string, string>>({});
-  let showRtspAddress = $state(false);
+  let showURLs = $state(false);
   let availableProtocols = $state<string[]>([]);
 
   // Lazy-loaded WasmPlayer component
@@ -344,15 +345,15 @@
             onchange={handleProtocolChange}
             onprotocolsloaded={handleProtocolsLoaded}
           />
-          {#if streamPlayURLs['rtsp']}
+          {#if streamPlayURLs['rtsp'] || streamPlayURLs['webrtc']}
             <button
               class="btn btn-ghost btn-sm flex items-center gap-1"
-              title="显示 RTSP 地址"
-              aria-expanded={showRtspAddress}
-              onclick={() => { showRtspAddress = !showRtspAddress; }}
+              title="显示 RTSP 和 WebRTC 地址"
+              aria-expanded={showURLs}
+              onclick={() => { showURLs = !showURLs; }}
             >
               <Eye size={16} />
-              RTSP
+              URL
             </button>
           {/if}
           <button class="btn btn-sm {drawingZone ? 'btn-primary' : 'btn-ghost'}" onclick={() => { drawingZone = !drawingZone; zoneDraft = []; }}>
@@ -367,10 +368,9 @@
           </button>
         {/if}
       </div>
-      {#if showRtspAddress && streamPlayURLs['rtsp']}
+      {#if showURLs && (streamPlayURLs['rtsp'] || streamPlayURLs['webrtc'])}
         <div class="mt-2 w-full rounded-lg border border-[var(--border)] bg-[var(--bg-elevated)] p-3">
-          <label for="live-rtsp-address" class="mb-2 block text-sm">RTSP 播放地址（点击文本框全选，按 Ctrl+C 复制）</label>
-          <input id="live-rtsp-address" type="text" readonly value={streamPlayURLs['rtsp']} onclick={(event) => event.currentTarget.select()} onfocus={(event) => event.currentTarget.select()} class="w-full rounded border border-[var(--border)] bg-[var(--bg-secondary)] px-3 py-2 text-sm" />
+          <PlaybackURLs idPrefix={camera.id} rtspUrl={streamPlayURLs['rtsp'] || ''} webrtcUrl={streamPlayURLs['webrtc'] || ''} />
         </div>
       {/if}
 
