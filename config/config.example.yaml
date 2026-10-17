@@ -25,6 +25,12 @@ storage:
 # lal/lalmax media engine configuration.
 media:
   mode: "embedded"                         # embedded | http
+  # Direct lalmax HTTP playback (WHEP/LL-HLS/fMP4) requires NVR login by default.
+  # To allow anonymous browser playback on a TRUSTED LAN only, explicitly set:
+  # http_play_auth_enabled: false
+  # WARNING: With a publicly reachable lalmax port, anyone can access live streams.
+  # NVR management, internal media controls and publish auth remain protected.
+  # Configured auth.playback_tokens may still require stream-specific tokens.
   lalmax_http_addr: "http://127.0.0.1:12090"
   lalmax_public_url: "http://127.0.0.1:12090"  # Use a public hostname; otherwise RTSP URLs become 127.0.0.1
   # lalmax_config_path is auto-generated at {root_dir}/config/lalmax.conf.json
