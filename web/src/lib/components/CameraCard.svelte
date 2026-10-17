@@ -8,6 +8,7 @@
   import { showToast } from '$lib/toast';
   import CameraFlowTree from '$lib/components/CameraFlowTree.svelte';
   import PlaybackURLs from '$lib/components/PlaybackURLs.svelte';
+  import { selectPlaybackURLs } from '$lib/playback-urls';
 
   interface Props {
     camera: Camera;
@@ -157,10 +158,7 @@
         `/cameras/${encodeURIComponent(id)}/protocols`
       );
       if (camera.id !== id) return;
-      const urlFor = (protocol: string) => res.protocols?.find(
-        (p) => p.Protocol?.toLowerCase() === protocol && p.Available !== false && p.PlayURL
-      )?.PlayURL || '';
-      const urls = { rtsp: urlFor('rtsp'), webrtc: urlFor('webrtc') };
+      const urls = selectPlaybackURLs(res.protocols);
       if (!urls.rtsp && !urls.webrtc) {
         showToast('当前摄像机没有可用的播放地址', 'info');
         return;
