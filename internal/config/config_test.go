@@ -106,7 +106,7 @@ func TestRTMPPublishAuthDefaultAndExplicitOptOut(t *testing.T) {
 
 func TestRTMPPublishAuthConfigLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "lalmax-nvr.yaml")
-	content := "rtmp:\\n  enabled: true\\n  port: 11935\\n  publish_auth_enabled: false\\n"
+	content := "rtmp:\n  enabled: true\n  port: 11935\n  publish_auth_enabled: false\n"
 	require.NoError(t, os.WriteFile(path, []byte(content), 0600))
 	cfg, err := Load(path)
 	require.NoError(t, err)
