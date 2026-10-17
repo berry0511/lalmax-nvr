@@ -20,7 +20,7 @@ func TestTencentParseStreamID(t *testing.T) {
 		valid bool
 	}{
 		{"webrtc://example.org/live/camera-1", "camera-1", true},
-		{"webrtc://121.237.176.144:19090/live/32010000001327000001:34020000001320000001", "32010000001327000001:34020000001320000001", true},
+		{"webrtc://192.0.2.10:19090/live/device001:channel001", "device001:channel001", true},
 		{"webrtc://example.org/live/", "", false},
 		{"webrtc://example.org/other/camera", "", false},
 		{"webrtc://example.org/live/camera/other", "", false},
@@ -53,7 +53,7 @@ func TestTencentRTCPlay_RequiresAuthentication(t *testing.T) {
 }
 
 func TestTencentRTCPlayAndUnplay_ReuseWHEP(t *testing.T) {
-	const streamID = "32010000001327000001:34020000001320000001"
+	const streamID = "device001:channel001"
 	const offer = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\n"
 	const answer = "v=0\r\no=- 2 2 IN IP4 127.0.0.1\r\n"
 	var created, deleted atomic.Int32
