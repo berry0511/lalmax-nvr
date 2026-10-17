@@ -161,6 +161,8 @@ type Handler struct {
 	reconcileRecording func(context.Context)
 	mediaEngine        media.Engine
 	mediaProxy         *http.Client
+	tencentSessionsMu  sync.Mutex
+	tencentSessions    map[string]tencentSession
 	wsMgr              media.WS
 	groupStreamSource  interface {
 		StreamInfo(string) (model.Format, []byte, []byte, []byte, *model.StreamHub, bool)
@@ -368,6 +370,9 @@ func (h *Handler) Routes() http.Handler {
 			r.Use(h.authMW)
 		}
 		r.Post("/api/auth/logout", h.handleLogout)
+		// Experimental Tencent-style JSON/SDP adapter; authenticated like WHEP.
+		r.Post("/rtc/v1/play", h.handleTencentRTCPlay)
+		r.Post("/rtc/v1/unplay", h.handleTencentRTCUnplay)
 		r.Get("/api/health/cameras", h.handleHealthCameras)
 		r.Get("/api/health/details", h.handleHealthDetails)
 		r.Route("/api/recordings", func(r chi.Router) {
