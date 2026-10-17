@@ -106,3 +106,52 @@ func TestRTMPAuthOptOutDoesNotDisableRTSPAuthentication(t *testing.T) {
 		t.Fatalf("RTSP shared token should remain accepted, got %v", err)
 	}
 }
+
+func TestRTSPAnonymousPublisherStillEnforcesBans(t *testing.T) {
+	repo := &testStreamBanRepository{}
+	mediaAuth := auth.NewMediaAuthorizer()
+	mediaAuth.SetPublishTokens("media", map[string]string{"camera1": "shared-key"})
+	m := NewManager(repo, mediaAuth)
+	m.SetRTSPPublishAuthEnabled(false)
+	publisher := base.PubStartInfo{SessionEventCommonInfo: base.SessionEventCommonInfo{
+		Protocol: base.SessionProtocolRtspStr, StreamName: "camera1",
+	}}
+	// Shared RTSP publish tokens are bypassed only by an explicit opt-out.
+	if err := m.OnPubStart(publisher); err != nil {
+		t.Fatalf("RTSP publisher without token should be accepted: %v", err)
+	}
+	publisher.UrlParam = "token=wrong"
+	if err := m.OnPubStart(publisher); err != nil {
+		t.Fatalf("RTSP publisher with stale token should be accepted: %v", err)
+	}
+
+	repo.bans = map[string]*storage.StreamBan{
+		"camera1": {StreamID: "camera1", Reason: "blocked"},
+	}
+	if err := m.OnPubStart(publisher); err == nil {
+		t.Fatal("banned RTSP publisher must be rejected even without auth")
+	}
+	repo.bans = nil
+	repo.err = errors.New("database unavailable")
+	if err := m.OnPubStart(publisher); err == nil {
+		t.Fatal("RTSP publisher must be rejected when ban lookup fails")
+	}
+}
+
+func TestRTSPAuthOptOutDoesNotDisableRTMPAuthentication(t *testing.T) {
+	repo := &testStreamBanRepository{}
+	mediaAuth := auth.NewMediaAuthorizer()
+	mediaAuth.SetPublishTokens("rtmp", map[string]string{"camera1": "rtmp-key"})
+	m := NewManager(repo, mediaAuth)
+	m.SetRTSPPublishAuthEnabled(false)
+	rtmp := base.PubStartInfo{SessionEventCommonInfo: base.SessionEventCommonInfo{
+		Protocol: base.SessionProtocolRtmpStr, StreamName: "camera1",
+	}}
+	if err := m.OnPubStart(rtmp); err == nil {
+		t.Fatal("RTMP should remain protected when only RTSP publish auth is disabled")
+	}
+	rtmp.UrlParam = "stream_key=rtmp-key"
+	if err := m.OnPubStart(rtmp); err != nil {
+		t.Fatalf("authorized RTMP publish should work: %v", err)
+	}
+}
