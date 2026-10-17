@@ -1876,6 +1876,7 @@ func newMediaEngine(cfg *config.Config, internalToken string, opts ...interface{
 		LalmaxSegmentDuration: cfg.HLS.LalmaxSegmentDuration,
 		LalmaxPartDuration:    cfg.HLS.LalmaxPartDuration,
 		RTSPAuthEnable:        cfg.Media.RTSPAuthEnable,
+		RTSPDisableNativeAuth: !cfg.Media.RTSPPublishTokenAuthEnabled() && !cfg.Media.RTSPAuthEnable,
 		RTSPAuthMethod:        cfg.Media.RTSPAuthMethod,
 		RTSPUsername:          cfg.Media.RTSPUsername,
 		RTSPPassword:          cfg.Media.RTSPPassword,
