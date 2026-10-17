@@ -104,6 +104,36 @@ func TestRTMPPublishAuthDefaultAndExplicitOptOut(t *testing.T) {
 	require.True(t, cfg.RTMP.RTMPPublishAuthEnabled())
 }
 
+func TestRTSPPublishAuthDefaultAndExplicitOptOut(t *testing.T) {
+	cfg := &Config{}
+	require.True(t, cfg.Media.RTSPPublishTokenAuthEnabled())
+	cfg.ApplyDefaults()
+	require.NotNil(t, cfg.Media.RTSPPublishAuthEnabled)
+	require.True(t, *cfg.Media.RTSPPublishAuthEnabled)
+	require.False(t, cfg.Media.RTSPAuthEnable, "native RTSP Basic/Digest auth is separately disabled by default")
+
+	off := false
+	cfg = &Config{Media: MediaConfig{RTSPPublishAuthEnabled: &off, RTSPAuthEnable: false}}
+	cfg.ApplyDefaults()
+	require.False(t, cfg.Media.RTSPPublishTokenAuthEnabled())
+	require.NoError(t, Validate(cfg))
+
+	on := true
+	cfg = &Config{Media: MediaConfig{RTSPPublishAuthEnabled: &on}}
+	cfg.ApplyDefaults()
+	require.True(t, cfg.Media.RTSPPublishTokenAuthEnabled())
+}
+
+func TestRTSPPublishAuthConfigLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lalmax-nvr.yaml")
+	content := "media:\n  mode: embedded\n  rtsp_auth_enable: false\n  rtsp_publish_auth_enabled: false\n"
+	require.NoError(t, os.WriteFile(path, []byte(content), 0600))
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.False(t, cfg.Media.RTSPPublishTokenAuthEnabled())
+	require.False(t, cfg.Media.RTSPAuthEnable)
+}
+
 func TestRTMPPublishAuthConfigLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "lalmax-nvr.yaml")
 	content := "rtmp:\n  enabled: true\n  port: 11935\n  publish_auth_enabled: false\n"
