@@ -113,7 +113,7 @@ func TestPatchLalmaxConfig_CreatesMissingProtocolSections(t *testing.T) {
 	path := filepath.Join(dir, "lalmax.conf.json")
 	require.NoError(t, os.WriteFile(path, []byte(`{"lal":{},"lalmax":{}}`), 0o644))
 
-	require.NoError(t, patchLalmaxConfig(path, true, true, ":1935", ":9000", 4, false))
+	require.NoError(t, patchLalmaxConfig(path, true, true, ":1935", ":9000", 4, true))
 
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -140,27 +140,29 @@ func TestPatchLalmaxConfig_CreatesMissingProtocolSections(t *testing.T) {
 }
 
 
-func TestEmbeddedRTSPAuthFromYAMLOverridesExistingConfig(t *testing.T) {
+func TestEmbeddedRTSPAnonymousOptOutOverridesExistingConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "lalmax.conf.json")
 	require.NoError(t, os.WriteFile(path, []byte(`{
 		"lal": {"rtsp": {"enable": true, "auth_enable": true, "username": "previous"}},
 		"lalmax": {}
 	}`), 0o644))
+	// Omitted opt-out must not weaken a previously protected LALMax installation.
 	require.NoError(t, patchLalmaxConfig(path, true, false, ":11935", ":19000", 1, false))
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	var raw map[string]any
 	require.NoError(t, json.Unmarshal(data, &raw))
 	rtsp := raw["lal"].(map[string]any)["rtsp"].(map[string]any)
-	require.Equal(t, false, rtsp["auth_enable"])
-	require.Equal(t, "previous", rtsp["username"], "keep unrelated custom configuration")
-	// Verify explicit native RTSP authentication can still be enabled.
+	require.Equal(t, true, rtsp["auth_enable"])
+
+	// Explicit anonymous RTSP mode overrides the prior native auth setting.
 	require.NoError(t, patchLalmaxConfig(path, true, false, ":11935", ":19000", 1, true))
 	data, err = os.ReadFile(path)
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(data, &raw))
 	rtsp = raw["lal"].(map[string]any)["rtsp"].(map[string]any)
-	require.Equal(t, true, rtsp["auth_enable"])
+	require.Equal(t, false, rtsp["auth_enable"])
+	require.Equal(t, "previous", rtsp["username"], "keep unrelated custom configuration")
 }
 
 func TestEmbeddedConfigJSON_IncludesJT1078(t *testing.T) {
