@@ -4,6 +4,7 @@
   import type { GB28181Device } from '$lib/api';
   import { t } from '$lib/i18n';
   import PlaybackURLs from '$lib/components/PlaybackURLs.svelte';
+  import { selectPlaybackURLs } from '$lib/playback-urls';
   import { showToast } from '$lib/toast';
   import { Video, RefreshCw, Play, Square, Wifi, WifiOff, ExternalLink, Clock, Info, Link as LinkIcon } from 'lucide-svelte';
 
@@ -29,10 +30,7 @@
         `/cameras/${encodeURIComponent(streamId || key)}/protocols`
       );
       if (urlOpenFor !== key) return;
-      const urlFor = (protocol: string) => res.protocols?.find(
-        p => p.Protocol?.toLowerCase() === protocol && p.Available !== false && p.PlayURL
-      )?.PlayURL || '';
-      const urls = { rtsp: urlFor('rtsp'), webrtc: urlFor('webrtc') };
+      const urls = selectPlaybackURLs(res.protocols);
       if (urls.rtsp || urls.webrtc) playURLs = urls;
       else showToast('当前通道没有可用的播放地址', 'info');
     } catch (e) {
