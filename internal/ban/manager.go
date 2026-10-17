@@ -18,21 +18,29 @@ var logger = slog.Default().With("component", "ban")
 // Manager enforces stream bans via lal's IAuthentication interface.
 // All protocols (RTMP, RTSP, SRT, WHIP, GB28181) are checked uniformly.
 type Manager struct {
-	db        storage.StreamBanRepository
-	kickFunc  func(ctx context.Context, sessionID string) error
-	mediaAuth *auth.MediaAuthorizer
+	db                     storage.StreamBanRepository
+	kickFunc               func(ctx context.Context, sessionID string) error
+	mediaAuth              *auth.MediaAuthorizer
+	rtmpPublishAuthEnabled bool
 }
 
 func NewManager(db storage.StreamBanRepository, mediaAuth *auth.MediaAuthorizer) *Manager {
 	if mediaAuth == nil {
 		mediaAuth = auth.NewMediaAuthorizer()
 	}
-	return &Manager{db: db, mediaAuth: mediaAuth}
+	return &Manager{db: db, mediaAuth: mediaAuth, rtmpPublishAuthEnabled: true}
 }
 
 // SetKickFunc sets the function used to kick currently active banned streams.
 func (m *Manager) SetKickFunc(fn func(ctx context.Context, sessionID string) error) {
 	m.kickFunc = fn
+}
+
+// SetRTMPPublishAuthEnabled toggles credential checks for RTMP publishing only.
+// Disabling authentication still enforces the stream ban list, failing closed
+// if the ban store cannot be queried.
+func (m *Manager) SetRTMPPublishAuthEnabled(enabled bool) {
+	m.rtmpPublishAuthEnabled = enabled
 }
 
 // SetRTMPStreamKeys installs the required publish token for each RTMP stream ID.
@@ -48,6 +56,9 @@ func (m *Manager) SetPublishTokens(protocol string, keys map[string]string) {
 // OnPubStart checks if the stream is banned. Returns error to reject the session.
 func (m *Manager) OnPubStart(info base.PubStartInfo) error {
 	if strings.EqualFold(info.Protocol, base.SessionProtocolRtmpStr) {
+		if !m.rtmpPublishAuthEnabled {
+			return m.rejectBannedStream(info.StreamName, info.Protocol, true)
+		}
 		token, err := auth.QueryToken(info.UrlParam, "stream_key")
 		if err != nil {
 			return fmt.Errorf("invalid RTMP publish parameters for stream %q", info.StreamName)
