@@ -3,6 +3,7 @@
   import { listGB28181Devices, playGB28181Stream, stopGB28181Stream, apiRequest } from '$lib/api';
   import type { GB28181Device } from '$lib/api';
   import { t } from '$lib/i18n';
+  import PlaybackURLs from '$lib/components/PlaybackURLs.svelte';
   import { showToast } from '$lib/toast';
   import { Video, RefreshCw, Play, Square, Wifi, WifiOff, ExternalLink, Clock, Info, Link as LinkIcon } from 'lucide-svelte';
 
@@ -13,28 +14,31 @@
   let expandedDevice = $state<string | null>(null);
   let ws = $state<WebSocket | null>(null);
   let wsConnected = $state(false);
-  let rtspOpenFor = $state<string | null>(null);
-  let rtspLoadingFor = $state<string | null>(null);
-  let rtspURL = $state('');
+  let urlOpenFor = $state<string | null>(null);
+  let urlLoadingFor = $state<string | null>(null);
+  let playURLs = $state<{ rtsp: string; webrtc: string } | null>(null);
 
-  async function toggleRTSP(deviceId: string, channelId: string, streamId?: string) {
+  async function toggleURLs(deviceId: string, channelId: string, streamId?: string) {
     const key = `${deviceId}:${channelId}`;
-    if (rtspOpenFor === key) { rtspOpenFor = null; rtspURL = ''; return; }
-    rtspOpenFor = key;
-    rtspURL = '';
-    rtspLoadingFor = key;
+    if (urlOpenFor === key) { urlOpenFor = null; playURLs = null; return; }
+    urlOpenFor = key;
+    playURLs = null;
+    urlLoadingFor = key;
     try {
-      const res = await apiRequest<{ protocols: { Protocol: string; PlayURL?: string }[] }>(
+      const res = await apiRequest<{ protocols: { Protocol: string; Available?: boolean; PlayURL?: string }[] }>(
         `/cameras/${encodeURIComponent(streamId || key)}/protocols`
       );
-      if (rtspOpenFor !== key) return;
-      const url = res.protocols?.find(p => p.Protocol?.toLowerCase() === 'rtsp')?.PlayURL;
-      if (url) rtspURL = url;
-      else showToast('当前通道没有可用的 RTSP 地址', 'info');
+      if (urlOpenFor !== key) return;
+      const urlFor = (protocol: string) => res.protocols?.find(
+        p => p.Protocol?.toLowerCase() === protocol && p.Available !== false && p.PlayURL
+      )?.PlayURL || '';
+      const urls = { rtsp: urlFor('rtsp'), webrtc: urlFor('webrtc') };
+      if (urls.rtsp || urls.webrtc) playURLs = urls;
+      else showToast('当前通道没有可用的播放地址', 'info');
     } catch (e) {
-      if (rtspOpenFor === key) showToast(e instanceof Error ? e.message : '无法获取 RTSP 地址', 'error');
+      if (urlOpenFor === key) showToast(e instanceof Error ? e.message : '无法获取播放地址', 'error');
     } finally {
-      if (rtspLoadingFor === key) rtspLoadingFor = null;
+      if (urlLoadingFor === key) urlLoadingFor = null;
     }
   }
 
@@ -341,7 +345,7 @@
                         {/if}
                       </div>
                       <div class="flex items-center gap-2">
-                        <button type="button" class="btn btn-sm btn-secondary flex items-center gap-1" onclick={() => toggleRTSP(device.device_id, channel.channel_id, channel.stream_id)} disabled={rtspLoadingFor === streamKey} title="显示公网 RTSP 地址"><LinkIcon class="w-3 h-3" /> RTSP 地址</button>
+                        <button type="button" class="btn btn-sm btn-secondary flex items-center gap-1" onclick={() => toggleURLs(device.device_id, channel.channel_id, channel.stream_id)} disabled={urlLoadingFor === streamKey} title="显示 RTSP 和 WebRTC 地址" aria-expanded={urlOpenFor === streamKey}><LinkIcon class="w-3 h-3" /> URL</button>
                         {#if channel.is_playing}
                           <button
                             onclick={() => goToLive(channel.stream_id)}
@@ -369,10 +373,9 @@
                         {/if}
                       </div>
                       </div>
-                      {#if rtspOpenFor === streamKey && rtspURL}
+                      {#if urlOpenFor === streamKey && playURLs}
                         <div class="mt-3 border-t th-border pt-3">
-                          <label for={`rtsp-${device.device_id}-${channel.channel_id}`} class="mb-1 block text-xs th-text-secondary">公网 RTSP 播放地址（点击后全选，按 Ctrl+C）</label>
-                          <input id={`rtsp-${device.device_id}-${channel.channel_id}`} type="text" class="input w-full font-mono text-xs" readonly value={rtspURL} onclick={(event) => event.currentTarget.select()} onfocus={(event) => event.currentTarget.select()} />
+                          <PlaybackURLs rtspUrl={playURLs.rtsp} webrtcUrl={playURLs.webrtc} />
                         </div>
                       {/if}
                     </div>
