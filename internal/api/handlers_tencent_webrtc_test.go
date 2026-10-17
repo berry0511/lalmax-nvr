@@ -54,8 +54,8 @@ func TestTencentRTCPlay_RequiresAuthentication(t *testing.T) {
 
 func TestTencentRTCPlayAndUnplay_ReuseWHEP(t *testing.T) {
 	const streamID = "32010000001327000001:34020000001320000001"
-	const offer = "v=0\\r\\no=- 1 1 IN IP4 127.0.0.1\\r\\n"
-	const answer = "v=0\\r\\no=- 2 2 IN IP4 127.0.0.1\\r\\n"
+	const offer = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\n"
+	const answer = "v=0\r\no=- 2 2 IN IP4 127.0.0.1\r\n"
 	var created, deleted atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
