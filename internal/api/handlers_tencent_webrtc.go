@@ -109,8 +109,8 @@ func (h *Handler) handleTencentRTCPlay(w http.ResponseWriter, r *http.Request) {
 		tencentError(w, http.StatusBadGateway, "stream lookup failed")
 		return
 	}
-	if info == nil {
-		tencentError(w, http.StatusNotFound, "stream not found")
+	if info == nil || !info.Active {
+		tencentError(w, http.StatusNotFound, "stream not active")
 		return
 	}
 	upstream, err := h.mediaPlayURL(r.Context(), streamID, "webrtc")
