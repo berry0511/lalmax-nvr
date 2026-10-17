@@ -101,10 +101,19 @@ type MediaConfig struct {
 	RTSPPort int `yaml:"rtsp_port,omitempty"`
 	HTTPPort int `yaml:"http_port,omitempty"` // HTTP-FLV port
 	// RTSP server authentication
-	RTSPAuthEnable bool   `yaml:"rtsp_auth_enable,omitempty"` // Enable RTSP server auth (default false)
+	RTSPAuthEnable bool   `yaml:"rtsp_auth_enable,omitempty"` // RTSP Basic/Digest server auth (default false)
+	// RTSPPublishAuthEnabled controls shared auth.publish_tokens on RTSP publishes.
+	// It defaults to true; false skips RTSP publish token checks but still rejects banned streams.
+	RTSPPublishAuthEnabled *bool `yaml:"rtsp_publish_auth_enabled,omitempty"`
 	RTSPAuthMethod int    `yaml:"rtsp_auth_method,omitempty"` // 0=Basic, 1=Digest (default 0)
 	RTSPUsername   string `yaml:"rtsp_username,omitempty"`    // RTSP server username
 	RTSPPassword   string `yaml:"rtsp_password,omitempty"`    // RTSP server password
+}
+
+// RTSPPublishTokenAuthEnabled preserves the current shared-token policy when
+// the option is omitted, including configs loaded before ApplyDefaults.
+func (cfg MediaConfig) RTSPPublishTokenAuthEnabled() bool {
+	return cfg.RTSPPublishAuthEnabled == nil || *cfg.RTSPPublishAuthEnabled
 }
 
 // ValidateRTSPAuth checks that enabled RTSP authentication has usable credentials.
@@ -1146,6 +1155,10 @@ func (cfg *Config) ApplyDefaults() {
 	if cfg.Media.HTTPPlayAuthEnabled == nil {
 		enabled := true
 		cfg.Media.HTTPPlayAuthEnabled = &enabled
+	}
+	if cfg.Media.RTSPPublishAuthEnabled == nil {
+		enabled := true
+		cfg.Media.RTSPPublishAuthEnabled = &enabled
 	}
 	if strings.TrimSpace(cfg.Media.LalmaxHTTPAddr) == "" {
 		cfg.Media.LalmaxHTTPAddr = DefaultLalmaxHTTPAddr
