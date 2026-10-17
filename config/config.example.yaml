@@ -16,7 +16,7 @@ server:
 # Binary: set via --data-dir flag or directly in YAML.
 storage:
   root_dir: "/var/lib/lalmax-nvr"   # Change to your preferred path (e.g. /mnt/external/nvr)
-  segment_duration: "30s"          # MP4 segment duration (max 30s on RPi)
+  segment_duration: "30s"          # MP4 segment target duration (1s-30m; rotates at keyframe)
   # Optional: start directly with PostgreSQL or MySQL. Leave both unset for SQLite.
   # database_driver: "postgres"     # postgres | mysql
   # database_dsn: "postgres://nvr:password@127.0.0.1:5432/lalmax_nvr?sslmode=disable"

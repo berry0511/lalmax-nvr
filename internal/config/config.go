@@ -825,8 +825,8 @@ func Validate(cfg *Config) error {
 	// Validate segment_duration
 	if dur, err := time.ParseDuration(cfg.Storage.SegmentDuration); err != nil {
 		return fmt.Errorf("storage.segment_duration invalid: %w", err)
-	} else if dur > 30*time.Second {
-		return fmt.Errorf("storage.segment_duration must be <= 30s on RPi 3B, got %s", cfg.Storage.SegmentDuration)
+	} else if dur < time.Second || dur > 30*time.Minute {
+		return fmt.Errorf("storage.segment_duration must be between 1s and 30m, got %s", cfg.Storage.SegmentDuration)
 	}
 	if cfg.Media.Mode != "embedded" && cfg.Media.Mode != "http" {
 		return fmt.Errorf("media.mode invalid: %s (must be embedded/http)", cfg.Media.Mode)
