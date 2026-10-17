@@ -41,8 +41,10 @@ func TestRTMPPublishAuthDefaultsToRequired(t *testing.T) {
 	mediaAuth.SetPublishTokens("rtmp", map[string]string{"camera1": "expected-key"})
 	m := NewManager(&testStreamBanRepository{}, mediaAuth)
 	publisher := base.PubStartInfo{
-		Protocol:   base.SessionProtocolRtmpStr,
-		StreamName: "camera1",
+		SessionEventCommonInfo: base.SessionEventCommonInfo{
+			Protocol:   base.SessionProtocolRtmpStr,
+			StreamName: "camera1",
+		},
 	}
 	if err := m.OnPubStart(publisher); err == nil {
 		t.Fatal("default RTMP publishing must reject missing stream_key")
@@ -63,7 +65,9 @@ func TestRTMPAnonymousPublishStillEnforcesBans(t *testing.T) {
 	mediaAuth.SetPublishTokens("rtmp", map[string]string{"camera1": "expected-key"})
 	m := NewManager(repo, mediaAuth)
 	m.SetRTMPPublishAuthEnabled(false)
-	publisher := base.PubStartInfo{Protocol: base.SessionProtocolRtmpStr, StreamName: "camera1"}
+	publisher := base.PubStartInfo{SessionEventCommonInfo: base.SessionEventCommonInfo{
+		Protocol: base.SessionProtocolRtmpStr, StreamName: "camera1",
+	}}
 	for _, param := range []string{"", "stream_key=incorrect", "stream_key=%not-a-valid-escape"} {
 		publisher.UrlParam = param
 		if err := m.OnPubStart(publisher); err != nil {
@@ -91,7 +95,9 @@ func TestRTMPAuthOptOutDoesNotDisableRTSPAuthentication(t *testing.T) {
 	mediaAuth.SetPublishTokens("media", map[string]string{"camera1": "shared-key"})
 	m := NewManager(repo, mediaAuth)
 	m.SetRTMPPublishAuthEnabled(false)
-	rtsp := base.PubStartInfo{Protocol: base.SessionProtocolRtspStr, StreamName: "camera1"}
+	rtsp := base.PubStartInfo{SessionEventCommonInfo: base.SessionEventCommonInfo{
+		Protocol: base.SessionProtocolRtspStr, StreamName: "camera1",
+	}}
 	if err := m.OnPubStart(rtsp); err == nil {
 		t.Fatal("RTSP must still require configured shared publish token")
 	}
