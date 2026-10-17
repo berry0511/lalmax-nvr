@@ -110,6 +110,9 @@ func TestTencentRTCPlayAndUnplay_ReuseWHEP(t *testing.T) {
 	require.EqualValues(t, 1, deleted.Load())
 
 	// Repeated unplay must not issue a second upstream DELETE.
+	req = httptest.NewRequest(http.MethodPost, "/rtc/v1/unplay",
+		strings.NewReader(`{"sessionid":"`+got.Data.SessionID+`"}`))
+	req.Header.Set("Content-Type", "application/json")
 	resp = httptest.NewRecorder()
 	routes.ServeHTTP(resp, req)
 	require.Equal(t, http.StatusNotFound, resp.Code)
