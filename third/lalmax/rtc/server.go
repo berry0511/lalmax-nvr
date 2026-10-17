@@ -291,7 +291,140 @@ func (s *RtcServer) ServeWHEPPlayPage(c *gin.Context) {
 
 // buildWHEPPlayHTML 与 topsmedia/pkg/httpflv buildWHEPPage 内嵌脚本与结构保持一致。
 func buildWHEPPlayHTML() string {
-	return "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>WHEP Player</title><style>body{margin:0;background:#0f172a;color:#e2e8f0;font:14px/1.4 system-ui}main{max-width:960px;margin:0 auto;padding:24px}video{width:100%;background:#000;border-radius:12px}pre{white-space:pre-wrap;background:#111827;padding:12px;border-radius:12px;min-height:72px}</style></head><body><main><video id=\"video\" autoplay playsinline controls muted></video><pre id=\"log\">connecting...</pre></main><script>(async()=>{const log=(m)=>document.getElementById('log').textContent=m;const video=document.getElementById('video');const pc=new RTCPeerConnection();pc.ontrack=(e)=>{video.srcObject=e.streams[0];};pc.addTransceiver('video',{direction:'recvonly'});pc.addTransceiver('audio',{direction:'recvonly'});const offer=await pc.createOffer();await pc.setLocalDescription(offer);await new Promise(r=>{if(pc.iceGatheringState==='complete')return r();pc.addEventListener('icegatheringstatechange',()=>pc.iceGatheringState==='complete'&&r(),{once:false});});const res=await fetch(location.href,{method:'POST',headers:{'Content-Type':'application/sdp'},body:pc.localDescription.sdp});if(!res.ok){log('whep failed: '+res.status+' '+await res.text());return;}const answer=await res.text();await pc.setRemoteDescription({type:'answer',sdp:answer});log('connected: '+location.href);})();</script></body></html>"
+	return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WHEP Player</title>
+<style>
+body{margin:0;background:#0f172a;color:#e2e8f0;font:14px/1.4 system-ui}
+main{max-width:960px;margin:0 auto;padding:24px}
+video{width:100%;background:#000;border-radius:12px}
+pre{white-space:pre-wrap;background:#111827;padding:12px;border-radius:12px;min-height:72px}
+</style>
+</head>
+<body>
+<main>
+<video id="video" autoplay playsinline controls muted></video>
+<pre id="status">Preparing WebRTC playback...</pre>
+</main>
+<script>
+(async () => {
+  const video = document.getElementById('video');
+  const status = document.getElementById('status');
+  const pc = new RTCPeerConnection();
+  const media = new MediaStream();
+
+  function updateStatus(detail = '') {
+    const parts = [
+      'Peer: ' + pc.connectionState,
+      'ICE: ' + pc.iceConnectionState,
+      'Video track: ' + (media.getVideoTracks().length ? 'attached' : 'waiting'),
+      'Video size: ' + video.videoWidth + 'x' + video.videoHeight
+    ];
+    if (detail) parts.push(detail);
+    status.textContent = parts.join('\n');
+  }
+
+  function playVideo() {
+    if (!media.getVideoTracks().length) return;
+    video.play().catch(err => updateStatus('video.play(): ' + err.message));
+  }
+
+  function attachTrack(track) {
+    if (!track || media.getTracks().includes(track)) return;
+    media.addTrack(track);
+    // A remote RTCTrackEvent may have streams=[], so always use our own
+    // MediaStream. Never depend on event.streams[0] existing.
+    if (video.srcObject !== media) video.srcObject = media;
+    track.addEventListener('unmute', playVideo);
+    if (track.kind === 'video') playVideo();
+    updateStatus('Received ' + track.kind + ' track');
+  }
+
+  pc.ontrack = event => {
+    if (event.streams && event.streams[0]) {
+      for (const track of event.streams[0].getTracks()) attachTrack(track);
+    }
+    attachTrack(event.track);
+  };
+
+  // Also handle browsers which expose the receiver track before firing
+  // the corresponding ontrack callback.
+  function attachReceiverTracks() {
+    for (const receiver of pc.getReceivers()) {
+      if (receiver.track && receiver.track.readyState === 'live') {
+        attachTrack(receiver.track);
+      }
+    }
+  }
+
+  pc.onconnectionstatechange = () => updateStatus();
+  pc.oniceconnectionstatechange = () => updateStatus();
+  video.onloadedmetadata = playVideo;
+  video.onplaying = () => updateStatus('Video is playing');
+  video.onerror = () => updateStatus('Video element error');
+  pc.addTransceiver('video', {direction: 'recvonly'});
+  pc.addTransceiver('audio', {direction: 'recvonly'});
+
+  async function waitForICEGathering() {
+    if (pc.iceGatheringState === 'complete') return;
+    await new Promise(resolve => {
+      const complete = () => {
+        if (pc.iceGatheringState !== 'complete') return;
+        clearTimeout(timeout);
+        pc.removeEventListener('icegatheringstatechange', complete);
+        resolve();
+      };
+      const timeout = setTimeout(() => {
+        pc.removeEventListener('icegatheringstatechange', complete);
+        resolve();
+      }, 5000);
+      pc.addEventListener('icegatheringstatechange', complete);
+    });
+  }
+
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await waitForICEGathering();
+    const response = await fetch(location.href, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/sdp'},
+      body: pc.localDescription.sdp
+    });
+    if (!response.ok) throw new Error('WHEP HTTP ' + response.status + ': ' + await response.text());
+    const answer = await response.text();
+    await pc.setRemoteDescription({type: 'answer', sdp: answer});
+    attachReceiverTracks();
+    updateStatus('SDP negotiated; waiting for media');
+    setInterval(async () => {
+      attachReceiverTracks();
+      try {
+        const stats = await pc.getStats();
+        let bytes = 0;
+        let frames = 0;
+        stats.forEach(item => {
+          if (item.type === 'inbound-rtp' && (item.kind === 'video' || item.mediaType === 'video')) {
+            bytes += item.bytesReceived || 0;
+            frames += item.framesDecoded || 0;
+          }
+        });
+        updateStatus('Video bytes: ' + bytes + ' | decoded frames: ' + frames);
+      } catch (err) {
+        updateStatus('Stats unavailable: ' + err.message);
+      }
+    }, 2000);
+  } catch (err) {
+    updateStatus('WHEP failed: ' + err.message);
+    pc.close();
+  }
+  window.addEventListener('pagehide', () => pc.close(), {once: true});
+})();
+</script>
+</body>
+</html>`
 }
 
 func (s *RtcServer) HandleWHEP(c *gin.Context) {
