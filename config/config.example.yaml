@@ -194,11 +194,17 @@ webdav:
 
 # RTMP ingest — receive pushed streams from cameras or encoders
 # RTMP is served by the embedded media engine on port 11935 by default when enabled.
-# stream_keys maps stream_id -> required publish token.
-# Push URL format: rtmp://<host>:11935/live/<stream_id>?stream_key=<token>
+# RTMP publishing requires stream_key by default (publish_auth_enabled: true).
+# Push URL: rtmp://<host>:11935/live/<stream_id>?stream_key=<token>
+# To accept anonymous RTMP publishers on a TRUSTED LAN only:
+#   publish_auth_enabled: false
+# Anonymous RTMP still checks banned stream IDs. Exposing an anonymous RTMP
+# port to the Internet allows unknown senders to publish or occupy stream IDs.
+# Restrict TCP 11935 with host/cloud firewall rules before disabling auth.
 # rtmp:
 #   enabled: true
 #   port: 11935
+#   publish_auth_enabled: true  # default (omit for secure default)
 #   stream_keys:
 #     front-door: "generate-a-long-random-token"
 
