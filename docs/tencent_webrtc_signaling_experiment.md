@@ -19,7 +19,7 @@ Example: existing live channel must be published first:
 
 ```json
 {
-  "streamurl": "webrtc://YOUR_NVR_HOST:19090/live/32010000001327000001:34020000001320000001",
+  "streamurl": "webrtc://YOUR_NVR_HOST:19090/live/device-id:channel-id",
   "sdp": "v=0\r\n...browser SDP offer...\r\n"
 }
 ```
