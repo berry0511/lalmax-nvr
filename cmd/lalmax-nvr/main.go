@@ -626,6 +626,10 @@ func NewApp(cfg *config.Config, configPath string) (*App, error) {
 	a.mediaAuth.SetPublishTokens("whip", cfg.WHIP.PublishTokens)
 	a.mediaAuth.SetPlaybackTokens("media", cfg.Auth.PlaybackTokens)
 	a.banMgr = ban.NewManager(db, a.mediaAuth)
+	a.banMgr.SetRTMPPublishAuthEnabled(cfg.RTMP.RTMPPublishAuthEnabled())
+	if !cfg.RTMP.RTMPPublishAuthEnabled() {
+		slog.Warn("RTMP publish authentication is disabled; restrict RTMP port to trusted senders", "port", cfg.RTMP.Port)
+	}
 
 	internalTokenBytes := make([]byte, 32)
 	if _, err := rand.Read(internalTokenBytes); err != nil {
