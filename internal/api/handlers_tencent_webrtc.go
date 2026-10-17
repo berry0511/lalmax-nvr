@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -193,7 +194,7 @@ func (h *Handler) deleteTencentUpstreamSession(r *http.Request, upstreamURL stri
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return http.ErrNotSupported
+		return fmt.Errorf("upstream WHEP DELETE returned %d", resp.StatusCode)
 	}
 	return nil
 }
