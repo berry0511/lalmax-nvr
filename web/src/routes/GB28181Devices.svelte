@@ -373,7 +373,7 @@
                       </div>
                       {#if urlOpenFor === streamKey && playURLs}
                         <div class="mt-3 border-t th-border pt-3">
-                          <PlaybackURLs rtspUrl={playURLs.rtsp} webrtcUrl={playURLs.webrtc} />
+                          <PlaybackURLs idPrefix={streamKey} rtspUrl={playURLs.rtsp} webrtcUrl={playURLs.webrtc} />
                         </div>
                       {/if}
                     </div>
