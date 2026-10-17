@@ -40,6 +40,15 @@ media:
   # listener ports use the embedded media engine defaults.
   # rtmp_port: 11935                      # External lal RTMP port (default: 11935)
   # rtsp_port: 15544                      # External lal RTSP port (default: 15544)
+  # Native RTSP Basic/Digest auth is disabled by default.
+  # rtsp_auth_enable: false
+  # By default a configured auth.publish_tokens also applies to RTSP publishers.
+  # For explicitly anonymous RTSP publishing (no native login and no shared
+  # publish token), set BOTH rtsp_auth_enable: false and the following flag:
+  # rtsp_publish_auth_enabled: false
+  # When false, the NVR also turns off native RTSP auth in an existing
+  # lalmax.conf.json, while retaining the ban checks. Use only on a trusted LAN.
+  # Optional auth.playback_tokens can still protect RTSP/RTMP playback separately.
   # http_port: 18080                      # External lal HTTP-FLV/HLS-TS port (default: 18080)
   #
   # Protocol -> Port mapping:
