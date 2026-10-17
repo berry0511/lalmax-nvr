@@ -478,12 +478,34 @@ func TestFTPPortZeroRejected(t *testing.T) {
 	require.Contains(t, err.Error(), "ftp port out of range")
 }
 
-func TestSegmentDurationExceeds30s(t *testing.T) {
-	cfg := &Config{Storage: StorageConfig{SegmentDuration: "60s"}}
-	cfg.ApplyDefaults()
-	err := Validate(cfg)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "must be <= 30s")
+func TestSegmentDurationRange(t *testing.T) {
+	for _, tc := range []struct {
+		duration string
+		valid    bool
+	}{
+		{"1s", true},
+		{"30s", true},
+		{"1m", true},
+		{"5m", true},
+		{"10m", true},
+		{"30m", true},
+		{"500ms", false},
+		{"0s", false},
+		{"30m1s", false},
+		{"not-a-duration", false},
+	} {
+		t.Run(tc.duration, func(t *testing.T) {
+			cfg := &Config{}
+			cfg.ApplyDefaults()
+			cfg.Storage.SegmentDuration = tc.duration
+			err := Validate(cfg)
+			if tc.valid {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
 }
 
 func TestHLSSegmentDurationDefault30sPasses(t *testing.T) {
