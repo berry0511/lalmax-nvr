@@ -289,7 +289,8 @@ func (s *RtcServer) ServeWHEPPlayPage(c *gin.Context) {
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(buildWHEPPlayHTML()))
 }
 
-// buildWHEPPlayHTML 与 topsmedia/pkg/httpflv buildWHEPPage 内嵌脚本与结构保持一致。
+// buildWHEPPlayHTML serves a diagnostic WHEP player that also handles remote
+// tracks with no MediaStream association (RTCTrackEvent.streams may be empty).
 func buildWHEPPlayHTML() string {
 	return `<!doctype html>
 <html lang="en">
