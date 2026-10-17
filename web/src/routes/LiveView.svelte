@@ -370,7 +370,7 @@
       </div>
       {#if showURLs && (streamPlayURLs['rtsp'] || streamPlayURLs['webrtc'])}
         <div class="mt-2 w-full rounded-lg border border-[var(--border)] bg-[var(--bg-elevated)] p-3">
-          <PlaybackURLs rtspUrl={streamPlayURLs['rtsp'] || ''} webrtcUrl={streamPlayURLs['webrtc'] || ''} />
+          <PlaybackURLs idPrefix={camera.id} rtspUrl={streamPlayURLs['rtsp'] || ''} webrtcUrl={streamPlayURLs['webrtc'] || ''} />
         </div>
       {/if}
 
