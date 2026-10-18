@@ -9,6 +9,7 @@ import (
 	"github.com/lalmax-pro/lalmax-nvr/internal/config"
 	"github.com/lalmax-pro/lalmax-nvr/internal/event"
 	"github.com/lalmax-pro/lalmax-nvr/internal/media"
+	"github.com/lalmax-pro/lalmax-nvr/internal/metrics"
 	"github.com/lalmax-pro/lalmax-nvr/internal/model"
 	"github.com/lalmax-pro/lalmax-nvr/internal/observability"
 	"github.com/lalmax-pro/lalmax-nvr/internal/storage"
@@ -69,6 +70,7 @@ type GroupWriter struct {
 	db     recordingDB
 	bus    *event.EventBus
 	engine media.Engine
+	metrics *metrics.Metrics
 	segDur time.Duration
 	groups groupFinder
 	lookup func(string) (config.CameraConfig, bool)
@@ -85,7 +87,7 @@ type GroupWriter struct {
 
 // NewGroupWriter records from the in-process lalmax group manager.
 // engine may be nil in tests; Run then only reconciles groups on its ticker.
-func NewGroupWriter(store *storage.Manager, db RecordingDB, bus *event.EventBus, engine media.Engine, segDur time.Duration) *GroupWriter {
+func NewGroupWriter(store *storage.Manager, db RecordingDB, bus *event.EventBus, engine media.Engine, segDur time.Duration, metricsOpt ...*metrics.Metrics) *GroupWriter {
 	if segDur <= 0 {
 		segDur = DefaultSegmentDur
 	}
@@ -93,11 +95,14 @@ func NewGroupWriter(store *storage.Manager, db RecordingDB, bus *event.EventBus,
 	if db != nil {
 		recDB = db
 	}
+	var m *metrics.Metrics
+	if len(metricsOpt) > 0 { m = metricsOpt[0] }
 	return &GroupWriter{
 		store:      store,
 		db:         recDB,
 		bus:        bus,
 		engine:     engine,
+		metrics:    m,
 		segDur:     segDur,
 		groups:     lalmaxGroups{},
 		sessions:   make(map[string]*recSession),
@@ -277,6 +282,7 @@ func (w *GroupWriter) AttachCameraContext(ctx context.Context, cam config.Camera
 		store:     w.store,
 		db:        w.db,
 		bus:       w.bus,
+		metrics:   w.metrics,
 		group:     group,
 		owner:     w,
 		hub:       model.NewStreamHub(),
@@ -501,8 +507,20 @@ func (r *recSubscriber) OnMsg(msg base.RtmpMsg) {
 	}
 	cloned := msg.Clone()
 	select {
+	case <-r.s.stop:
+		return
 	case r.s.queue <- cloned:
 	default:
+		count := r.s.queueDrops.Add(1)
+		if r.s.metrics != nil && r.s.metrics.RecorderGroupQueueDropsTotal != nil {
+			r.s.metrics.RecorderGroupQueueDropsTotal.WithLabelValues(r.s.cameraID).Inc()
+		}
+		// Log the first overflow and periodic milestones, not every frame on the hot path.
+		if count == 1 || count%1024 == 0 {
+			slog.Warn("recording subscriber queue overflow: media messages dropped",
+				"camera_id", r.s.cameraID, "dropped_total", count,
+				"queue_capacity", cap(r.s.queue))
+		}
 	}
 }
 
