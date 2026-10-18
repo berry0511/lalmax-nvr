@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/emiago/sipgo"
@@ -23,7 +24,10 @@ type Server struct {
 	cfg       *Config
 	db        storage.GB28181Repository
 	store     *DeviceStore
+	ctx       context.Context
 	cancel    context.CancelFunc
+	backgroundWG sync.WaitGroup
+	stopOnce sync.Once
 	platforms *PlatformManager
 	broadcast *BroadcastManager
 	talk      *TalkManager
@@ -101,6 +105,7 @@ func NewServer(cfg *Config, mediaEngine media.Engine, db storage.GB28181Reposito
 	srv.OnAck(s.handlerAck)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	s.ctx = ctx
 	s.cancel = cancel
 
 	go func() {
@@ -119,9 +124,10 @@ func NewServer(cfg *Config, mediaEngine media.Engine, db storage.GB28181Reposito
 			slog.Info("GB28181 SIP TCP server stopped")
 		}
 	}()
-	go s.startTickerCheck()
+	s.backgroundWG.Add(2)
+	go func() { defer s.backgroundWG.Done(); s.startTickerCheck() }()
 	go s.hub.Run()
-	go s.startChannelMissingScan()
+	go func() { defer s.backgroundWG.Done(); s.startChannelMissingScan() }()
 
 	// Load upstream platforms
 	go func() {
@@ -138,7 +144,13 @@ func (s *Server) startTickerCheck() {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if s.ctx.Err() != nil { return }
 		now := time.Now()
 		s.store.RangeDevices(func(key string, dev *Device) bool {
 			if !dev.IsOnline {
@@ -179,14 +191,21 @@ func (s *Server) startChannelMissingScan() {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		s.scanMissingChannels()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			if s.ctx.Err() != nil { return }
+			s.scanMissingChannels()
+		}
 	}
 }
 
 // scanMissingChannels checks for channels with high missing_count and marks them offline.
 func (s *Server) scanMissingChannels() {
-	ctx := context.Background()
+	ctx := s.ctx
+	if ctx == nil { ctx = context.Background() }
 
 	// 查询 missing_count >= 3 的通道
 	channels, err := s.db.ListMissingChannels(ctx, 3)
@@ -631,10 +650,13 @@ func (s *Server) ListDevices() []map[string]interface{} {
 
 // Stop stops the SIP server.
 func (s *Server) Stop() {
+	s.stopOnce.Do(func() {
 	slog.Info("[SIP] stopping GB28181 server")
 	if s.cancel != nil {
 		s.cancel()
 	}
+	// Wait for canceled background scans before disposing the SIP dependencies.
+	s.backgroundWG.Wait()
 	// Stop platform manager
 	if s.platforms != nil {
 		s.platforms.mu.Lock()
@@ -659,6 +681,7 @@ func (s *Server) Stop() {
 		s.ua.Close()
 	}
 	slog.Info("[SIP] GB28181 server stopped")
+	})
 }
 
 // resolveHost resolves a hostname to IP address.
