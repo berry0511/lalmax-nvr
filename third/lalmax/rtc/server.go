@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
+	"github.com/q191201771/lal/pkg/base"
 	"github.com/q191201771/lal/pkg/logic"
 	"github.com/q191201771/naza/pkg/nazalog"
 )
@@ -74,32 +75,73 @@ func (s *RtcServer) Close() error {
 	}
 	if s.tcpMux != nil {
 		if err := s.tcpMux.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
+			firs// whepMediaReady means that WHEP can offer a codec-backed media track.
+// A created Group alone is not enough: GB28181/RTP may have opened its
+// receiver without receiving a sequence header yet.
+func whepMediaReady(group *maxlogic.Group) bool {
+	if group == nil {
+		return false
 	}
-	return firstErr
+	video := group.GetVideoSeqHeaderMsg()
+	if video != nil && (video.IsAvcKeySeqHeader() || video.IsHevcKeySeqHeader()) {
+		return true
+	}
+	audio := group.GetAudioSeqHeaderMsg()
+	if audio == nil {
+		return false
+	}
+	switch audio.AudioCodecId() {
+	case base.RtmpSoundFormatG711A, base.RtmpSoundFormatG711U, base.RtmpSoundFormatOpus:
+		return true
+	default:
+		return false
+	}
 }
 
-// waitStreamReady 触发 on_stream_not_found 后轮询等待流就绪
-// 为什么：WebRTC 播放请求先于 GB28181 设备推流到达，需通知上层拉流后等待
+// waitStreamReady requests a missing publisher once and waits for the requested
+// protocol's readiness. WHEP must see a supported codec sequence header before
+// SDP negotiation; RTSP/other call sites retain their existing Group semantics.
 func (s *RtcServer) waitStreamReady(appName, streamid, schema string) bool {
 	key := maxlogic.NewStreamKey(appName, streamid)
-	if ok, _ := maxlogic.GetGroupManagerInstance().GetGroup(key); ok {
+	groups := maxlogic.GetGroupManagerInstance()
+	ready := func(group *maxlogic.Group) bool {
+		if group == nil {
+			return false
+		}
+		if schema == "whep" {
+			return whepMediaReady(group)
+		}
 		return true
 	}
 
-	if s.streamNotFoundFn != nil {
+	_, group := groups.GetGroup(key)
+	if ready(group) {
+		return true
+	}
+	// An existing Group can be waiting for media after SIP INVITE. Do not
+	// trigger another INVITE just because its codec headers are not ready.
+	if group == nil && s.streamNotFoundFn != nil {
 		nazalog.Infof("stream not found, triggering on_stream_not_found. app=%s, stream=%s", appName, streamid)
 		s.streamNotFoundFn(appName, streamid, schema)
 	}
 
-	// GB28181 SIP INVITE + PS/RTP startup may take longer than an existing
-	// publisher lookup. Extend the WHEP window only for GB28181-style IDs.
 	wait := 5 * time.Second
 	if schema == "whep" && len(streamid) == 41 && strings.Count(streamid, ":") == 1 {
 		wait = 12 * time.Second
 	}
-	ok, _ := maxlogic.GetGroupManagerInstance().WaitGroup(key, 500*time.Millisecond, wait)
+	deadline := time.Now().Add(wait)
+	for {
+		_, group = groups.GetGroup(key)
+		if ready(group) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+*time.Millisecond, wait)
 	return ok
 }
 
