@@ -235,7 +235,7 @@ func TestTestConnection_RTSPConnectionRefused(t *testing.T) {
 	defer db.Close()
 	h := TestHandler(db, store)
 
-	body := `{"protocol":"rtsp","url":"rtsp://192.168.255.255:554/stream"}`
+	body := `{"protocol":"rtsp","url":"rtsp://127.0.0.1:1/stream"}`
 	rr := doRequest(t, h.Routes(), "POST", "/api/cameras/test-connection", bytes.NewReader([]byte(body)), "", "")
 	require.Equal(t, http.StatusOK, rr.Code)
 
