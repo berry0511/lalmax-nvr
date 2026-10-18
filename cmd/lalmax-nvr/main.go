@@ -1222,7 +1222,7 @@ func (a *App) wireRecordTasks() {
 		segDur = recorder.DefaultSegmentDur
 	}
 	if _, ok := a.mediaEngine.(*media.EmbeddedLalmax); ok {
-		a.groupWriter = recorder.NewGroupWriter(a.store, a.db, a.eventBus, a.mediaEngine, segDur)
+		a.groupWriter = recorder.NewGroupWriter(a.store, a.db, a.eventBus, a.mediaEngine, segDur, a.metrics)
 		a.camMgr.SetGroupWriter(a.groupWriter)
 	}
 	tasks := recorder.NewTaskManager(a.mediaEngine, a.store, a.db, a.metrics, a.eventBus, segDur)
