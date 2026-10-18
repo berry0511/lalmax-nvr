@@ -52,7 +52,7 @@ func TestBuiltInWHIPPublisherKeepsDiagnosticsVisible(t *testing.T) {
 	if strings.Contains(html, "pre{display:none;") {
 		t.Fatal("WHIP publisher status was unintentionally hidden")
 	}
-	if !strings.Contains(html, "<pre id=\\\"log\\\">") {
+	if !strings.Contains(html, `<pre id="log">`) {
 		t.Fatal("WHIP publisher logging area missing")
 	}
 }
