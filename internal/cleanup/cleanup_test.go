@@ -189,6 +189,41 @@ func TestRunOnce_TimeBasedCleanup(t *testing.T) {
 	require.True(t, os.IsNotExist(err))
 }
 
+// A failed deletion must be reported without preventing other expired
+// recordings from being deleted in the same retention pass.
+func TestRunOnce_TimeBasedCleanupReportsPartialFailure(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.close(t)
+
+	cfg := defaultCleanupConfig()
+	cfg.RetentionDays = 1
+	cfg.DiskThresholdPercent = 101
+	cm, err := NewCleanupManager(env.db, env.store, cfg)
+	require.NoError(t, err)
+
+	old := time.Now().Add(-48 * time.Hour)
+	env.insertTestRecording(t, "blocked-rec", "cam1", "cam1/blocked.mp4", old, false)
+	env.insertTestRecording(t, "deletable-rec", "cam1", "cam1/deletable.mp4", old, false)
+
+	// Force one SQLite deletion to fail while allowing the other to proceed.
+	_, err = env.db.DB().Exec(`CREATE TRIGGER reject_blocked_cleanup
+		BEFORE DELETE ON recordings
+		WHEN OLD.id = 'blocked-rec'
+		BEGIN SELECT RAISE(ABORT, 'injected deletion failure'); END`)
+	require.NoError(t, err)
+
+	err = cm.RunOnce(context.Background())
+	require.ErrorContains(t, err, "blocked-rec")
+	require.ErrorContains(t, err, "injected deletion failure")
+
+	blocked, err := env.db.GetRecording(context.Background(), "blocked-rec")
+	require.NoError(t, err)
+	require.NotNil(t, blocked)
+	deleted, err := env.db.GetRecording(context.Background(), "deletable-rec")
+	require.NoError(t, err)
+	require.Nil(t, deleted)
+}
+
 func TestRunOnce_WithRetentionDays(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
