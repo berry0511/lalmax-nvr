@@ -10,6 +10,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -661,9 +662,8 @@ func TestResolvePathAbsoluteEscape(t *testing.T) {
 	// filepath.Clean("/../../../etc/passwd") → "/etc/passwd"
 	// filepath.Join(root, "/etc/passwd") → root/etc/passwd (WITHIN root)
 	// This is SAFE — resolvePath correctly confines to root.
-	path, err := cd.resolvePath("/../../../etc/passwd")
-	require.NoError(t, err)
-	require.Equal(t, filepath.Join(srv.storageMgr.RootDir(), "etc", "passwd"), path)
+	_, err := cd.resolvePath("/../../../etc/passwd")
+	require.ErrorContains(t, err, "access denied")
 }
 
 // --- resolvePath traversal: deep nesting stays within root ---
@@ -674,9 +674,8 @@ func TestResolvePathDeepTraversal(t *testing.T) {
 	cd := &clientDriver{server: srv}
 
 	// filepath.Clean normalizes away the .., result stays within root
-	path, err := cd.resolvePath("/cam01/../../../../../../etc/passwd")
-	require.NoError(t, err)
-	require.Equal(t, filepath.Join(srv.storageMgr.RootDir(), "etc", "passwd"), path)
+	_, err := cd.resolvePath("/cam01/../../../../../../etc/passwd")
+	require.ErrorContains(t, err, "access denied")
 }
 
 // --- resolvePath traversal: mixed dot-dot segments ---
@@ -687,9 +686,8 @@ func TestResolvePathMixedTraversal(t *testing.T) {
 	cd := &clientDriver{server: srv}
 
 	// filepath.Clean normalizes to /etc/passwd, which stays within root
-	path, err := cd.resolvePath("/cam01/video/../../../etc/passwd")
-	require.NoError(t, err)
-	require.Equal(t, filepath.Join(srv.storageMgr.RootDir(), "etc", "passwd"), path)
+	_, err := cd.resolvePath("/cam01/video/../../../etc/passwd")
+	require.ErrorContains(t, err, "access denied")
 }
 
 // --- resolvePath normal subdirectory ---
@@ -728,7 +726,7 @@ func TestStatAbsolutePathWithinRoot(t *testing.T) {
 	// Should fail because the file doesn't exist, not because of access denial
 	_, err := cd.Stat("/../../../etc/passwd")
 	require.Error(t, err)
-	require.NotContains(t, err.Error(), "access denied")
+	require.ErrorContains(t, err, "access denied")
 }
 
 // --- Mkdir with relative traversal (actually escapes) ---
@@ -779,7 +777,7 @@ func TestOpenAbsolutePathWithinRoot(t *testing.T) {
 	// Should fail because file doesn't exist, not because of access denial
 	_, err := cd.Open("/../../../etc/shadow")
 	require.Error(t, err)
-	require.NotContains(t, err.Error(), "access denied")
+	require.ErrorContains(t, err, "access denied")
 }
 
 // --- GetHandle download resolves absolute paths within root ---
@@ -793,7 +791,7 @@ func TestGetHandleDownloadAbsolutePath(t *testing.T) {
 	// Should fail because file doesn't exist, not because of access denial
 	_, err := cd.GetHandle("/../../../etc/passwd", os.O_RDONLY, 0)
 	require.Error(t, err)
-	require.NotContains(t, err.Error(), "access denied")
+	require.ErrorContains(t, err, "access denied")
 }
 
 // --- GetHandle upload with traversal in camera ID ---
@@ -836,7 +834,7 @@ func TestReadDirAbsolutePathWithinRoot(t *testing.T) {
 	// Should fail because dir doesn't exist, not because of access denial
 	_, err := cd.ReadDir("/../../../etc")
 	require.Error(t, err)
-	require.NotContains(t, err.Error(), "access denied")
+	require.ErrorContains(t, err, "access denied")
 }
 
 // --- AuthUser rejects empty strings ---
@@ -973,7 +971,11 @@ func TestChmod(t *testing.T) {
 
 	info, err := os.Stat(filePath)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+	if runtime.GOOS == "windows" {
+		assert.Equal(t, os.FileMode(0666), info.Mode().Perm())
+	} else {
+		assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+	}
 }
 
 func TestChtimes(t *testing.T) {
