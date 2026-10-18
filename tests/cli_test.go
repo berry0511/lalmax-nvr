@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -18,7 +19,11 @@ import (
 
 func buildBinary(t *testing.T) string {
 	t.Helper()
-	binPath := filepath.Join(t.TempDir(), "lalmax-nvr-test")
+	binName := "lalmax-nvr-test"
+	if runtime.GOOS == "windows" {
+		binName += ".exe"
+	}
+	binPath := filepath.Join(t.TempDir(), binName)
 	rootDir := filepath.Join("..", "cmd", "lalmax-nvr")
 	cmd := exec.Command("go", "build", "-o", binPath, rootDir)
 	output, err := cmd.CombinedOutput()
