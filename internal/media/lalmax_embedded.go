@@ -243,6 +243,17 @@ func (e *EmbeddedLalmax) RegisterHookPlugin(plugin lalmaxserver.HookPlugin, opti
 	}, nil
 }
 
+// unregisterHookBindings shuts down the old server's plugin workers. The
+// descriptors remain so the next embedded server can re-register them.
+func (e *EmbeddedLalmax) unregisterHookBindings() {
+	for _, reg := range e.hookPlugins {
+		if reg.cancel != nil {
+			reg.cancel()
+			reg.cancel = nil
+		}
+	}
+}
+
 // rebindHookPlugins is called with lifecycleMu held before the replacement
 // server starts handling traffic. All NVR hook consumers use this registry.
 func (e *EmbeddedLalmax) rebindHookPlugins(server *lalmaxserver.LalMaxServer) error {
@@ -418,6 +429,7 @@ func (e *EmbeddedLalmax) Shutdown(ctx context.Context) error {
 	if err := server.Shutdown(ctx); err != nil {
 		return err
 	}
+	e.unregisterHookBindings()
 	e.clearServer(server)
 	return nil
 }
@@ -440,6 +452,7 @@ func (e *EmbeddedLalmax) Restart(ctx context.Context, rtmpPort, srtPort int, rtm
 	// in-flight viewers and times out while holding the engine lock.
 	if old != nil {
 		old.Close()
+		e.unregisterHookBindings()
 		time.Sleep(200 * time.Millisecond)
 	}
 
@@ -484,6 +497,7 @@ func (e *EmbeddedLalmax) Restart(ctx context.Context, rtmpPort, srtPort int, rtm
 	e.mu.Unlock()
 
 	if err := e.rebindHookPlugins(svr); err != nil {
+		e.unregisterHookBindings()
 		e.clearServer(svr)
 		return err
 	}
@@ -1223,6 +1237,7 @@ func (e *EmbeddedLalmax) shutdownAndClear(server *lalmaxserver.LalMaxServer) {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	_ = server.Shutdown(shutdownCtx)
 	cancel()
+	e.unregisterHookBindings()
 	e.clearServer(server)
 }
 
