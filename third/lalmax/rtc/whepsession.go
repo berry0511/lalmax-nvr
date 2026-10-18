@@ -35,6 +35,7 @@ type whepSession struct {
 	streamID       string
 	onRunEnd       func()
 	closeOnce      sync.Once
+	closing        atomic.Bool
 	closeChan      chan bool
 	connectedChan  chan struct{}
 	connectedOnce  sync.Once
@@ -58,6 +59,7 @@ func boundedWHEPQueueSize(requested int) int {
 func (conn *whepSession) requestClose() {
 	if conn == nil { return }
 	conn.closeOnce.Do(func() {
+		conn.closing.Store(true)
 		select {
 		case conn.closeChan <- true:
 		default:
@@ -67,11 +69,7 @@ func (conn *whepSession) requestClose() {
 
 func (conn *whepSession) enqueue(msg base.RtmpMsg) {
 	if conn == nil { return }
-	select {
-	case <-conn.closeChan:
-		return
-	default:
-	}
+	if conn.closing.Load() { return }
 	select {
 	case conn.msgChan <- msg:
 	default:
