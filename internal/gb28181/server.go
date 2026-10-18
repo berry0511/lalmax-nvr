@@ -124,9 +124,9 @@ func NewServer(cfg *Config, mediaEngine media.Engine, db storage.GB28181Reposito
 			slog.Info("GB28181 SIP TCP server stopped")
 		}
 	}()
-	s.backgroundWG.Add(2)
+	s.backgroundWG.Add(3)
 	go func() { defer s.backgroundWG.Done(); s.startTickerCheck() }()
-	go s.hub.Run()
+	go func() { defer s.backgroundWG.Done(); s.hub.Run() }()
 	go func() { defer s.backgroundWG.Done(); s.startChannelMissingScan() }()
 
 	// Load upstream platforms
@@ -655,7 +655,8 @@ func (s *Server) Stop() {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	// Wait for canceled background scans before disposing the SIP dependencies.
+	if s.hub != nil { s.hub.Stop() }
+	// Wait for canceled background scans and WebSocket pumps before disposing the SIP dependencies.
 	s.backgroundWG.Wait()
 	// Stop platform manager
 	if s.platforms != nil {
