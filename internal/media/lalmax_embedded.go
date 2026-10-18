@@ -72,6 +72,15 @@ type EmbeddedLalmax struct {
 	httpEngine       *LalmaxHTTP
 	svrOpts          []lalmaxserver.LalMaxServerOption
 	jt1078Authorizer jt1078.StreamAuthorizer
+	// Protected by lifecycleMu; retained and rebound when a new LalMaxServer
+	// replaces the old instance during an embedded media restart.
+	hookPlugins map[string]*embeddedHookPlugin
+}
+
+type embeddedHookPlugin struct {
+	plugin lalmaxserver.HookPlugin
+	options lalmaxserver.HookPluginOptions
+	cancel func()
 }
 
 func applyEmbeddedPortDefaults(cfg *EmbeddedLalmaxConfig) {
@@ -197,13 +206,54 @@ func lalLogHook() nazalog.HookBackendOutFn {
 // RegisterHookPlugin registers a hook plugin with the embedded lalmax server.
 // Must be called after NewEmbeddedLalmax and before Start.
 func (e *EmbeddedLalmax) RegisterHookPlugin(plugin lalmaxserver.HookPlugin, options lalmaxserver.HookPluginOptions) (func(), error) {
+	if plugin == nil || plugin.Name() == "" {
+		return nil, fmt.Errorf("embedded hook plugin requires a name")
+	}
+	e.lifecycleMu.Lock()
+	defer e.lifecycleMu.Unlock()
 	e.mu.Lock()
 	server := e.server
 	e.mu.Unlock()
 	if server == nil {
 		return nil, fmt.Errorf("embedded lalmax server is nil")
 	}
-	return server.RegisterHookPlugin(plugin, options)
+	if e.hookPlugins == nil {
+		e.hookPlugins = make(map[string]*embeddedHookPlugin)
+	}
+	name := plugin.Name()
+	if _, exists := e.hookPlugins[name]; exists {
+		return nil, fmt.Errorf("embedded hook plugin already registered: %s", name)
+	}
+	cancel, err := server.RegisterHookPlugin(plugin, options)
+	if err != nil {
+		return nil, err
+	}
+	reg := &embeddedHookPlugin{plugin: plugin, options: options, cancel: cancel}
+	e.hookPlugins[name] = reg
+	return func() {
+		e.lifecycleMu.Lock()
+		defer e.lifecycleMu.Unlock()
+		if e.hookPlugins[name] != reg {
+			return
+		}
+		delete(e.hookPlugins, name)
+		if reg.cancel != nil {
+			reg.cancel()
+		}
+	}, nil
+}
+
+// rebindHookPlugins is called with lifecycleMu held before the replacement
+// server starts handling traffic. All NVR hook consumers use this registry.
+func (e *EmbeddedLalmax) rebindHookPlugins(server *lalmaxserver.LalMaxServer) error {
+	for name, reg := range e.hookPlugins {
+		cancel, err := server.RegisterHookPlugin(reg.plugin, reg.options)
+		if err != nil {
+			return fmt.Errorf("rebind embedded hook %s: %w", name, err)
+		}
+		reg.cancel = cancel
+	}
+	return nil
 }
 
 // Server returns the underlying lalmax server. Must be called after NewEmbeddedLalmax.
@@ -433,6 +483,10 @@ func (e *EmbeddedLalmax) Restart(ctx context.Context, rtmpPort, srtPort int, rtm
 	e.server = svr
 	e.mu.Unlock()
 
+	if err := e.rebindHookPlugins(svr); err != nil {
+		e.clearServer(svr)
+		return err
+	}
 	e.applyRuntimeHLSSettings(svr, e.cfg)
 	if err := svr.Start(ctx); err != nil {
 		return fmt.Errorf("start server: %w", err)
