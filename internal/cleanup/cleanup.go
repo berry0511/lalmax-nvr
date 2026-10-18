@@ -1,6 +1,8 @@
 package cleanup
 
 import (
+	"fmt"
+	"errors"
 	"context"
 	"log/slog"
 	"os"
@@ -208,14 +210,16 @@ func (cm *CleanupManager) diskThresholdCleanup(ctx context.Context) error {
 	return nil
 }
 
-// deleteRecording deletes the DB record first, then the file from disk.
-// File deletion errors are logged but not returned (orphaned files are acceptable).
+// deleteRecording first removes the file and only then the DB index.
+// If unlink fails, keep the row for future cleanup retries. If DB deletion
+// fails after unlink (including a process crash), a retry treats ENOENT as
+// a completed unlink and removes the stale row, achieving eventual consistency.
 func (cm *CleanupManager) deleteRecording(ctx context.Context, rec *model.Recording) error {
-	if err := cm.db.DeleteRecording(ctx, rec.ID); err != nil {
-		return err
+	if err := cm.store.DeleteFile(rec.FilePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("delete recording file %s: %w", rec.FilePath, err)
 	}
-	if err := cm.store.DeleteFile(rec.FilePath); err != nil {
-		logger.Warn("failed to delete file", "file_path", rec.FilePath, "error", err)
+	if err := cm.db.DeleteRecording(ctx, rec.ID); err != nil {
+		return fmt.Errorf("delete recording index %s: %w", rec.ID, err)
 	}
 	return nil
 }
