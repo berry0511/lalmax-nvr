@@ -356,6 +356,23 @@ func TestRunOnce_DiskThresholdSkipsBlockedFirstFifty(t *testing.T) {
 	require.NotNil(t, stuck)
 }
 
+func TestDiskThresholdCleanupHonorsCancellation(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.close(t)
+	cfg := defaultCleanupConfig()
+	cfg.DiskThresholdPercent = 0
+	cm, err := NewCleanupManager(env.db, env.store, cfg)
+	require.NoError(t, err)
+	env.insertTestRecording(t, "cancelled-disk", "cam1", "cam1/cancelled-disk.mp4", time.Now().Add(-48*time.Hour), false)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, cm.diskThresholdCleanup(ctx), context.Canceled)
+	rec, err := env.db.GetRecording(context.Background(), "cancelled-disk")
+	require.NoError(t, err)
+	require.NotNil(t, rec, "a canceled cleanup must not delete records")
+}
+
 func TestRunOnce_DiskThresholdCleanup(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
