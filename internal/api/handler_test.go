@@ -35,8 +35,12 @@ func setupTestDB(t *testing.T) (*storage.DB, *storage.Manager) {
 	}
 	ctx := context.Background()
 	if err := db.Init(ctx); err != nil {
+		_ = db.Close()
 		t.Fatalf("failed to init db: %v", err)
 	}
+	// Register after t.TempDir so the SQLite handle closes before Windows
+	// attempts to remove test.db during temporary directory cleanup.
+	t.Cleanup(func() { _ = db.Close() })
 	store, err := storage.NewManager(filepath.Join(dir, "storage"))
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
