@@ -119,6 +119,7 @@ func TestUploadOversized(t *testing.T) {
 
 	db, err := storage.New(dbPath)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
 	require.NoError(t, db.Init(context.Background()))
 
 	require.NoError(t, db.UpsertCamera(context.Background(), "cam1", "Cam", "http_jpeg", "", "http://x", "", "", true, "", "", ""))
