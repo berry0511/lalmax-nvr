@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -311,6 +312,7 @@ func TestRunOnce_DiskThresholdReportsPartialFailure(t *testing.T) {
 	err = cm.RunOnce(context.Background())
 	require.ErrorContains(t, err, "disk-blocked")
 	require.ErrorContains(t, err, "injected disk cleanup failure")
+	require.Equal(t, 1, strings.Count(err.Error(), "delete oldest recording disk-blocked"), "each failed recording should be attempted only once per cleanup pass")
 
 	blocked, err := env.db.GetRecording(context.Background(), "disk-blocked")
 	require.NoError(t, err)
