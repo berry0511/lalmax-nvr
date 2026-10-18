@@ -78,7 +78,7 @@ func TestValidatePath_TraversalDeepRelative(t *testing.T) {
 func TestValidatePath_TraversalAbsolute(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	_, err := ValidatePath(tmpDir, "/etc/passwd")
+	_, err := ValidatePath(tmpDir, filepath.Join(filepath.Dir(tmpDir), "outside", "passwd"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "outside storage root")
 }
@@ -115,7 +115,9 @@ func TestValidatePath_SymlinkNoTraversal(t *testing.T) {
 	require.NoError(t, os.MkdirAll(realDir, 0755))
 
 	// Create a symlink inside rootDir to another directory inside rootDir
-	require.NoError(t, os.Symlink("real", linkDir))
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Skipf("symlink creation unavailable in this environment: %v", err)
+	}
 
 	// Accessing through the symlink is fine — it resolves inside rootDir
 	path, err := ValidatePath(tmpDir, "link/../real/file.txt")
@@ -162,7 +164,9 @@ func TestValidatePath_SymlinkTraversal(t *testing.T) {
 
 	// Create a symlink inside realDir that points to outsideDir
 	linkPath := filepath.Join(realDir, "escape")
-	require.NoError(t, os.Symlink(outsideDir, linkPath))
+	if err := os.Symlink(outsideDir, linkPath); err != nil {
+		t.Skipf("symlink creation unavailable in this environment: %v", err)
+	}
 
 	// Attempt traversal via the symlink
 	_, err := ValidatePath(realDir, "escape/secret.txt")
