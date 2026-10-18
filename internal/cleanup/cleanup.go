@@ -124,6 +124,7 @@ func (cm *CleanupManager) RunOnce(ctx context.Context) error {
 // Each camera uses its own retention_days (0 = fallback to global).
 func (cm *CleanupManager) timeBasedCleanup(ctx context.Context) error {
 	globalRetentionDays := int(cm.retention.Hours() / 24)
+	var problems []error
 
 	cameras, err := cm.db.ListCameras(ctx)
 	if err != nil {
@@ -142,12 +143,14 @@ func (cm *CleanupManager) timeBasedCleanup(ctx context.Context) error {
 		recordings, err := cm.db.ListExpiredRecordingsByCamera(ctx, cam.ID, retentionDays)
 		if err != nil {
 			logger.Warn("failed to list expired recordings for camera", "camera_id", cam.ID, "error", err)
+			problems = append(problems, fmt.Errorf("list expired recordings for camera %s: %w", cam.ID, err))
 			continue
 		}
 
 		for _, rec := range recordings {
 			if err := cm.deleteRecording(ctx, &rec); err != nil {
 				logger.Warn("failed to delete recording", "recording_id", rec.ID, "error", err)
+				problems = append(problems, fmt.Errorf("delete expired recording %s (camera %s): %w", rec.ID, cam.ID, err))
 				continue
 			}
 			logger.Info("deleted recording (time-based)", "recording_id", rec.ID, "camera_id", cam.ID)
@@ -156,7 +159,7 @@ func (cm *CleanupManager) timeBasedCleanup(ctx context.Context) error {
 			}
 		}
 	}
-	return nil
+	return errors.Join(problems...)
 }
 
 // diskThresholdCleanup deletes oldest recordings when disk usage exceeds threshold.
