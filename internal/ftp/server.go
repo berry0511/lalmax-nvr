@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -152,25 +153,21 @@ type clientDriver struct {
 // resolvePath maps a virtual FTP path to a real filesystem path inside the
 // storage root, rejecting any path traversal attempts.
 func (d *clientDriver) resolvePath(name string) (string, error) {
-	cleanPath := filepath.Clean(name)
-	realPath := filepath.Join(d.server.storageMgr.RootDir(), cleanPath)
-
-	// Resolve both paths to absolute to ensure proper containment check.
-	// This prevents any bypass attempts via relative rootDir or symlinks.
-	realPathAbs, err := filepath.Abs(realPath)
-	if err != nil {
-		return "", fmt.Errorf("ftp: failed to resolve path: %w", err)
+	// FTP uses slash-separated virtual paths on every operating system.
+	// Reject traversal before cleaning, so /../camera cannot be normalized away.
+	virtual := strings.ReplaceAll(name, "\\", "/")
+	for _, part := range strings.Split(virtual, "/") {
+		if part == ".." {
+			return "", fmt.Errorf("ftp: access denied: %s", name)
+		}
 	}
+	clean := strings.TrimPrefix(path.Clean("/"+virtual), "/")
 	rootAbs, err := filepath.Abs(d.server.storageMgr.RootDir())
 	if err != nil {
 		return "", fmt.Errorf("ftp: failed to resolve root: %w", err)
 	}
-
-	rel, err := filepath.Rel(rootAbs, realPathAbs)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return "", fmt.Errorf("ftp: access denied: %s", name)
-	}
-	return realPathAbs, nil
+	realPath := filepath.Join(rootAbs, filepath.FromSlash(clean))
+	return storage.ValidatePath(rootAbs, realPath)
 }
 
 // ---- afero.Fs implementation ----
@@ -351,10 +348,16 @@ func (d *clientDriver) handleDownload(name string, offset int64) (ftpserverlib.F
 }
 
 func (d *clientDriver) handleUpload(name string) (ftpserverlib.FileTransfer, error) {
-	cleanPath := filepath.Clean(name)
-	parts := strings.Split(strings.TrimPrefix(cleanPath, "/"), string(filepath.Separator))
+	virtual := strings.ReplaceAll(name, "\\", "/")
+	for _, part := range strings.Split(virtual, "/") {
+		if part == ".." {
+			return nil, fmt.Errorf("ftp: invalid upload path %q", name)
+		}
+	}
+	cleanPath := strings.TrimPrefix(path.Clean("/"+virtual), "/")
+	parts := strings.Split(cleanPath, "/")
 
-	if len(parts) < 2 {
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || parts[0] == "." {
 		return nil, fmt.Errorf("ftp: invalid upload path %q, expected /camera_id/filename", name)
 	}
 
