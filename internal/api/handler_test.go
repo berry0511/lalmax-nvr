@@ -127,7 +127,7 @@ func TestHealth(t *testing.T) {
 	defer db.Close()
 	h := TestHandler(db, store)
 
-	rr := doRequest(t, h.Routes(), "GET", "/api/health", nil, "", "")
+	rr := doRequest(t, h.Routes(), "GET", "/api/health/details", nil, "", "")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rr.Code)
 	}
@@ -1850,7 +1850,7 @@ func TestHealthEnhanced(t *testing.T) {
 	defer db.Close()
 	h := TestHandler(db, store)
 
-	rr := doRequest(t, h.Routes(), "GET", "/api/health", nil, "", "")
+	rr := doRequest(t, h.Routes(), "GET", "/api/health/details", nil, "", "")
 	require.Equal(t, http.StatusOK, rr.Code)
 
 	var body HealthResponse
@@ -1869,7 +1869,7 @@ func TestHealthReturnsOkWhenAllChecksPass(t *testing.T) {
 	defer db.Close()
 	h := TestHandler(db, store)
 
-	rr := doRequest(t, h.Routes(), "GET", "/api/health", nil, "", "")
+	rr := doRequest(t, h.Routes(), "GET", "/api/health/details", nil, "", "")
 	require.Equal(t, http.StatusOK, rr.Code)
 
 	var body HealthResponse
@@ -1884,7 +1884,7 @@ func TestHealthWithNilDB(t *testing.T) {
 	t.Parallel()
 	h := TestHandler(nil, nil)
 
-	rr := doRequest(t, h.Routes(), "GET", "/api/health", nil, "", "")
+	rr := doRequest(t, h.Routes(), "GET", "/api/health/details", nil, "", "")
 	require.Equal(t, http.StatusOK, rr.Code)
 
 	var body HealthResponse
