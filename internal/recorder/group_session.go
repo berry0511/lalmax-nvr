@@ -11,6 +11,7 @@ import (
 
 	"github.com/lalmax-pro/lalmax-nvr/internal/event"
 	"github.com/lalmax-pro/lalmax-nvr/internal/model"
+	"github.com/lalmax-pro/lalmax-nvr/internal/metrics"
 	"github.com/lalmax-pro/lalmax-nvr/internal/muxer"
 	"github.com/lalmax-pro/lalmax-nvr/internal/observability"
 	"github.com/q191201771/lal/pkg/base"
@@ -30,6 +31,7 @@ type recSession struct {
 	store     segmentStore
 	db        recordingDB
 	bus       *event.EventBus
+	metrics   *metrics.Metrics
 	group     subscribeGroup
 	owner     *GroupWriter
 	hub       *model.StreamHub
@@ -46,6 +48,7 @@ type recSession struct {
 	done    chan struct{}
 	once    sync.Once
 	writing atomic.Bool
+	queueDrops atomic.Uint64
 	rotate  atomic.Bool
 
 	flushed  bool
