@@ -547,6 +547,7 @@ type GB28181Config struct {
 	MediaIP         string `yaml:"media_ip"`         // IP address for SDP media reception
 	MediaPort       int    `yaml:"media_port"`       // RTP media port (0=auto/multi-port, >0=single port mode)
 	StandardVersion string `yaml:"standard_version"` // GB28181 standard version: 2016 or 2022
+	WHEPOnDemandEnabled bool `yaml:"whep_on_demand_enabled"` // Opt in to WHEP-triggered SIP INVITE for known channels
 }
 
 // HealthConfig configures the camera health monitoring system.

@@ -85,7 +85,13 @@ func (s *RtcServer) waitStreamReady(appName, streamid, schema string) bool {
 		s.streamNotFoundFn(appName, streamid, schema)
 	}
 
-	ok, _ := maxlogic.GetGroupManagerInstance().WaitGroup(key, 500*time.Millisecond, 5*time.Second)
+	// GB28181 SIP INVITE + PS/RTP startup may take longer than an existing
+	// publisher lookup. Extend the WHEP window only for GB28181-style IDs.
+	wait := 5 * time.Second
+	if schema == "whep" && len(streamid) == 41 && strings.Count(streamid, ":") == 1 {
+		wait = 12 * time.Second
+	}
+	ok, _ := maxlogic.GetGroupManagerInstance().WaitGroup(key, 500*time.Millisecond, wait)
 	return ok
 }
 
@@ -212,7 +218,7 @@ func (s *RtcServer) ServeWHIPPublishPage(c *gin.Context) {
 }
 
 func buildWHIPPublishHTML() string {
-	return "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>WHIP Publisher</title><style>body{margin:0;background:#0f172a;color:#e2e8f0;font:14px/1.4 system-ui}main{max-width:960px;margin:0 auto;padding:24px}video{width:100%;max-height:360px;background:#000;border-radius:12px}pre{display:none;white-space:pre-wrap;background:#111827;padding:12px;border-radius:12px;min-height:72px}</style></head><body><main><p>本页使用摄像头/麦克风通过 WHIP 推流（H264+Opus）。请允许浏览器媒体权限。</p><video id=\"preview\" autoplay muted playsinline></video><pre id=\"log\">connecting...</pre></main><script>(async()=>{const log=(m)=>{document.getElementById('log').textContent=m};const preview=document.getElementById('preview');try{if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){log('当前环境不支持 getUserMedia');return}const stream=await navigator.mediaDevices.getUserMedia({video:true,audio:true});preview.srcObject=stream;const pc=new RTCPeerConnection();stream.getTracks().forEach(t=>pc.addTrack(t,stream));const offer=await pc.createOffer();await pc.setLocalDescription(offer);await new Promise(r=>{if(pc.iceGatheringState==='complete')return r();pc.addEventListener('icegatheringstatechange',()=>{if(pc.iceGatheringState==='complete')r()})});const res=await fetch(location.href,{method:'POST',headers:{'Content-Type':'application/sdp'},body:pc.localDescription.sdp});if(!res.ok){log('WHIP 失败: '+res.status+' '+await res.text());return}const answer=await res.text();await pc.setRemoteDescription({type:'answer',sdp:answer});log('WHIP 已连接，正在推流: '+location.href)}catch(e){log('错误: '+(e&&e.message?e.message:String(e)))}})();</script></body></html>"
+	return "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>WHIP Publisher</title><style>body{margin:0;background:#0f172a;color:#e2e8f0;font:14px/1.4 system-ui}main{max-width:960px;margin:0 auto;padding:24px}video{width:100%;max-height:360px;background:#000;border-radius:12px}pre{white-space:pre-wrap;background:#111827;padding:12px;border-radius:12px;min-height:72px}</style></head><body><main><p>本页使用摄像头/麦克风通过 WHIP 推流（H264+Opus）。请允许浏览器媒体权限。</p><video id=\"preview\" autoplay muted playsinline></video><pre id=\"log\">connecting...</pre></main><script>(async()=>{const log=(m)=>{document.getElementById('log').textContent=m};const preview=document.getElementById('preview');try{if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){log('当前环境不支持 getUserMedia');return}const stream=await navigator.mediaDevices.getUserMedia({video:true,audio:true});preview.srcObject=stream;const pc=new RTCPeerConnection();stream.getTracks().forEach(t=>pc.addTrack(t,stream));const offer=await pc.createOffer();await pc.setLocalDescription(offer);await new Promise(r=>{if(pc.iceGatheringState==='complete')return r();pc.addEventListener('icegatheringstatechange',()=>{if(pc.iceGatheringState==='complete')r()})});const res=await fetch(location.href,{method:'POST',headers:{'Content-Type':'application/sdp'},body:pc.localDescription.sdp});if(!res.ok){log('WHIP 失败: '+res.status+' '+await res.text());return}const answer=await res.text();await pc.setRemoteDescription({type:'answer',sdp:answer});log('WHIP 已连接，正在推流: '+location.href)}catch(e){log('错误: '+(e&&e.message?e.message:String(e)))}})();</script></body></html>"
 }
 
 func (s *RtcServer) HandleJessibuca(c *gin.Context) {
@@ -302,7 +308,7 @@ func buildWHEPPlayHTML() string {
 body{margin:0;background:#0f172a;color:#e2e8f0;font:14px/1.4 system-ui}
 main{max-width:960px;margin:0 auto;padding:24px}
 video{width:100%;background:#000;border-radius:12px}
-pre{white-space:pre-wrap;background:#111827;padding:12px;border-radius:12px;min-height:72px}
+pre{display:none;white-space:pre-wrap;background:#111827;padding:12px;border-radius:12px;min-height:72px}
 </style>
 </head>
 <body>
@@ -455,7 +461,7 @@ func (s *RtcServer) HandleWHEP(c *gin.Context) {
 		return
 	}
 
-	if !s.waitStreamReady(appName, streamid, "rtsp") {
+	if !s.waitStreamReady(appName, streamid, "whep") {
 		nazalog.Errorf("stream not ready after waiting. app=%s, stream=%s", appName, streamid)
 		c.Status(http.StatusNotFound)
 		return

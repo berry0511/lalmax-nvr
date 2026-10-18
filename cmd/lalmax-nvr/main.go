@@ -417,6 +417,8 @@ type App struct {
 	srtIngest   *media.IngestHandler
 	whipIngest  *media.IngestHandler
 	gb28181Svr  *gb28181.Server
+	gb28181Mu   sync.RWMutex
+	gbWHEPHook  *gbWHEPOnDemandHook
 	jt808Svr    *jt808.Server
 	voipSvr     *voip.Server
 	voipMu      sync.Mutex
@@ -751,6 +753,26 @@ func NewApp(cfg *config.Config, configPath string) (*App, error) {
 		}
 	}
 
+
+	// Register on_stream_not_found even when disabled so GB28181 hot reload can
+	// toggle this capability. HTTP requests are authorized by lalmax before
+	// producing the hook; the hook itself only admits known online channels.
+	if emb, ok := engine.(*media.EmbeddedLalmax); ok {
+		hook := newGBWHEPOnDemandHook(a.gbWHEPEligible, a.startGBWHEP)
+		hook.SetEnabled(cfg.GB28181.WHEPOnDemandEnabled)
+		_, hookErr := emb.RegisterHookPlugin(hook, lalmaxserver.HookPluginOptions{
+			Filter: lalmaxserver.NewHookEventFilter("", "", "", []string{lalmaxserver.HookEventStreamNotFound}),
+		})
+		if hookErr != nil {
+			slog.Warn("failed to register GB28181 WHEP on-demand hook", "error", hookErr)
+		} else {
+			a.gbWHEPHook = hook
+			if cfg.GB28181.WHEPOnDemandEnabled {
+				slog.Warn("GB28181 WHEP on-demand enabled: remote WHEP requests may trigger SIP INVITE; restrict public access")
+			}
+		}
+	}
+
 	// Step 8: Cleanup manager
 	a.cleanupMgr, err = cleanup.NewCleanupManager(db, store, cfg.Cleanup, a.metrics)
 	if err != nil {
@@ -845,6 +867,9 @@ func NewApp(cfg *config.Config, configPath string) (*App, error) {
 
 // RestartGB28181 restarts the GB28181 SIP server with new configuration.
 func (a *App) RestartGB28181(ctx context.Context, cfg *config.GB28181Config) error {
+	a.gb28181Mu.Lock()
+	defer a.gb28181Mu.Unlock()
+	if a.gbWHEPHook != nil { a.gbWHEPHook.SetEnabled(false) }
 	// Dispose old server
 	if a.gb28181Svr != nil {
 		a.gb28181Svr.Stop()
@@ -883,6 +908,7 @@ func (a *App) RestartGB28181(ctx context.Context, cfg *config.GB28181Config) err
 	// Create new server
 	gbSvr, _ := gb28181.NewServer(gbCfg, a.mediaEngine, a.db)
 	a.gb28181Svr = gbSvr
+	if a.gbWHEPHook != nil { a.gbWHEPHook.SetEnabled(cfg.WHEPOnDemandEnabled) }
 
 	slog.Info("GB28181 SIP server restarted", "port", cfg.Port, "id", cfg.ID)
 	return nil
