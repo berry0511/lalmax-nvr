@@ -108,7 +108,7 @@ func (m *Manager) CreateSegment(cameraID string, format string) (tempPath string
 		f.Close()
 
 	case "mjpeg":
-		tempPath = filepath.Join(cameraDir, uuid+".tmp")
+		tempPath = filepath.Join(cameraDir, segmentID+".tmp")
 		finalPath = filepath.Join(cameraDir, fmt.Sprintf("%s_%s_%s", recordingDiskName(cameraID), now, segmentID))
 
 		if err := os.MkdirAll(tempPath, 0755); err != nil {
