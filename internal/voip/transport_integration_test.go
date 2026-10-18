@@ -134,6 +134,7 @@ func TestSIPCallAcrossTransports(t *testing.T) {
 			}
 			register := makeRequest("REGISTER", 1)
 			challenge := exchangeMessage(register, 401)
+			registerChallenge := challenge
 			register = makeRequest("REGISTER", 2)
 			authorize(register, challenge, "wrong-password")
 			exchangeMessage(register, 401)
@@ -211,7 +212,8 @@ func TestSIPCallAcrossTransports(t *testing.T) {
 			}
 			exchangeMessage(bye, 200) // A lost final response must remain replayable.
 			register = makeRequest("REGISTER", 4)
-			authorize(register, challenge, "transport-test")
+			// INVITE has its own nonce; do not reuse it for REGISTER.
+			authorize(register, registerChallenge, "transport-test")
 			register.SetHeader("Expires", "0")
 			exchangeMessage(register, 200)
 			if s.registrar.IsRegistered("1001") {
