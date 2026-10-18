@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"sync"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +36,8 @@ type CleanupManager struct {
 	healthEnabled   bool
 	healthRetention time.Duration
 	ffprobePath     string // empty = skip repair
+	orphanMu sync.Mutex
+	orphanLastCameraID string // round-robin scan cursor for large fleets
 }
 
 // NewCleanupManager creates a new CleanupManager with the given config.
@@ -293,17 +297,34 @@ func (cm *CleanupManager) healthRetentionCleanup(ctx context.Context) {
 	}
 }
 
-// orphanFileCleanup scans camera directories for files/directories not tracked
-// in the recordings table and removes them.
+// orphanFileCleanup limits the number of camera directories inspected in a
+// single pass, rotating through the fleet on successive cleanup intervals.
+// It prevents a large camera fleet from monopolizing disk IO for hours.
+const orphanCameraBudgetPerPass = 32
+
 func (cm *CleanupManager) orphanFileCleanup(ctx context.Context) {
 	cameras, err := cm.db.ListCameras(ctx)
 	if err != nil {
 		logger.Warn("orphan cleanup: failed to list cameras", "error", err)
 		return
 	}
+	if len(cameras) == 0 { return }
+	sort.Slice(cameras, func(i,j int) bool { return cameras[i].ID < cameras[j].ID })
+	cm.orphanMu.Lock()
+	first := sort.Search(len(cameras), func(i int) bool { return cameras[i].ID > cm.orphanLastCameraID })
+	if first >= len(cameras) { first = 0 }
+	count := len(cameras)
+	if count > orphanCameraBudgetPerPass { count = orphanCameraBudgetPerPass }
+	ids := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		ids = append(ids, cameras[(first+i)%len(cameras)].ID)
+	}
+	cm.orphanLastCameraID = ids[len(ids)-1]
+	cm.orphanMu.Unlock()
 	var totalDeleted int
-	for _, cam := range cameras {
-		totalDeleted += cm.cleanOrphansForCamera(ctx, cam.ID)
+	for _, cameraID := range ids {
+		if ctx.Err() != nil { return }
+		totalDeleted += cm.cleanOrphansForCamera(ctx, cameraID)
 	}
 	if totalDeleted > 0 {
 		logger.Info("orphan files cleaned up", "deleted", totalDeleted)
