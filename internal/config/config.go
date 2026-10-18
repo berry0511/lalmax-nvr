@@ -101,10 +101,19 @@ type MediaConfig struct {
 	RTSPPort int `yaml:"rtsp_port,omitempty"`
 	HTTPPort int `yaml:"http_port,omitempty"` // HTTP-FLV port
 	// RTSP server authentication
-	RTSPAuthEnable bool   `yaml:"rtsp_auth_enable,omitempty"` // Enable RTSP server auth (default false)
+	RTSPAuthEnable bool   `yaml:"rtsp_auth_enable,omitempty"` // RTSP Basic/Digest server auth (default false)
+	// RTSPPublishAuthEnabled controls shared auth.publish_tokens on RTSP publishes.
+	// It defaults to true; false skips RTSP publish token checks but still rejects banned streams.
+	RTSPPublishAuthEnabled *bool `yaml:"rtsp_publish_auth_enabled,omitempty"`
 	RTSPAuthMethod int    `yaml:"rtsp_auth_method,omitempty"` // 0=Basic, 1=Digest (default 0)
 	RTSPUsername   string `yaml:"rtsp_username,omitempty"`    // RTSP server username
 	RTSPPassword   string `yaml:"rtsp_password,omitempty"`    // RTSP server password
+}
+
+// RTSPPublishTokenAuthEnabled preserves the current shared-token policy when
+// the option is omitted, including configs loaded before ApplyDefaults.
+func (cfg MediaConfig) RTSPPublishTokenAuthEnabled() bool {
+	return cfg.RTSPPublishAuthEnabled == nil || *cfg.RTSPPublishAuthEnabled
 }
 
 // ValidateRTSPAuth checks that enabled RTSP authentication has usable credentials.
@@ -479,12 +488,19 @@ type SRTConfig struct {
 }
 
 // RTMPConfig configures the RTMP ingest server.
-// RTMP is served by lalmax on its default port (:11935). Each stream ID must
-// have a publish token in StreamKeys; publishers pass it as stream_key.
+// By default RTMP publishers authenticate using per-stream tokens passed as
+// ?stream_key=<token>. Anonymous publishing must be explicitly enabled.
 type RTMPConfig struct {
-	Enabled    *bool             `yaml:"enabled"` // default false
-	Port       int               `yaml:"port,omitempty"`
-	StreamKeys map[string]string `yaml:"stream_keys"` // stream_id → publish token
+	Enabled            *bool             `yaml:"enabled"` // default false
+	Port               int               `yaml:"port,omitempty"`
+	PublishAuthEnabled *bool             `yaml:"publish_auth_enabled,omitempty"` // default true; false allows anonymous RTMP publishing
+	StreamKeys         map[string]string `yaml:"stream_keys"` // stream_id → publish token
+}
+
+// RTMPPublishAuthEnabled preserves the existing fail-closed default even for
+// configs that have not yet applied defaults.
+func (cfg RTMPConfig) RTMPPublishAuthEnabled() bool {
+	return cfg.PublishAuthEnabled == nil || *cfg.PublishAuthEnabled
 }
 
 // WHIPConfig configures WebRTC-HTTP ingest (WHIP).
@@ -1140,6 +1156,10 @@ func (cfg *Config) ApplyDefaults() {
 		enabled := true
 		cfg.Media.HTTPPlayAuthEnabled = &enabled
 	}
+	if cfg.Media.RTSPPublishAuthEnabled == nil {
+		enabled := true
+		cfg.Media.RTSPPublishAuthEnabled = &enabled
+	}
 	if strings.TrimSpace(cfg.Media.LalmaxHTTPAddr) == "" {
 		cfg.Media.LalmaxHTTPAddr = DefaultLalmaxHTTPAddr
 	}
@@ -1394,6 +1414,10 @@ func (cfg *Config) ApplyDefaults() {
 	}
 	if cfg.RTMP.Port == 0 {
 		cfg.RTMP.Port = DefaultLalRTMPPort
+	}
+	if cfg.RTMP.PublishAuthEnabled == nil {
+		enabled := true
+		cfg.RTMP.PublishAuthEnabled = &enabled
 	}
 	if cfg.RTMP.StreamKeys == nil {
 		cfg.RTMP.StreamKeys = make(map[string]string)

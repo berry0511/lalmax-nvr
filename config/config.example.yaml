@@ -40,6 +40,15 @@ media:
   # listener ports use the embedded media engine defaults.
   # rtmp_port: 11935                      # External lal RTMP port (default: 11935)
   # rtsp_port: 15544                      # External lal RTSP port (default: 15544)
+  # Native RTSP Basic/Digest auth is disabled by default.
+  # rtsp_auth_enable: false
+  # By default a configured auth.publish_tokens also applies to RTSP publishers.
+  # For explicitly anonymous RTSP publishing (no native login and no shared
+  # publish token), set BOTH rtsp_auth_enable: false and the following flag:
+  # rtsp_publish_auth_enabled: false
+  # When false, the NVR also turns off native RTSP auth in an existing
+  # lalmax.conf.json, while retaining the ban checks. Use only on a trusted LAN.
+  # Optional auth.playback_tokens can still protect RTSP/RTMP playback separately.
   # http_port: 18080                      # External lal HTTP-FLV/HLS-TS port (default: 18080)
   #
   # Protocol -> Port mapping:
@@ -194,11 +203,17 @@ webdav:
 
 # RTMP ingest — receive pushed streams from cameras or encoders
 # RTMP is served by the embedded media engine on port 11935 by default when enabled.
-# stream_keys maps stream_id -> required publish token.
-# Push URL format: rtmp://<host>:11935/live/<stream_id>?stream_key=<token>
+# RTMP publishing requires stream_key by default (publish_auth_enabled: true).
+# Push URL: rtmp://<host>:11935/live/<stream_id>?stream_key=<token>
+# To accept anonymous RTMP publishers on a TRUSTED LAN only:
+#   publish_auth_enabled: false
+# Anonymous RTMP still checks banned stream IDs. Exposing an anonymous RTMP
+# port to the Internet allows unknown senders to publish or occupy stream IDs.
+# Restrict TCP 11935 with host/cloud firewall rules before disabling auth.
 # rtmp:
 #   enabled: true
 #   port: 11935
+#   publish_auth_enabled: true  # default (omit for secure default)
 #   stream_keys:
 #     front-door: "generate-a-long-random-token"
 
