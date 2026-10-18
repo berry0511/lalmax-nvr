@@ -24,6 +24,9 @@ func testDB(t *testing.T) *storage.DB {
 }
 
 func TestIPTVOrgSciencePlaylist(t *testing.T) {
+	if os.Getenv("LALNVR_LIVE_IPTV_TEST") != "1" {
+		t.Skip("requires live third-party playlist and channel probes; set LALNVR_LIVE_IPTV_TEST=1 to opt in")
+	}
 	if testing.Short() {
 		t.Skip("skip live iptv-org test in short mode")
 	}
