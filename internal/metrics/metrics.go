@@ -34,6 +34,7 @@ type Metrics struct {
 	JitterBufferDepth              *prometheus.GaugeVec     // labels: camera_id
 	JitterBufferReordersTotal      *prometheus.CounterVec   // labels: camera_id
 	RecorderRingBufferDropsTotal   *prometheus.CounterVec   // labels: camera_id
+	RecorderGroupQueueDropsTotal   *prometheus.CounterVec   // labels: camera_id
 	// Health→Prometheus bridge metrics (stream stats)
 	StreamFPS                *prometheus.GaugeVec // labels: camera_id
 	StreamBitrateKbps        *prometheus.GaugeVec // labels: camera_id
@@ -180,6 +181,11 @@ func NewMetrics() *Metrics {
 		Help: "Total frames dropped due to recorder ring buffer overflow, partitioned by camera.",
 	}, []string{"camera_id"})
 
+	recorderGroupQueueDropsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "nvr_recorder_group_queue_drops_total",
+		Help: "Total media messages dropped from the in-process recording subscriber queue due to backpressure.",
+	}, []string{"camera_id"})
+
 	// Health→Prometheus bridge gauges
 	streamFPS := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "nvr_stream_fps",
@@ -233,6 +239,7 @@ func NewMetrics() *Metrics {
 		jitterBufferDepth,
 		jitterBufferReordersTotal,
 		recorderRingBufferDropsTotal,
+		recorderGroupQueueDropsTotal,
 		streamFPS,
 		streamBitrateKbps,
 		streamIDRIntervalSeconds,
@@ -268,6 +275,7 @@ func NewMetrics() *Metrics {
 		JitterBufferDepth:              jitterBufferDepth,
 		JitterBufferReordersTotal:      jitterBufferReordersTotal,
 		RecorderRingBufferDropsTotal:   recorderRingBufferDropsTotal,
+		RecorderGroupQueueDropsTotal:   recorderGroupQueueDropsTotal,
 		StreamFPS:                      streamFPS,
 		StreamBitrateKbps:              streamBitrateKbps,
 		StreamIDRIntervalSeconds:       streamIDRIntervalSeconds,
