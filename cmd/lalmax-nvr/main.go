@@ -743,7 +743,11 @@ func NewApp(cfg *config.Config, configPath string) (*App, error) {
 				return nil, fmt.Errorf("gb28181 config: %w", err)
 			}
 			gbCfg.ApplyDefaults()
-			gbSvr, _ := gb28181.NewServer(gbCfg, engine, db)
+			gbSvr, err := gb28181.NewServerChecked(gbCfg, engine, db)
+			if err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("start GB28181 SIP listeners: %w", err)
+			}
 			a.gb28181Svr = gbSvr
 			if cfg.GB28181.MediaPort > 0 {
 				slog.Info("GB28181 SIP server started (single port mode)", "port", cfg.GB28181.Port, "media_port", cfg.GB28181.MediaPort, "id", cfg.GB28181.ID)
@@ -906,7 +910,10 @@ func (a *App) RestartGB28181(ctx context.Context, cfg *config.GB28181Config) err
 	gbCfg.ApplyDefaults()
 
 	// Create new server
-	gbSvr, _ := gb28181.NewServer(gbCfg, a.mediaEngine, a.db)
+	gbSvr, err := gb28181.NewServerChecked(gbCfg, a.mediaEngine, a.db)
+	if err != nil {
+		return fmt.Errorf("restart GB28181 SIP listeners: %w", err)
+	}
 	a.gb28181Svr = gbSvr
 	if a.gbWHEPHook != nil { a.gbWHEPHook.SetEnabled(cfg.WHEPOnDemandEnabled) }
 
