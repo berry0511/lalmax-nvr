@@ -6,11 +6,10 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
-
-	"github.com/lalmax-pro/lalmax-nvr/internal/gb28181"
 	"sync/atomic"
 	"time"
 
+	"github.com/lalmax-pro/lalmax-nvr/internal/gb28181"
 	lalmaxserver "github.com/q191201771/lalmax/server"
 )
 
