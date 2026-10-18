@@ -46,6 +46,17 @@ func TestBuiltInWHEPPlayerHidesDiagnosticsByDefault(t *testing.T) {
 	}
 }
 
+// Hiding the WHEP diagnostic panel must not hide the WHIP publishing page logs.
+func TestBuiltInWHIPPublisherKeepsDiagnosticsVisible(t *testing.T) {
+	html := buildWHIPPublishHTML()
+	if strings.Contains(html, "pre{display:none;") {
+		t.Fatal("WHIP publisher status was unintentionally hidden")
+	}
+	if !strings.Contains(html, "<pre id=\\\"log\\\">") {
+		t.Fatal("WHIP publisher logging area missing")
+	}
+}
+
 func TestBuiltInWHEPPlayerReportsActualStateNotPrematureConnected(t *testing.T) {
 	html := buildWHEPPlayHTML()
 	if !strings.Contains(html, "SDP negotiated; waiting for media") {
