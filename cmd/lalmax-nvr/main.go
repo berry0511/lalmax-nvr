@@ -681,7 +681,7 @@ func NewApp(cfg *config.Config, configPath string) (*App, error) {
 		return nil, fmt.Errorf("reconcile stream history: %w", err)
 	}
 	if emb, ok := engine.(*media.EmbeddedLalmax); ok {
-		if _, err := a.historyMgr.RegisterAsHookPlugin(emb.Server()); err != nil {
+		if _, err := a.historyMgr.RegisterAsHookPlugin(emb); err != nil {
 			slog.Warn("failed to register history hook plugin", "error", err)
 		}
 	}
