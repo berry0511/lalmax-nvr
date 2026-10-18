@@ -512,6 +512,7 @@ func (r *recSubscriber) OnMsg(msg base.RtmpMsg) {
 	case r.s.queue <- cloned:
 	default:
 		count := r.s.queueDrops.Add(1)
+		r.s.mediaGap.Store(true)
 		if r.s.metrics != nil && r.s.metrics.RecorderGroupQueueDropsTotal != nil {
 			r.s.metrics.RecorderGroupQueueDropsTotal.WithLabelValues(r.s.cameraID).Inc()
 		}
