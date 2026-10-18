@@ -49,6 +49,8 @@ type recSession struct {
 	once    sync.Once
 	writing atomic.Bool
 	queueDrops atomic.Uint64
+	mediaGap atomic.Bool
+	awaitKeyframe bool
 	rotate  atomic.Bool
 
 	flushed  bool
@@ -105,6 +107,26 @@ func (s *recSession) drain() {
 }
 
 func (s *recSession) handle(msg base.RtmpMsg) {
+	// A full ingress queue creates an unknown media gap. Finalize the previous
+	// playable segment, discard the stale GOP and wait for a fresh keyframe
+	// rather than writing undecodable P-frames into a new recording.
+	if s.mediaGap.Swap(false) {
+		s.closeSegment()
+		s.gop = nil
+		s.flushed = true
+		s.awaitKeyframe = !s.audioOnly
+	}
+	if s.awaitKeyframe {
+		if _, _, _, _, ok := parseVideoSeq(msg); ok {
+			s.apply(msg)
+			s.remember(msg)
+			return
+		}
+		if !isVideoKey(msg) {
+			return
+		}
+		s.awaitKeyframe = false
+	}
 	s.publish(msg)
 	if s.rotate.Swap(false) {
 		s.closeSegment()
