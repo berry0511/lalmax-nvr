@@ -180,6 +180,8 @@ func (cm *CleanupManager) diskThresholdCleanup(ctx context.Context) error {
 
 	logger.Info("disk usage exceeds threshold, starting cleanup", "usage_percent", usagePercent, "threshold_percent", cm.diskThreshold)
 	var problems []error
+	// Do not retry a failed database deletion within the same cleanup pass.
+	failed := make(map[string]struct{})
 
 	// Fetch recordings in batches until usage drops below threshold
 	for {
@@ -193,8 +195,12 @@ func (cm *CleanupManager) diskThresholdCleanup(ctx context.Context) error {
 
 		deleted := false
 		for _, rec := range recordings {
+			if _, alreadyFailed := failed[rec.ID]; alreadyFailed {
+				continue
+			}
 			if err := cm.deleteRecording(ctx, &rec); err != nil {
 				logger.Warn("failed to delete recording", "recording_id", rec.ID, "error", err)
+				failed[rec.ID] = struct{}{}
 				problems = append(problems, fmt.Errorf("delete oldest recording %s: %w", rec.ID, err))
 				continue
 			}
