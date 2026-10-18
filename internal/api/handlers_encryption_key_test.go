@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/lalmax-pro/lalmax-nvr/internal/config"
@@ -41,7 +42,11 @@ func TestEncryptionKeyWebSettings(t *testing.T) {
 	keyPath := configPath + ".encryption-key"
 	info, err := os.Stat(keyPath)
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0600), info.Mode().Perm())
+	if runtime.GOOS == "windows" {
+		require.Equal(t, os.FileMode(0666), info.Mode().Perm(), "Windows permission bits do not represent file ACLs")
+	} else {
+		require.Equal(t, os.FileMode(0600), info.Mode().Perm())
+	}
 	require.Equal(t, key, config.GetEncryptionKey())
 	require.Equal(t, "web", config.EncryptionKeySource())
 
