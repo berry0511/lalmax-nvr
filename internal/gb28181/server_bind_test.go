@@ -1,6 +1,7 @@
 package gb28181
 
 import (
+	"fmt"
 	"net"
 	"path/filepath"
 	"strings"
@@ -39,4 +40,32 @@ func TestNewServerCheckedFailsOnOccupiedUDPPort(t *testing.T) {
 	if !strings.Contains(err.Error(), "bind GB28181 SIP UDP") {
 		t.Fatalf("missing protocol/port context: %v", err)
 	}
+}
+
+func TestNewServerCheckedClosesUDPSocketWhenTCPBindFails(t *testing.T) {
+	occupied, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil { t.Fatal(err) }
+	defer occupied.Close()
+	port := occupied.Addr().(*net.TCPAddr).Port
+
+	db, err := storage.New(filepath.Join(t.TempDir(), "nvr.sqlite"))
+	if err != nil { t.Fatal(err) }
+	defer db.Close()
+
+	cfg := &Config{
+		Enabled: true, Port: port, Host: "127.0.0.1", MediaIP: "127.0.0.1",
+		ID: "34020000002000000001", Password: "test-password-123", StandardVersion: "2016",
+	}
+	server, err := NewServerChecked(cfg, nil, db)
+	if err == nil {
+		if server != nil { server.Stop() }
+		t.Fatal("server reported ready while its TCP SIP port was occupied")
+	}
+	if server != nil || !strings.Contains(err.Error(), "bind GB28181 SIP TCP") {
+		t.Fatalf("expected TCP bind failure without a partially running server, got %v", err)
+	}
+	// UDP was acquired before TCP. It must have been closed on failure.
+	rebind, err := net.ListenPacket("udp", fmt.Sprintf("0.0.0.0:%d", port))
+	if err != nil { t.Fatalf("leaked UDP socket after TCP failure: %v", err) }
+	rebind.Close()
 }
