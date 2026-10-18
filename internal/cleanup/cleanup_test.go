@@ -286,6 +286,40 @@ func TestRunOnce_TimeBasedCleanup_Ordering(t *testing.T) {
 	}
 }
 
+// A failed database deletion in disk-pressure cleanup must be surfaced to
+// RunOnce without preventing deletion of other recordings.
+func TestRunOnce_DiskThresholdReportsPartialFailure(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.close(t)
+
+	cfg := defaultCleanupConfig()
+	cfg.RetentionDays = 365
+	cfg.DiskThresholdPercent = 0
+	cm, err := NewCleanupManager(env.db, env.store, cfg)
+	require.NoError(t, err)
+
+	old := time.Now().Add(-48 * time.Hour)
+	env.insertTestRecording(t, "disk-blocked", "cam1", "cam1/disk-blocked.mp4", old, false)
+	env.insertTestRecording(t, "disk-deletable", "cam1", "cam1/disk-deletable.mp4", old, false)
+
+	_, err = env.db.DB().Exec(`CREATE TRIGGER reject_disk_cleanup
+		BEFORE DELETE ON recordings
+		WHEN OLD.id = 'disk-blocked'
+		BEGIN SELECT RAISE(ABORT, 'injected disk cleanup failure'); END`)
+	require.NoError(t, err)
+
+	err = cm.RunOnce(context.Background())
+	require.ErrorContains(t, err, "disk-blocked")
+	require.ErrorContains(t, err, "injected disk cleanup failure")
+
+	blocked, err := env.db.GetRecording(context.Background(), "disk-blocked")
+	require.NoError(t, err)
+	require.NotNil(t, blocked)
+	deleted, err := env.db.GetRecording(context.Background(), "disk-deletable")
+	require.NoError(t, err)
+	require.Nil(t, deleted)
+}
+
 func TestRunOnce_DiskThresholdCleanup(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
