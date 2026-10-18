@@ -425,7 +425,11 @@ func (m *Manager) forgetActive(streamID, sessionID, protocol string) {
 
 // RegisterAsHookPlugin registers with lalmax's hook plugin system as a fallback event source.
 // This provides more detailed payload (RemoteAddr, bytes) compared to the SSE-based events.
-func (m *Manager) RegisterAsHookPlugin(server *lalmaxserver.LalMaxServer) (func(), error) {
+type HookRegistrar interface {
+	RegisterHookPlugin(lalmaxserver.HookPlugin, lalmaxserver.HookPluginOptions) (func(), error)
+}
+
+func (m *Manager) RegisterAsHookPlugin(server HookRegistrar) (func(), error) {
 	plugin := &hookPlugin{mgr: m}
 	cancel, err := server.RegisterHookPlugin(plugin, lalmaxserver.HookPluginOptions{
 		BufferSize: 128,
