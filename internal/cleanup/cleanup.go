@@ -182,10 +182,14 @@ func (cm *CleanupManager) diskThresholdCleanup(ctx context.Context) error {
 	var problems []error
 	// Do not retry a failed database deletion within the same cleanup pass.
 	failed := make(map[string]struct{})
+	// Increase the query window when the oldest records are undeletable.
+	// This is a bounded fallback until the repository supports keyset pagination.
+	const maxCleanupCandidates = 10000
+	queryLimit := 50
 
 	// Fetch recordings in batches until usage drops below threshold
 	for {
-		recordings, err := cm.db.ListOldestRecordings(ctx, 50)
+		recordings, err := cm.db.ListOldestRecordings(ctx, queryLimit)
 		if err != nil {
 			return errors.Join(append(problems, fmt.Errorf("list oldest recordings: %w", err))...)
 		}
@@ -212,7 +216,18 @@ func (cm *CleanupManager) diskThresholdCleanup(ctx context.Context) error {
 		}
 
 		if !deleted {
-			break
+			if len(recordings) < queryLimit {
+				break // All remaining candidates were already attempted.
+			}
+			if queryLimit >= maxCleanupCandidates {
+				problems = append(problems, fmt.Errorf("disk cleanup candidate limit reached (%d) with undeletable recordings", maxCleanupCandidates))
+				break
+			}
+			queryLimit += 50
+			if queryLimit > maxCleanupCandidates {
+				queryLimit = maxCleanupCandidates
+			}
+			continue
 		}
 
 		// Recheck disk usage
