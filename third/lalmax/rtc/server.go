@@ -85,7 +85,13 @@ func (s *RtcServer) waitStreamReady(appName, streamid, schema string) bool {
 		s.streamNotFoundFn(appName, streamid, schema)
 	}
 
-	ok, _ := maxlogic.GetGroupManagerInstance().WaitGroup(key, 500*time.Millisecond, 5*time.Second)
+	// GB28181 SIP INVITE + PS/RTP startup may take longer than an existing
+	// publisher lookup. Extend the WHEP window only for GB28181-style IDs.
+	wait := 5 * time.Second
+	if schema == "whep" && len(streamid) == 41 && strings.Count(streamid, ":") == 1 {
+		wait = 12 * time.Second
+	}
+	ok, _ := maxlogic.GetGroupManagerInstance().WaitGroup(key, 500*time.Millisecond, wait)
 	return ok
 }
 
@@ -455,7 +461,7 @@ func (s *RtcServer) HandleWHEP(c *gin.Context) {
 		return
 	}
 
-	if !s.waitStreamReady(appName, streamid, "rtsp") {
+	if !s.waitStreamReady(appName, streamid, "whep") {
 		nazalog.Errorf("stream not ready after waiting. app=%s, stream=%s", appName, streamid)
 		c.Status(http.StatusNotFound)
 		return
