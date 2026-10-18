@@ -141,10 +141,6 @@ func (s *RtcServer) waitStreamReady(appName, streamid, schema string) bool {
 		time.Sleep(100 * time.Millisecond)
 	}
 }
-*time.Millisecond, wait)
-	return ok
-}
-
 func NewRtcServer(config config.RtcConfig, lal logic.ILalServer) (*RtcServer, error) {
 	var udpMux ice.UDPMux
 	var tcpMux ice.TCPMux
