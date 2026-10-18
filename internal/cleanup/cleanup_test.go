@@ -2,6 +2,7 @@ package cleanup
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -320,6 +321,39 @@ func TestRunOnce_DiskThresholdReportsPartialFailure(t *testing.T) {
 	deleted, err := env.db.GetRecording(context.Background(), "disk-deletable")
 	require.NoError(t, err)
 	require.Nil(t, deleted)
+}
+
+// Disk-pressure cleanup must look beyond the first full window of
+// undeletable records while retaining failure reporting.
+func TestRunOnce_DiskThresholdSkipsBlockedFirstFifty(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.close(t)
+	cfg := defaultCleanupConfig()
+	cfg.RetentionDays = 365
+	cfg.DiskThresholdPercent = 0
+	cm, err := NewCleanupManager(env.db, env.store, cfg)
+	require.NoError(t, err)
+
+	old := time.Now().Add(-48 * time.Hour)
+	for i := 0; i < 50; i++ {
+		id := fmt.Sprintf("stuck-%03d", i)
+		env.insertTestRecording(t, id, "cam1", "cam1/"+id+".mp4", old.Add(time.Duration(i)*time.Second), false)
+	}
+	env.insertTestRecording(t, "later-deletable", "cam1", "cam1/later-deletable.mp4", old.Add(time.Minute), false)
+	_, err = env.db.DB().Exec(`CREATE TRIGGER reject_stuck_disk_cleanup
+		BEFORE DELETE ON recordings
+		WHEN OLD.id LIKE 'stuck-%'
+		BEGIN SELECT RAISE(ABORT, 'injected blocked oldest'); END`)
+	require.NoError(t, err)
+
+	err = cm.RunOnce(context.Background())
+	require.ErrorContains(t, err, "injected blocked oldest")
+	later, err := env.db.GetRecording(context.Background(), "later-deletable")
+	require.NoError(t, err)
+	require.Nil(t, later, "recordings beyond a blocked first batch must still be cleaned")
+	stuck, err := env.db.GetRecording(context.Background(), "stuck-000")
+	require.NoError(t, err)
+	require.NotNil(t, stuck)
 }
 
 func TestRunOnce_DiskThresholdCleanup(t *testing.T) {
