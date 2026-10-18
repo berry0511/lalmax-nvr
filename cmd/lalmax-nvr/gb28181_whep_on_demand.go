@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+
+	"github.com/lalmax-pro/lalmax-nvr/internal/gb28181"
 	"sync/atomic"
 	"time"
 
@@ -125,4 +127,39 @@ func (h *gbWHEPOnDemandHook) OnHookEvent(event lalmaxserver.HookEvent) error {
 		slog.Info("GB28181 WHEP on-demand INVITE requested", "stream_id", payload.Stream)
 	}()
 	return nil
+}
+
+
+// A GB28181 SIP session is owned by the NVR, not by the WebRTC player.
+// The App lock prevents hot-restart from disposing the SIP server mid-INVITE.
+func (a *App) gbWHEPEligible(deviceID, channelID string) bool {
+	a.gb28181Mu.RLock()
+	defer a.gb28181Mu.RUnlock()
+	if a.gb28181Svr == nil { return false }
+	store := a.gb28181Svr.GetDeviceStore()
+	if store == nil { return false }
+	device, ok := store.Load(deviceID)
+	if !ok || !device.IsOnline { return false }
+	_, ok = device.GetChannel(channelID)
+	return ok
+}
+
+func (a *App) startGBWHEP(deviceID, channelID, streamID string) error {
+	a.gb28181Mu.RLock()
+	defer a.gb28181Mu.RUnlock()
+	if a.gb28181Svr == nil { return fmt.Errorf("GB28181 server disabled") }
+	store := a.gb28181Svr.GetDeviceStore()
+	if store == nil { return fmt.Errorf("GB28181 device store unavailable") }
+	device, ok := store.Load(deviceID)
+	if !ok || !device.IsOnline { return fmt.Errorf("device %s not online", deviceID) }
+	if _, ok := device.GetChannel(channelID); !ok {
+		return fmt.Errorf("unknown GB28181 channel %s:%s", deviceID, channelID)
+	}
+	_, err := a.gb28181Svr.EnsurePlay(&gb28181.PlayInput{
+		DeviceID: deviceID,
+		ChannelID: channelID,
+		StreamMode: 0,
+		InternalID: streamID,
+	})
+	return err
 }
