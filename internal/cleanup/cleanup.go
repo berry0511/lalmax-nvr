@@ -1,6 +1,8 @@
 package cleanup
 
 import (
+	"fmt"
+	"errors"
 	"context"
 	"log/slog"
 	"os"
@@ -75,38 +77,46 @@ func (cm *CleanupManager) Run(ctx context.Context) {
 	ticker := time.NewTicker(cm.interval)
 	defer ticker.Stop()
 
-	// Run once immediately
-	cm.RunOnce(ctx)
-
+	if err := cm.RunOnce(ctx); err != nil {
+		logger.Warn("initial cleanup pass incomplete", "error", err)
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			cm.RunOnce(ctx)
+			if err := cm.RunOnce(ctx); err != nil {
+				logger.Warn("periodic cleanup pass incomplete", "error", err)
+			}
 		}
 	}
 }
 
-// RunOnce performs a single cleanup pass: time-based, archived, disk-threshold, then health retention.
+// RunOnce performs independent cleanup phases and returns their combined
+// errors. Successful phases still run when another phase fails.
 func (cm *CleanupManager) RunOnce(ctx context.Context) error {
+	var problems []error
 	if err := cm.timeBasedCleanup(ctx); err != nil {
 		logger.Error("time-based cleanup error", "error", err)
+		problems = append(problems, fmt.Errorf("time-based cleanup: %w", err))
 	}
 	cm.archivedRetentionCleanup(ctx)
 	if err := cm.diskThresholdCleanup(ctx); err != nil {
 		logger.Error("disk-threshold cleanup error", "error", err)
+		problems = append(problems, fmt.Errorf("disk-threshold cleanup: %w", err))
 	}
 	cm.healthRetentionCleanup(ctx)
 	if cm.metrics != nil {
 		if count, err := cm.db.CountRecordings(ctx); err == nil {
 			cm.metrics.RecordingCount.Set(float64(count))
+		} else {
+			problems = append(problems, fmt.Errorf("recording count: %w", err))
 		}
 	}
 	cm.orphanFileCleanup(ctx)
 	cm.staleRecordCleanup(ctx)
 	cm.repairZeroDurationRecordings(ctx)
-	return nil
+	return errors.Join(problems...)
 }
 
 // timeBasedCleanup deletes recordings per-camera where:
