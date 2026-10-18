@@ -189,6 +189,9 @@ func (cm *CleanupManager) diskThresholdCleanup(ctx context.Context) error {
 
 	// Fetch recordings in batches until usage drops below threshold
 	for {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(problems, err)...)
+		}
 		recordings, err := cm.db.ListOldestRecordings(ctx, queryLimit)
 		if err != nil {
 			return errors.Join(append(problems, fmt.Errorf("list oldest recordings: %w", err))...)
@@ -199,6 +202,9 @@ func (cm *CleanupManager) diskThresholdCleanup(ctx context.Context) error {
 
 		deleted := false
 		for _, rec := range recordings {
+			if err := ctx.Err(); err != nil {
+				return errors.Join(append(problems, err)...)
+			}
 			if _, alreadyFailed := failed[rec.ID]; alreadyFailed {
 				continue
 			}
