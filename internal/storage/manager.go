@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"encoding/hex"
+	"github.com/google/uuid"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -94,12 +95,12 @@ func (m *Manager) CreateSegment(cameraID string, format string) (tempPath string
 
 	cameraDir := filepath.Join(m.rootDir, recordingDiskName(cameraID))
 	now := time.Now().Format("20060102_150405")
-	uuid := fmt.Sprintf("%d", time.Now().UnixNano())
+	segmentID := uuid.NewString()
 
 	switch strings.ToLower(format) {
 	case "h264", "h265", "aac", "g711", "opus":
-		tempPath = filepath.Join(cameraDir, uuid+".tmp")
-		finalPath = filepath.Join(cameraDir, fmt.Sprintf("%s_%s_%s.mp4", recordingDiskName(cameraID), now, uuid))
+		tempPath = filepath.Join(cameraDir, segmentID+".tmp")
+		finalPath = filepath.Join(cameraDir, fmt.Sprintf("%s_%s_%s.mp4", recordingDiskName(cameraID), now, segmentID))
 		f, err := os.Create(tempPath)
 		if err != nil {
 			return "", "", fmt.Errorf("storage: failed to create temp file: %w", err)
@@ -108,7 +109,7 @@ func (m *Manager) CreateSegment(cameraID string, format string) (tempPath string
 
 	case "mjpeg":
 		tempPath = filepath.Join(cameraDir, uuid+".tmp")
-		finalPath = filepath.Join(cameraDir, fmt.Sprintf("%s_%s_%s", recordingDiskName(cameraID), now, uuid))
+		finalPath = filepath.Join(cameraDir, fmt.Sprintf("%s_%s_%s", recordingDiskName(cameraID), now, segmentID))
 
 		if err := os.MkdirAll(tempPath, 0755); err != nil {
 			return "", "", fmt.Errorf("storage: failed to create temp dir: %w", err)
