@@ -256,21 +256,37 @@ func TestSaveAtomic(t *testing.T) {
 	err := Save(path, cfg)
 	require.NoError(t, err)
 
-	// Make directory read-only so a second Save should fail
-	require.NoError(t, os.Chmod(filepath.Dir(path), 0o555))
-	defer os.Chmod(filepath.Dir(path), 0o755) // restore for cleanup
-
-	// Read the original content before failed write attempt
+	// A non-empty directory at the destination deterministically rejects
+	// a file rename on Windows and Unix. chmod(0555) is not a portable
+	// way to make os.CreateTemp fail (notably on Windows or as root).
 	original, err := os.ReadFile(path)
 	require.NoError(t, err)
 
-	err = Save(path, &Config{Server: ServerConfig{Listen: ":0000"}})
+	blockedPath := filepath.Join(filepath.Dir(path), "blocked.yaml")
+	require.NoError(t, os.Mkdir(blockedPath, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(blockedPath, "keep"), []byte("keep"), 0o644))
+
+	err = Save(blockedPath, &Config{Server: ServerConfig{Listen: ":0000"}})
 	require.Error(t, err)
 
-	// Verify original file is untouched
+	// The failed rename must not affect the previously saved config,
+	// overwrite the destination directory, or leak a temporary file.
 	after, err := os.ReadFile(path)
 	require.NoError(t, err)
-	require.Equal(t, string(original), string(after))
+	require.Equal(t, original, after)
+	keep, err := os.ReadFile(filepath.Join(blockedPath, "keep"))
+	require.NoError(t, err)
+	require.Equal(t, "keep", string(keep))
+	tmpFiles, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".lalmax-nvr.yaml.tmp*"))
+	require.NoError(t, err)
+	require.Empty(t, tmpFiles)
+
+	// Creating the temporary file must also fail when the parent is absent.
+	missingParent := filepath.Join(dir, "missing", "lalmax-nvr.yaml")
+	require.Error(t, Save(missingParent, cfg))
+	after, err = os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, original, after)
 }
 
 func TestSaveOverwrite(t *testing.T) {
