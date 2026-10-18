@@ -503,6 +503,11 @@ func (e *EmbeddedLalmax) Restart(ctx context.Context, rtmpPort, srtPort int, rtm
 	}
 	e.applyRuntimeHLSSettings(svr, e.cfg)
 	if err := svr.Start(ctx); err != nil {
+		// Start may have opened some listeners or workers before failing.
+		// Release them and invalidate hook bindings before returning.
+		svr.Close()
+		e.unregisterHookBindings()
+		e.clearServer(svr)
 		return fmt.Errorf("start server: %w", err)
 	}
 
