@@ -19,6 +19,9 @@ func setupPTZTestDB(t *testing.T) (*storage.DB, *storage.Manager) {
 	dbPath := filepath.Join(dir, "test.db")
 	db, err := storage.New(dbPath)
 	require.NoError(t, err)
+	// Register after t.TempDir: the database must close before Windows
+	// removes the fixture directory. ONVIF and PTZ tests share this helper.
+	t.Cleanup(func() { _ = db.Close() })
 	ctx := context.Background()
 	require.NoError(t, db.Init(ctx))
 	store, err := storage.NewManager(filepath.Join(dir, "storage"))
