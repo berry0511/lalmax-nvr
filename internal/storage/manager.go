@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -129,16 +130,22 @@ func (m *Manager) CloseSegment(tempPath, finalPath string) error {
 	}
 
 	if info.IsDir() {
-		// Sync the directory for MJPEG
-		dirFd, err := os.Open(tempPath)
-		if err != nil {
-			return fmt.Errorf("storage: cannot open temp dir for sync: %w", err)
+		// Windows does not support Sync on directory handles opened by os.Open.
+		// The individual JPEG writes are closed before the directory rename.
+		// On Unix, retain the directory fsync for crash durability.
+		if runtime.GOOS != "windows" {
+			dirFd, err := os.Open(tempPath)
+			if err != nil {
+				return fmt.Errorf("storage: cannot open temp dir for sync: %w", err)
+			}
+			if err := dirFd.Sync(); err != nil {
+				dirFd.Close()
+				return fmt.Errorf("storage: failed to sync temp dir: %w", err)
+			}
+			if err := dirFd.Close(); err != nil {
+				return fmt.Errorf("storage: failed to close temp dir: %w", err)
+			}
 		}
-		if err := dirFd.Sync(); err != nil {
-			dirFd.Close()
-			return fmt.Errorf("storage: failed to sync temp dir: %w", err)
-		}
-		dirFd.Close()
 
 		// Atomic rename of directory
 		if err := os.Rename(tempPath, finalPath); err != nil {
