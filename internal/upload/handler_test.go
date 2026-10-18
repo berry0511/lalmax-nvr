@@ -32,6 +32,7 @@ func setupTestEnv(t *testing.T) (*Handler, func()) {
 
 	db, err := storage.New(dbPath)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
 	require.NoError(t, db.Init(context.Background()))
 
 	// Insert test cameras via DB
