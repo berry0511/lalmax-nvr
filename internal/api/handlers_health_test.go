@@ -311,7 +311,7 @@ func TestHealth_CameraAggregation(t *testing.T) {
 	h.db.UpsertCamera(ctx, "cam-2", "Back Yard", "rtsp", "h264", "rtsp://x", "", "", true, "", "", "")
 	h.db.UpsertCamera(ctx, "cam-3", "Garage", "rtsp", "h264", "rtsp://x", "", "", true, "", "", "")
 
-	rr := doRequest(t, h.Routes(), "GET", "/api/health", nil, "", "")
+	rr := doRequest(t, h.Routes(), "GET", "/api/health/details", nil, "", "")
 	require.Equal(t, http.StatusOK, rr.Code)
 
 	var body HealthResponse
@@ -340,7 +340,7 @@ func TestHealth_CameraAggregation_NilManager(t *testing.T) {
 	h := TestHandler(db, store)
 	// No healthMgr set
 
-	rr := doRequest(t, h.Routes(), "GET", "/api/health", nil, "", "")
+	rr := doRequest(t, h.Routes(), "GET", "/api/health/details", nil, "", "")
 	require.Equal(t, http.StatusOK, rr.Code)
 
 	var body HealthResponse
@@ -357,7 +357,7 @@ func TestHealth_CameraAggregation_EmptyHealth(t *testing.T) {
 	}
 	h := setupHealthHandler(t, mgr)
 
-	rr := doRequest(t, h.Routes(), "GET", "/api/health", nil, "", "")
+	rr := doRequest(t, h.Routes(), "GET", "/api/health/details", nil, "", "")
 	require.Equal(t, http.StatusOK, rr.Code)
 
 	var body HealthResponse
@@ -377,7 +377,7 @@ func TestHealth_CameraAggregation_OfflineStatus(t *testing.T) {
 	}
 	h := setupHealthHandler(t, mgr)
 
-	rr := doRequest(t, h.Routes(), "GET", "/api/health", nil, "", "")
+	rr := doRequest(t, h.Routes(), "GET", "/api/health/details", nil, "", "")
 	require.Equal(t, http.StatusOK, rr.Code)
 
 	var body HealthResponse
