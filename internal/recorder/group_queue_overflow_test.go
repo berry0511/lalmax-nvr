@@ -31,3 +31,14 @@ func TestRecorderGroupQueueOverflowObservable(t *testing.T) {
 		t.Fatalf("stopped recorder must not count a new dropped frame: %d", got)
 	}
 }
+
+func TestRecorderQueueLossWaitsForVideoKeyframe(t *testing.T) {
+	session := &recSession{cameraID: "camera", gop: []base.RtmpMsg{{}}}
+	session.mediaGap.Store(true)
+	// Non-video, non-keyframe packets after a loss must not be appended
+	// to a newly opened segment or the cached GOP.
+	session.handle(base.RtmpMsg{})
+	if !session.awaitKeyframe { t.Fatal("lost keyframe resync state") }
+	if len(session.gop) != 0 { t.Fatal("stale GOP retained after overflow") }
+	if session.mediaGap.Load() { t.Fatal("overflow flag not consumed") }
+}
