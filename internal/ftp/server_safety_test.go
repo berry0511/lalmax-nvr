@@ -238,8 +238,8 @@ func TestGetTLSConfig(t *testing.T) {
 	t.Helper()
 	srv, _ := newTestServer(t)
 	tlsConfig, err := srv.GetTLSConfig()
-	require.NoError(t, err)
-	assert.Nil(t, tlsConfig, "plain FTP should return nil TLS config")
+	require.ErrorContains(t, err, "FTPS is not supported")
+	assert.Nil(t, tlsConfig, "plain FTP must not expose TLS configuration")
 }
 
 // --- ReadDir filtering ---
