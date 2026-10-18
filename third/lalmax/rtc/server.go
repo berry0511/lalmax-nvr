@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
+	"sync"
 	"strings"
 	"time"
 
@@ -28,6 +30,7 @@ type RtcServer struct {
 	udpMux               ice.UDPMux
 	tcpMux               ice.TCPMux
 	streamNotFoundFn     StreamNotFoundFn
+	whepSessions         sync.Map // session UUID -> *whepSession
 }
 
 // SetPublisherAuthorizer installs an admission check for WHIP publishers.
@@ -58,6 +61,11 @@ func (s *RtcServer) SetStreamNotFoundFn(fn StreamNotFoundFn) {
 }
 
 func (s *RtcServer) Close() error {
+	s.whepSessions.Range(func(key, value any) bool {
+		if session, ok := value.(*whepSession); ok { session.Close() }
+		s.whepSessions.Delete(key)
+		return true
+	})
 	var firstErr error
 	if s.udpMux != nil {
 		if err := s.udpMux.Close(); err != nil && firstErr == nil {
@@ -480,7 +488,12 @@ func (s *RtcServer) HandleWHEP(c *gin.Context) {
 		return
 	}
 
-	c.Header("Location", fmt.Sprintf("whep/%s", whepsession.subscriberId))
+	location := "/webrtc/whep/" + whepsession.subscriberId
+	if token := c.Request.URL.Query().Get("token"); token != "" {
+		location += "?token=" + url.QueryEscape(token)
+	}
+	c.Header("Location", location)
+	c.Header("Access-Control-Expose-Headers", "Location")
 
 	sdp := whepsession.GetAnswerSDP(string(body))
 	if sdp == "" {
@@ -489,9 +502,35 @@ func (s *RtcServer) HandleWHEP(c *gin.Context) {
 		return
 	}
 
+	whepsession.onRunEnd = func() { s.whepSessions.Delete(whepsession.subscriberId) }
+	s.whepSessions.Store(whepsession.subscriberId, whepsession)
 	go whepsession.Run()
 
 	c.Data(http.StatusCreated, "application/sdp", []byte(sdp))
+}
+
+
+// HandleWHEPDelete terminates the actual session created by a WHEP POST.
+// The session-specific Location is a random UUID rather than a stream ID;
+// enforce the same stream token policy as when the session was created.
+func (s *RtcServer) HandleWHEPDelete(c *gin.Context) {
+	id := c.Param("sessionid")
+	value, exists := s.whepSessions.Load(id)
+	if !exists {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	session := value.(*whepSession)
+	if !s.authorizeSubscriber(c, "whep", session.streamID) {
+		return
+	}
+	value, exists = s.whepSessions.LoadAndDelete(id)
+	if !exists {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	value.(*whepSession).Close()
+	c.Status(http.StatusNoContent)
 }
 
 // HandleZlmWebrtcPlay ZLM 兼容 WebRTC 播放，返回 SDP answer
