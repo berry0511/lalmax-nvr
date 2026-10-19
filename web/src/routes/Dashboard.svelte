@@ -625,7 +625,9 @@
       return getStreamPlayURL(stream, 'ws-flv', '');
     }
     if (mode === 'wasm') return getStreamPlayURL(stream, 'wasm', streamMediaURL(streamId, 'ws'));
-    if (mode === 'webrtc') return getStreamPlayURL(stream, 'webrtc', streamMediaURL(streamId, 'webrtc'));
+    // Use the same same-origin WHEP proxy as StreamDetail, avoiding
+    // advertised upstream hosts that a browser cannot reach directly.
+    if (mode === 'webrtc') return streamMediaURL(streamId, 'webrtc');
     if (mode === 'fmp4') return getStreamPlayURL(stream, 'fmp4', streamMediaURL(streamId, 'fmp4'));
     const protocol = defaultProtocol === 'll-hls' ? 'll-hls' : 'hls';
     const fallback = protocol === 'll-hls'
