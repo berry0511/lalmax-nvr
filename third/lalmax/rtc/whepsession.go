@@ -12,6 +12,7 @@ import (
 
 	"github.com/gofrs/uuid"
 	"github.com/pion/rtp"
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 	"github.com/q191201771/lal/pkg/avc"
 	"github.com/q191201771/lal/pkg/base"
@@ -42,6 +43,10 @@ type whepSession struct {
 	paceStarted    bool
 	replayingCache bool
 	wroteBytes     atomic.Uint64
+	videoPackets   atomic.Uint64
+	videoWriteErrs atomic.Uint64
+	pliRequests    atomic.Uint64
+	nackRequests   atomic.Uint64
 	remoteAddr     atomic.Value
 }
 
@@ -81,6 +86,7 @@ func (conn *whepSession) GetAnswerSDP(offer string) (sdp string) {
 				nazalog.Error(err)
 				return
 			}
+			go conn.observeVideoRTCP(conn.videoSender)
 
 			conn.videopacker = NewPacker(PacketH264, videoHeader.Payload)
 		} else if videoHeader.IsHevcKeySeqHeader() {
@@ -95,6 +101,7 @@ func (conn *whepSession) GetAnswerSDP(offer string) (sdp string) {
 				nazalog.Error(err)
 				return
 			}
+			go conn.observeVideoRTCP(conn.videoSender)
 
 			conn.videopacker = NewPacker(PacketHEVC, videoHeader.Payload)
 		}
@@ -197,6 +204,8 @@ func (conn *whepSession) Run() {
 				Protocol:     maxlogic.SubscriberProtocolWHEP,
 			}, conn)
 			goto connected
+		case <-statsTicker.C:
+			nazalog.Infof("WHEP video stats subscriber=%s rtp_packets=%d write_errors=%d pli=%d nack=%d", conn.subscriberId, conn.videoPackets.Load(), conn.videoWriteErrs.Load(), conn.pliRequests.Load(), conn.nackRequests.Load())
 		case <-conn.closeChan:
 			nazalog.Info("RemoveConsumer, connid:", conn.subscriberId)
 			conn.group.RemoveSubscriber(conn.subscriberId)
@@ -205,6 +214,8 @@ func (conn *whepSession) Run() {
 	}
 
 connected:
+	statsTicker := time.NewTicker(15 * time.Second)
+	defer statsTicker.Stop()
 	for {
 		select {
 		case msg := <-conn.msgChan.Out:
@@ -320,6 +331,22 @@ func (conn *whepSession) sendAudio(msg base.RtmpMsg) {
 	}
 }
 
+// Read RTCP feedback to diagnose browser keyframe/retransmission requests.
+func (conn *whepSession) observeVideoRTCP(sender *webrtc.RTPSender) {
+	for {
+		packets, _, err := sender.ReadRTCP()
+		if err != nil { return }
+		for _, packet := range packets {
+			switch feedback := packet.(type) {
+			case *rtcp.PictureLossIndication:
+				conn.pliRequests.Add(1)
+			case *rtcp.TransportLayerNack:
+				conn.nackRequests.Add(uint64(len(feedback.Nacks)))
+			}
+		}
+	}
+}
+
 func (conn *whepSession) sendVideo(msg base.RtmpMsg) {
 	if conn.videopacker != nil {
 
@@ -331,8 +358,10 @@ func (conn *whepSession) sendVideo(msg base.RtmpMsg) {
 
 		for _, pkt := range pkts {
 			if err := conn.videoTrack.WriteRTP(pkt); err != nil {
+				conn.videoWriteErrs.Add(1)
 				continue
 			}
+			conn.videoPackets.Add(1)
 			conn.recordSentRTP(pkt)
 		}
 	}
