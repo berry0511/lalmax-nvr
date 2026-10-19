@@ -1,6 +1,8 @@
 package cleanup
 
 import (
+	"sort"
+	"sync"
 	"fmt"
 	"errors"
 	"context"
@@ -8,8 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
-	"sync"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +19,8 @@ import (
 	"github.com/lalmax-pro/lalmax-nvr/internal/model"
 	"github.com/lalmax-pro/lalmax-nvr/internal/storage"
 )
+
+const orphanCameraBudgetPerPass = 32
 
 var logger = slog.Default().With("component", "cleanup")
 
@@ -81,38 +83,46 @@ func (cm *CleanupManager) Run(ctx context.Context) {
 	ticker := time.NewTicker(cm.interval)
 	defer ticker.Stop()
 
-	// Run once immediately
-	cm.RunOnce(ctx)
-
+	if err := cm.RunOnce(ctx); err != nil {
+		logger.Warn("initial cleanup pass incomplete", "error", err)
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			cm.RunOnce(ctx)
+			if err := cm.RunOnce(ctx); err != nil {
+				logger.Warn("periodic cleanup pass incomplete", "error", err)
+			}
 		}
 	}
 }
 
-// RunOnce performs a single cleanup pass: time-based, archived, disk-threshold, then health retention.
+// RunOnce performs independent cleanup phases and returns their combined
+// errors. Successful phases still run when another phase fails.
 func (cm *CleanupManager) RunOnce(ctx context.Context) error {
+	var problems []error
 	if err := cm.timeBasedCleanup(ctx); err != nil {
 		logger.Error("time-based cleanup error", "error", err)
+		problems = append(problems, fmt.Errorf("time-based cleanup: %w", err))
 	}
 	cm.archivedRetentionCleanup(ctx)
 	if err := cm.diskThresholdCleanup(ctx); err != nil {
 		logger.Error("disk-threshold cleanup error", "error", err)
+		problems = append(problems, fmt.Errorf("disk-threshold cleanup: %w", err))
 	}
 	cm.healthRetentionCleanup(ctx)
 	if cm.metrics != nil {
 		if count, err := cm.db.CountRecordings(ctx); err == nil {
 			cm.metrics.RecordingCount.Set(float64(count))
+		} else {
+			problems = append(problems, fmt.Errorf("recording count: %w", err))
 		}
 	}
 	cm.orphanFileCleanup(ctx)
 	cm.staleRecordCleanup(ctx)
 	cm.repairZeroDurationRecordings(ctx)
-	return nil
+	return errors.Join(problems...)
 }
 
 // timeBasedCleanup deletes recordings per-camera where:
@@ -120,6 +130,7 @@ func (cm *CleanupManager) RunOnce(ctx context.Context) error {
 // Each camera uses its own retention_days (0 = fallback to global).
 func (cm *CleanupManager) timeBasedCleanup(ctx context.Context) error {
 	globalRetentionDays := int(cm.retention.Hours() / 24)
+	var problems []error
 
 	cameras, err := cm.db.ListCameras(ctx)
 	if err != nil {
@@ -138,12 +149,14 @@ func (cm *CleanupManager) timeBasedCleanup(ctx context.Context) error {
 		recordings, err := cm.db.ListExpiredRecordingsByCamera(ctx, cam.ID, retentionDays)
 		if err != nil {
 			logger.Warn("failed to list expired recordings for camera", "camera_id", cam.ID, "error", err)
+			problems = append(problems, fmt.Errorf("list expired recordings for camera %s: %w", cam.ID, err))
 			continue
 		}
 
 		for _, rec := range recordings {
 			if err := cm.deleteRecording(ctx, &rec); err != nil {
 				logger.Warn("failed to delete recording", "recording_id", rec.ID, "error", err)
+				problems = append(problems, fmt.Errorf("delete expired recording %s (camera %s): %w", rec.ID, cam.ID, err))
 				continue
 			}
 			logger.Info("deleted recording (time-based)", "recording_id", rec.ID, "camera_id", cam.ID)
@@ -152,7 +165,7 @@ func (cm *CleanupManager) timeBasedCleanup(ctx context.Context) error {
 			}
 		}
 	}
-	return nil
+	return errors.Join(problems...)
 }
 
 // diskThresholdCleanup deletes oldest recordings when disk usage exceeds threshold.
@@ -172,12 +185,22 @@ func (cm *CleanupManager) diskThresholdCleanup(ctx context.Context) error {
 	}
 
 	logger.Info("disk usage exceeds threshold, starting cleanup", "usage_percent", usagePercent, "threshold_percent", cm.diskThreshold)
+	var problems []error
+	// Do not retry a failed database deletion within the same cleanup pass.
+	failed := make(map[string]struct{})
+	// Increase the query window when the oldest records are undeletable.
+	// This is a bounded fallback until the repository supports keyset pagination.
+	const maxCleanupCandidates = 10000
+	queryLimit := 50
 
 	// Fetch recordings in batches until usage drops below threshold
 	for {
-		recordings, err := cm.db.ListOldestRecordings(ctx, 50)
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(problems, err)...)
+		}
+		recordings, err := cm.db.ListOldestRecordings(ctx, queryLimit)
 		if err != nil {
-			return err
+			return errors.Join(append(problems, fmt.Errorf("list oldest recordings: %w", err))...)
 		}
 		if len(recordings) == 0 {
 			break
@@ -185,8 +208,16 @@ func (cm *CleanupManager) diskThresholdCleanup(ctx context.Context) error {
 
 		deleted := false
 		for _, rec := range recordings {
+			if err := ctx.Err(); err != nil {
+				return errors.Join(append(problems, err)...)
+			}
+			if _, alreadyFailed := failed[rec.ID]; alreadyFailed {
+				continue
+			}
 			if err := cm.deleteRecording(ctx, &rec); err != nil {
 				logger.Warn("failed to delete recording", "recording_id", rec.ID, "error", err)
+				failed[rec.ID] = struct{}{}
+				problems = append(problems, fmt.Errorf("delete oldest recording %s: %w", rec.ID, err))
 				continue
 			}
 			logger.Info("deleted recording (disk-threshold)", "recording_id", rec.ID)
@@ -197,13 +228,24 @@ func (cm *CleanupManager) diskThresholdCleanup(ctx context.Context) error {
 		}
 
 		if !deleted {
-			break
+			if len(recordings) < queryLimit {
+				break // All remaining candidates were already attempted.
+			}
+			if queryLimit >= maxCleanupCandidates {
+				problems = append(problems, fmt.Errorf("disk cleanup candidate limit reached (%d) with undeletable recordings", maxCleanupCandidates))
+				break
+			}
+			queryLimit += 50
+			if queryLimit > maxCleanupCandidates {
+				queryLimit = maxCleanupCandidates
+			}
+			continue
 		}
 
 		// Recheck disk usage
 		_, used, err = cm.store.GetDiskUsage()
 		if err != nil {
-			return err
+			return errors.Join(append(problems, fmt.Errorf("recheck disk usage: %w", err))...)
 		}
 		usagePercent = int(float64(used) / float64(total) * 100)
 		if usagePercent <= cm.diskThreshold {
@@ -211,7 +253,7 @@ func (cm *CleanupManager) diskThresholdCleanup(ctx context.Context) error {
 		}
 	}
 
-	return nil
+	return errors.Join(problems...)
 }
 
 // deleteRecording first removes the file and only then the DB index.
@@ -297,11 +339,8 @@ func (cm *CleanupManager) healthRetentionCleanup(ctx context.Context) {
 	}
 }
 
-// orphanFileCleanup limits the number of camera directories inspected in a
-// single pass, rotating through the fleet on successive cleanup intervals.
-// It prevents a large camera fleet from monopolizing disk IO for hours.
-const orphanCameraBudgetPerPass = 32
-
+// orphanFileCleanup scans camera directories for files/directories not tracked
+// in the recordings table and removes them.
 func (cm *CleanupManager) orphanFileCleanup(ctx context.Context) {
 	cameras, err := cm.db.ListCameras(ctx)
 	if err != nil {
