@@ -163,6 +163,9 @@ let destroyed = false;
   }
 
   function scheduleReconnect() {
+    // One pending retry per player. Multiple ICE state callbacks must not
+    // schedule concurrent offers or consume extra coordinator slots.
+    if (reconnectTimer || coordinatedTimer || hasActiveCoordinatedReconnect) return;
     if (reconnectAttempts >= maxReconnectAttempts) {
       enterSnapshotMode();
       return;
@@ -357,6 +360,12 @@ let destroyed = false;
         switch (state) {
           case 'connected':
             if (disconnectGraceTimer) { clearTimeout(disconnectGraceTimer); disconnectGraceTimer = null; }
+            if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+            if (coordinatedTimer) { clearTimeout(coordinatedTimer); coordinatedTimer = null; }
+            if (coordinator && hasActiveCoordinatedReconnect) {
+              coordinator.completeReconnect(cameraId);
+              hasActiveCoordinatedReconnect = false;
+            }
             webrtcState = 'connected';
             reconnectAttempts = 0;
             startZombieDetector();
