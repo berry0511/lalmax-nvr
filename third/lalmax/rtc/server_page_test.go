@@ -69,3 +69,25 @@ func TestBuiltInWHEPPlayerReportsActualStateNotPrematureConnected(t *testing.T) 
 		t.Fatal("page should report actual WHEP HTTP errors")
 	}
 }
+
+func TestBuiltInWHEPPlayerFillsViewportWithoutStretchingVideo(t *testing.T) {
+	html := buildWHEPPlayHTML()
+	for _, required := range []string{
+		"html,body{width:100%;height:100%;margin:0;overflow:hidden}",
+		"main{position:fixed;inset:0;",
+		"video{display:block;width:100%;height:100%;object-fit:contain;",
+		"pre{display:none;position:absolute;",
+	} {
+		if !strings.Contains(html, required) {
+			t.Errorf("built-in WHEP player missing viewport style %q", required)
+		}
+	}
+	for _, restricted := range []string{
+		"main{max-width:960px",
+		"video{width:100%;background:#000;border-radius:12px}",
+	} {
+		if strings.Contains(html, restricted) {
+			t.Errorf("built-in WHEP player still has constrained layout %q", restricted)
+		}
+	}
+}
