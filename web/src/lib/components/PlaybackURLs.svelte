@@ -4,6 +4,13 @@
   let { rtspUrl = '', webrtcUrl = '', idPrefix = '' }: { rtspUrl?: string; webrtcUrl?: string; idPrefix?: string } = $props();
   let rtspInput: HTMLInputElement;
   let webrtcInput: HTMLInputElement;
+  let playerInput: HTMLInputElement;
+  let playerLink = $derived(
+    idPrefix && typeof window !== 'undefined'
+      ? `${window.location.origin}${window.location.pathname}#/player/${encodeURIComponent(idPrefix)}`
+      : ''
+  );
+
 
   async function copyAddress(url: string, input: HTMLInputElement | undefined) {
     if (!url) return;
@@ -52,4 +59,16 @@
       <div class="text-xs text-[var(--text-secondary)]">当前无可用 WebRTC 地址</div>
     {/if}
   </div>
+  {#if webrtcUrl && playerLink}
+    <div>
+      <label for={`playback-browser-player-${idPrefix}`} class="mb-1 block text-xs font-medium">浏览器独立播放器（无管理界面）</label>
+      <div class="flex min-w-0 items-center gap-2">
+        <input id={`playback-browser-player-${idPrefix}`} bind:this={playerInput} type="text" readonly value={playerLink}
+          aria-label="浏览器独立播放器地址" onclick={(event) => event.currentTarget.select()} onfocus={(event) => event.currentTarget.select()}
+          class="min-w-0 flex-1 rounded border border-[var(--border)] bg-[var(--bg-secondary)] px-2 py-2 font-mono text-xs text-[var(--text-primary)]" />
+        <button type="button" class="btn btn-sm btn-secondary shrink-0" onclick={() => copyAddress(playerLink, playerInput)}>复制</button>
+        <a class="btn btn-sm btn-secondary shrink-0" href={playerLink} target="_blank" rel="noopener noreferrer">打开</a>
+      </div>
+    </div>
+  {/if}
 </div>
