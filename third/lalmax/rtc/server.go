@@ -75,7 +75,13 @@ func (s *RtcServer) Close() error {
 	}
 	if s.tcpMux != nil {
 		if err := s.tcpMux.Close(); err != nil && firstErr == nil {
-			firs// whepMediaReady means that WHEP can offer a codec-backed media track.
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// whepMediaReady means that WHEP can offer a codec-backed media track.
 // A created Group alone is not enough: GB28181/RTP may have opened its
 // receiver without receiving a sequence header yet.
 func whepMediaReady(group *maxlogic.Group) bool {
