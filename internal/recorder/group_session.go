@@ -11,6 +11,7 @@ import (
 
 	"github.com/lalmax-pro/lalmax-nvr/internal/event"
 	"github.com/lalmax-pro/lalmax-nvr/internal/model"
+	"github.com/lalmax-pro/lalmax-nvr/internal/metrics"
 	"github.com/lalmax-pro/lalmax-nvr/internal/muxer"
 	"github.com/lalmax-pro/lalmax-nvr/internal/observability"
 	"github.com/q191201771/lal/pkg/base"
@@ -30,6 +31,7 @@ type recSession struct {
 	store     segmentStore
 	db        recordingDB
 	bus       *event.EventBus
+	metrics   *metrics.Metrics
 	group     subscribeGroup
 	owner     *GroupWriter
 	hub       *model.StreamHub
@@ -46,6 +48,9 @@ type recSession struct {
 	done    chan struct{}
 	once    sync.Once
 	writing atomic.Bool
+	queueDrops atomic.Uint64
+	mediaGap atomic.Bool
+	awaitKeyframe bool
 	rotate  atomic.Bool
 
 	flushed  bool
@@ -102,6 +107,26 @@ func (s *recSession) drain() {
 }
 
 func (s *recSession) handle(msg base.RtmpMsg) {
+	// A full ingress queue creates an unknown media gap. Finalize the previous
+	// playable segment, discard the stale GOP and wait for a fresh keyframe
+	// rather than writing undecodable P-frames into a new recording.
+	if s.mediaGap.Swap(false) {
+		s.closeSegment()
+		s.gop = nil
+		s.flushed = true
+		s.awaitKeyframe = !s.audioOnly
+	}
+	if s.awaitKeyframe {
+		if _, _, _, _, ok := parseVideoSeq(msg); ok {
+			s.apply(msg)
+			s.remember(msg)
+			return
+		}
+		if !isVideoKey(msg) {
+			return
+		}
+		s.awaitKeyframe = false
+	}
 	s.publish(msg)
 	if s.rotate.Swap(false) {
 		s.closeSegment()
