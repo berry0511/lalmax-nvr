@@ -739,3 +739,31 @@ func TestTimeBasedCleanup_TimelapseExpired(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, got, "expired h264 recording should also be deleted")
 }
+
+func TestDeleteRecordingKeepsIndexOnFileErrorAndRetriesMissingFile(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.close(t)
+	ctx := context.Background()
+	env.insertTestRecording(t, "delete-retry", "cam1", "delete-retry.mp4", time.Now().Add(-48*time.Hour), false)
+	rec, err := env.db.GetRecording(ctx, "delete-retry")
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	// A directory with a child cannot be unlinked with os.Remove. Simulate
+	// a failing filesystem delete without relying on root privileges.
+	require.NoError(t, os.Remove(rec.FilePath))
+	require.NoError(t, os.Mkdir(rec.FilePath, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(rec.FilePath, "child"), []byte("x"), 0600))
+	cm, err := NewCleanupManager(env.db, env.store, defaultCleanupConfig())
+	require.NoError(t, err)
+	require.Error(t, cm.deleteRecording(ctx, rec))
+	existing, err := env.db.GetRecording(ctx, rec.ID)
+	require.NoError(t, err)
+	require.NotNil(t, existing, "failed file delete must preserve DB row for retries")
+	// After the failed unlink is corrected, even a missing file can be
+	// retried safely (e.g. process crash between unlink and DB delete).
+	require.NoError(t, os.RemoveAll(rec.FilePath))
+	require.NoError(t, cm.deleteRecording(ctx, rec))
+	existing, err = env.db.GetRecording(ctx, rec.ID)
+	require.NoError(t, err)
+	require.Nil(t, existing)
+}
