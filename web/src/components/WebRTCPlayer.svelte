@@ -100,6 +100,7 @@ let destroyed = false;
   const SNAPSHOT_REFRESH_MS = 2000;
   const SNAPSHOT_RESTORE_MS = 5 * 60 * 1000;
   let lastTabVisible = true;
+  let disconnectGraceTimer: ReturnType<typeof setTimeout> | null = null;
 
   function captureFreezeFrame() {
     if (frozenFrameUrl) return;
@@ -242,6 +243,8 @@ let destroyed = false;
       zombieInterval = null;
     }
 
+    if (disconnectGraceTimer) { clearTimeout(disconnectGraceTimer); disconnectGraceTimer = null; }
+
     // Release the server-side WHEP subscriber before discarding the connection.
     if (sessionUrl) {
       releaseWhep(sessionUrl);
@@ -316,7 +319,7 @@ let destroyed = false;
     streamState = 'loading';
     webrtcState = 'connecting';
     const epoch = ++connectionEpoch;
-    const isCurrent = (candidate: RTCPeerConnection) => !destroyed && tabVisible && epoch === connectionEpoch && pc === candidate;
+    const isCurrent = (candidate: RTCPeerConnection) => !destroyed && epoch === connectionEpoch && pc === candidate;
 
     try {
       const iceServers: RTCConfiguration = {
@@ -345,15 +348,23 @@ let destroyed = false;
         const state = peerConnection.connectionState;
         switch (state) {
           case 'connected':
+            if (disconnectGraceTimer) { clearTimeout(disconnectGraceTimer); disconnectGraceTimer = null; }
             webrtcState = 'connected';
             reconnectAttempts = 0;
             startZombieDetector();
             break;
           case 'disconnected':
             webrtcState = 'disconnected';
-            scheduleReconnect();
+            // Allow transient ICE interruptions from background throttling to recover.
+            if (!disconnectGraceTimer) {
+              disconnectGraceTimer = setTimeout(() => {
+                disconnectGraceTimer = null;
+                if (isCurrent(peerConnection) && peerConnection.connectionState === 'disconnected') scheduleReconnect();
+              }, 5000);
+            }
             break;
           case 'failed':
+            if (disconnectGraceTimer) { clearTimeout(disconnectGraceTimer); disconnectGraceTimer = null; }
             webrtcState = 'failed';
             scheduleReconnect();
             break;
@@ -460,23 +471,15 @@ let destroyed = false;
     };
   });
 
-  // Visibility change handler
-  // Coordinated visibility — pause when tab hidden, resume when visible
-  // Replaces per-player visibilitychange listener; Dashboard owns the signal
+  // Keep WHEP alive across browser tab switches, rather than recreating
+  // the subscriber and causing a black frame on every focus change.
   $effect(() => {
     const visible = tabVisible;
     const becameVisible = visible && !lastTabVisible;
     lastTabVisible = visible;
-
-    if (!visible) {
-      // Tab hidden — close peer connection to release decode resources
-      if (!destroyed) destroyPeerConnection();
-    } else if (becameVisible) {
-      // Tab visible — resume: rebuild WebRTC connection
-      if (!destroyed) {
-        stopSnapshotMode();
-        reconnectAttempts = 0;
-        captureFreezeFrame();
+    if (becameVisible && !destroyed) {
+      videoEl?.play().catch(() => {});
+      if (!pc || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
         destroyPeerConnection();
         initWebRTC();
       }
