@@ -1,6 +1,8 @@
 package cleanup
 
 import (
+	"sort"
+	"sync"
 	"fmt"
 	"errors"
 	"context"
@@ -18,6 +20,8 @@ import (
 	"github.com/lalmax-pro/lalmax-nvr/internal/storage"
 )
 
+const orphanCameraBudgetPerPass = 32
+
 var logger = slog.Default().With("component", "cleanup")
 
 // CleanupManager handles periodic cleanup of old recordings.
@@ -34,6 +38,8 @@ type CleanupManager struct {
 	healthEnabled   bool
 	healthRetention time.Duration
 	ffprobePath     string // empty = skip repair
+	orphanMu sync.Mutex
+	orphanLastCameraID string // round-robin scan cursor for large fleets
 }
 
 // NewCleanupManager creates a new CleanupManager with the given config.
@@ -250,14 +256,16 @@ func (cm *CleanupManager) diskThresholdCleanup(ctx context.Context) error {
 	return errors.Join(problems...)
 }
 
-// deleteRecording deletes the DB record first, then the file from disk.
-// File deletion errors are logged but not returned (orphaned files are acceptable).
+// deleteRecording first removes the file and only then the DB index.
+// If unlink fails, keep the row for future cleanup retries. If DB deletion
+// fails after unlink (including a process crash), a retry treats ENOENT as
+// a completed unlink and removes the stale row, achieving eventual consistency.
 func (cm *CleanupManager) deleteRecording(ctx context.Context, rec *model.Recording) error {
-	if err := cm.db.DeleteRecording(ctx, rec.ID); err != nil {
-		return err
+	if err := cm.store.DeleteFile(rec.FilePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("delete recording file %s: %w", rec.FilePath, err)
 	}
-	if err := cm.store.DeleteFile(rec.FilePath); err != nil {
-		logger.Warn("failed to delete file", "file_path", rec.FilePath, "error", err)
+	if err := cm.db.DeleteRecording(ctx, rec.ID); err != nil {
+		return fmt.Errorf("delete recording index %s: %w", rec.ID, err)
 	}
 	return nil
 }
@@ -339,9 +347,23 @@ func (cm *CleanupManager) orphanFileCleanup(ctx context.Context) {
 		logger.Warn("orphan cleanup: failed to list cameras", "error", err)
 		return
 	}
+	if len(cameras) == 0 { return }
+	sort.Slice(cameras, func(i,j int) bool { return cameras[i].ID < cameras[j].ID })
+	cm.orphanMu.Lock()
+	first := sort.Search(len(cameras), func(i int) bool { return cameras[i].ID > cm.orphanLastCameraID })
+	if first >= len(cameras) { first = 0 }
+	count := len(cameras)
+	if count > orphanCameraBudgetPerPass { count = orphanCameraBudgetPerPass }
+	ids := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		ids = append(ids, cameras[(first+i)%len(cameras)].ID)
+	}
+	cm.orphanLastCameraID = ids[len(ids)-1]
+	cm.orphanMu.Unlock()
 	var totalDeleted int
-	for _, cam := range cameras {
-		totalDeleted += cm.cleanOrphansForCamera(ctx, cam.ID)
+	for _, cameraID := range ids {
+		if ctx.Err() != nil { return }
+		totalDeleted += cm.cleanOrphansForCamera(ctx, cameraID)
 	}
 	if totalDeleted > 0 {
 		logger.Info("orphan files cleaned up", "deleted", totalDeleted)

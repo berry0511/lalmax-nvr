@@ -2,13 +2,11 @@ package rtc
 
 import (
 	"bytes"
-	"context"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	maxlogic "github.com/q191201771/lalmax/logic"
-	"github.com/smallnest/chanx"
 
 	"github.com/gofrs/uuid"
 	"github.com/pion/rtp"
@@ -34,7 +32,11 @@ type whepSession struct {
 	audioSender    *webrtc.RTPSender
 	videopacker    *Packer
 	audiopacker    *Packer
-	msgChan        *chanx.UnboundedChan[base.RtmpMsg]
+	msgChan        chan base.RtmpMsg
+	streamID       string
+	onRunEnd       func()
+	closeOnce      sync.Once
+	closing        atomic.Bool
 	closeChan      chan bool
 	connectedChan  chan struct{}
 	connectedOnce  sync.Once
@@ -50,6 +52,37 @@ type whepSession struct {
 	remoteAddr     atomic.Value
 }
 
+// WebRTC viewers are unreliable network consumers; media queue memory must
+// never grow without bound. Disconnect slow consumers instead of stalling
+// publisher dispatch or silently accumulating a multi-minute backlog.
+func boundedWHEPQueueSize(requested int) int {
+	if requested <= 0 { return 256 }
+	if requested > 2048 { return 2048 }
+	return requested
+}
+
+func (conn *whepSession) requestClose() {
+	if conn == nil { return }
+	conn.closeOnce.Do(func() {
+		conn.closing.Store(true)
+		select {
+		case conn.closeChan <- true:
+		default:
+		}
+	})
+}
+
+func (conn *whepSession) enqueue(msg base.RtmpMsg) {
+	if conn == nil { return }
+	if conn.closing.Load() { return }
+	select {
+	case conn.msgChan <- msg:
+	default:
+		nazalog.Warnf("WHEP subscriber too slow; disconnecting. id=%s stream=%s", conn.subscriberId, conn.streamID)
+		conn.requestClose()
+	}
+}
+
 func NewWhepSession(appName, streamid string, writeChanSize int, pc *peerConnection, lalServer logic.ILalServer) *whepSession {
 	ok, group := maxlogic.GetGroupManagerInstance().GetGroup(maxlogic.NewStreamKey(appName, streamid))
 	if !ok {
@@ -63,7 +96,8 @@ func NewWhepSession(appName, streamid string, writeChanSize int, pc *peerConnect
 		pc:            pc,
 		lalServer:     lalServer,
 		subscriberId:  u.String(),
-		msgChan:       chanx.NewUnboundedChan[base.RtmpMsg](context.Background(), writeChanSize),
+		msgChan:       make(chan base.RtmpMsg, boundedWHEPQueueSize(writeChanSize)),
+		streamID:      streamid,
 		closeChan:     make(chan bool, 2),
 		connectedChan: make(chan struct{}, 1),
 	}
@@ -177,6 +211,8 @@ func (conn *whepSession) GetAnswerSDP(offer string) (sdp string) {
 }
 
 func (conn *whepSession) Run() {
+	defer conn.Close()
+	if conn.onRunEnd != nil { defer conn.onRunEnd() }
 	conn.pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		nazalog.Info("peer connection state: ", state.String())
 
@@ -188,7 +224,7 @@ func (conn *whepSession) Run() {
 		case webrtc.PeerConnectionStateFailed:
 			fallthrough
 		case webrtc.PeerConnectionStateClosed:
-			conn.closeChan <- true
+			conn.requestClose()
 		}
 	})
 
@@ -216,7 +252,7 @@ connected:
 	defer statsTicker.Stop()
 	for {
 		select {
-		case msg := <-conn.msgChan.Out:
+		case msg := <-conn.msgChan:
 			if msg.Header.MsgTypeId == 0 {
 				conn.replayingCache = false
 				conn.paceBaseAt = time.Time{}
@@ -256,7 +292,7 @@ func (conn *whepSession) OnReplayStart() {
 }
 
 func (conn *whepSession) OnReplayStop() {
-	conn.msgChan.In <- base.RtmpMsg{}
+	conn.enqueue(base.RtmpMsg{})
 }
 
 func (conn *whepSession) paceReplayMsg(msg base.RtmpMsg) {
@@ -297,7 +333,7 @@ func (conn *whepSession) OnMsg(msg base.RtmpMsg) {
 		return
 	case base.RtmpTypeIdAudio:
 		if conn.audioTrack != nil {
-			conn.msgChan.In <- msg
+			conn.enqueue(msg)
 		}
 	case base.RtmpTypeIdVideo:
 		if msg.IsVideoKeySeqHeader() {
@@ -305,13 +341,13 @@ func (conn *whepSession) OnMsg(msg base.RtmpMsg) {
 			return
 		}
 		if conn.videoTrack != nil {
-			conn.msgChan.In <- msg
+			conn.enqueue(msg)
 		}
 	}
 }
 
 func (conn *whepSession) OnStop() {
-	conn.closeChan <- true
+	conn.requestClose()
 }
 
 func (conn *whepSession) sendAudio(msg base.RtmpMsg) {
@@ -407,6 +443,7 @@ func (conn *whepSession) updateVideoCodec(msg base.RtmpMsg) {
 }
 
 func (conn *whepSession) Close() {
+	conn.requestClose()
 	if conn.pc != nil {
 		conn.pc.Close()
 	}

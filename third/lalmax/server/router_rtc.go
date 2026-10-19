@@ -18,6 +18,11 @@ func (s *LalMaxServer) initRtcRouter(router *gin.Engine) {
 	rtc.POST("/whep", playAuth)
 	rtc.OPTIONS("/whep", playAuth)
 	rtc.DELETE("/whep", playAuth)
+	// WHEP session Location returned from POST is /webrtc/whep/:sessionid.
+	rtc.DELETE("/whep/:sessionid", s.protectHTTPPlay(func(c *gin.Context) {
+		if s.rtcsvr == nil { c.Status(http.StatusServiceUnavailable); return }
+		s.rtcsvr.HandleWHEPDelete(c)
+	}))
 
 	jessibucaAuth := s.protectHTTPPlay(s.HandleJessibuca)
 	rtc.POST("/play/live/:streamid", jessibucaAuth)
@@ -77,9 +82,8 @@ func (s *LalMaxServer) HandleWHEP(c *gin.Context) {
 		c.Header("Accept-Post", "application/sdp")
 		c.Status(http.StatusNoContent)
 	case "DELETE":
-		// WHEP DELETE 由客户端发起通知服务端结束会话
-		// whepSession 会通过 PeerConnection 状态变化自动清理
-		c.Status(http.StatusOK)
+		// Without a session ID the server cannot safely choose a viewer to stop.
+		c.Status(http.StatusBadRequest)
 	}
 }
 

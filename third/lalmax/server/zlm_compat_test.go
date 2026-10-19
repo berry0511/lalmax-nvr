@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -254,6 +255,9 @@ func TestZlmCompatAddStreamProxy(t *testing.T) {
 }
 
 func TestZlmCompatStartStopRecord(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("FFmpeg is required for ZLM compatibility recording test")
+	}
 	streamName := uniqueTestName("zlm_record")
 	_, err := max.lalsvr.AddCustomizePubSession(streamName)
 	if err != nil {

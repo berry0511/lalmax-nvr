@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
+	"sync"
 	"strings"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
+	"github.com/q191201771/lal/pkg/base"
 	"github.com/q191201771/lal/pkg/logic"
 	"github.com/q191201771/naza/pkg/nazalog"
 )
@@ -28,6 +31,7 @@ type RtcServer struct {
 	udpMux               ice.UDPMux
 	tcpMux               ice.TCPMux
 	streamNotFoundFn     StreamNotFoundFn
+	whepSessions         sync.Map // session UUID -> *whepSession
 }
 
 // SetPublisherAuthorizer installs an admission check for WHIP publishers.
@@ -58,6 +62,11 @@ func (s *RtcServer) SetStreamNotFoundFn(fn StreamNotFoundFn) {
 }
 
 func (s *RtcServer) Close() error {
+	s.whepSessions.Range(func(key, value any) bool {
+		if session, ok := value.(*whepSession); ok { session.Close() }
+		s.whepSessions.Delete(key)
+		return true
+	})
 	var firstErr error
 	if s.udpMux != nil {
 		if err := s.udpMux.Close(); err != nil && firstErr == nil {
@@ -72,29 +81,72 @@ func (s *RtcServer) Close() error {
 	return firstErr
 }
 
-// waitStreamReady 触发 on_stream_not_found 后轮询等待流就绪
-// 为什么：WebRTC 播放请求先于 GB28181 设备推流到达，需通知上层拉流后等待
+// whepMediaReady means that WHEP can offer a codec-backed media track.
+// A created Group alone is not enough: GB28181/RTP may have opened its
+// receiver without receiving a sequence header yet.
+func whepMediaReady(group *maxlogic.Group) bool {
+	if group == nil {
+		return false
+	}
+	video := group.GetVideoSeqHeaderMsg()
+	if video != nil && (video.IsAvcKeySeqHeader() || video.IsHevcKeySeqHeader()) {
+		return true
+	}
+	audio := group.GetAudioSeqHeaderMsg()
+	if audio == nil {
+		return false
+	}
+	switch audio.AudioCodecId() {
+	case base.RtmpSoundFormatG711A, base.RtmpSoundFormatG711U, base.RtmpSoundFormatOpus:
+		return true
+	default:
+		return false
+	}
+}
+
+// waitStreamReady requests a missing publisher once and waits for the requested
+// protocol's readiness. WHEP must see a supported codec sequence header before
+// SDP negotiation; RTSP/other call sites retain their existing Group semantics.
 func (s *RtcServer) waitStreamReady(appName, streamid, schema string) bool {
 	key := maxlogic.NewStreamKey(appName, streamid)
-	if ok, _ := maxlogic.GetGroupManagerInstance().GetGroup(key); ok {
+	groups := maxlogic.GetGroupManagerInstance()
+	ready := func(group *maxlogic.Group) bool {
+		if group == nil {
+			return false
+		}
+		if schema == "whep" {
+			return whepMediaReady(group)
+		}
 		return true
 	}
 
-	if s.streamNotFoundFn != nil {
+	_, group := groups.GetGroup(key)
+	if ready(group) {
+		return true
+	}
+	// An existing Group can be waiting for media after SIP INVITE. Do not
+	// trigger another INVITE just because its codec headers are not ready.
+	if group == nil && s.streamNotFoundFn != nil {
 		nazalog.Infof("stream not found, triggering on_stream_not_found. app=%s, stream=%s", appName, streamid)
 		s.streamNotFoundFn(appName, streamid, schema)
 	}
 
-	// GB28181 SIP INVITE + PS/RTP startup may take longer than an existing
-	// publisher lookup. Extend the WHEP window only for GB28181-style IDs.
 	wait := 5 * time.Second
 	if schema == "whep" && len(streamid) == 41 && strings.Count(streamid, ":") == 1 {
 		wait = 12 * time.Second
 	}
-	ok, _ := maxlogic.GetGroupManagerInstance().WaitGroup(key, 500*time.Millisecond, wait)
-	return ok
+	deadline := time.Now().Add(wait)
+	for {
+		_, group = groups.GetGroup(key)
+		if ready(group) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
-
 func NewRtcServer(config config.RtcConfig, lal logic.ILalServer) (*RtcServer, error) {
 	var udpMux ice.UDPMux
 	var tcpMux ice.TCPMux
@@ -480,7 +532,12 @@ func (s *RtcServer) HandleWHEP(c *gin.Context) {
 		return
 	}
 
-	c.Header("Location", fmt.Sprintf("whep/%s", whepsession.subscriberId))
+	location := "/webrtc/whep/" + whepsession.subscriberId
+	if token := c.Request.URL.Query().Get("token"); token != "" {
+		location += "?token=" + url.QueryEscape(token)
+	}
+	c.Header("Location", location)
+	c.Header("Access-Control-Expose-Headers", "Location")
 
 	sdp := whepsession.GetAnswerSDP(string(body))
 	if sdp == "" {
@@ -489,9 +546,35 @@ func (s *RtcServer) HandleWHEP(c *gin.Context) {
 		return
 	}
 
+	whepsession.onRunEnd = func() { s.whepSessions.Delete(whepsession.subscriberId) }
+	s.whepSessions.Store(whepsession.subscriberId, whepsession)
 	go whepsession.Run()
 
 	c.Data(http.StatusCreated, "application/sdp", []byte(sdp))
+}
+
+
+// HandleWHEPDelete terminates the actual session created by a WHEP POST.
+// The session-specific Location is a random UUID rather than a stream ID;
+// enforce the same stream token policy as when the session was created.
+func (s *RtcServer) HandleWHEPDelete(c *gin.Context) {
+	id := c.Param("sessionid")
+	value, exists := s.whepSessions.Load(id)
+	if !exists {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	session := value.(*whepSession)
+	if !s.authorizeSubscriber(c, "whep", session.streamID) {
+		return
+	}
+	value, exists = s.whepSessions.LoadAndDelete(id)
+	if !exists {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	value.(*whepSession).Close()
+	c.Status(http.StatusNoContent)
 }
 
 // HandleZlmWebrtcPlay ZLM 兼容 WebRTC 播放，返回 SDP answer
