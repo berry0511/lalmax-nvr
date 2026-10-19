@@ -336,10 +336,18 @@ let destroyed = false;
 
       // Handle incoming tracks
       peerConnection.ontrack = (event) => {
-        if (isCurrent(peerConnection) && event.streams && event.streams[0] && videoEl) {
+        if (!isCurrent(peerConnection) || !videoEl) return;
+        // WHEP can deliver streamless tracks (msid omitted). A track is
+        // still valid in that case and must be attached to the video element.
+        if (event.streams[0]) {
           videoEl.srcObject = event.streams[0];
-          videoEl.play().catch(() => {});
+        } else {
+          const current = videoEl.srcObject instanceof MediaStream
+            ? videoEl.srcObject : new MediaStream();
+          if (!current.getTracks().includes(event.track)) current.addTrack(event.track);
+          videoEl.srcObject = current;
         }
+        videoEl.play().catch(() => {});
       };
 
       // Handle connection state changes
