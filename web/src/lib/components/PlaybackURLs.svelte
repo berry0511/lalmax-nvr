@@ -2,9 +2,9 @@
   import { showToast } from '$lib/toast';
 
   let { rtspUrl = '', webrtcUrl = '', idPrefix = '' }: { rtspUrl?: string; webrtcUrl?: string; idPrefix?: string } = $props();
-  let rtspInput: HTMLInputElement;
-  let webrtcInput: HTMLInputElement;
-  let playerInput: HTMLInputElement;
+  let rtspInput = $state<HTMLInputElement>();
+  let webrtcInput = $state<HTMLInputElement>();
+  let playerInput = $state<HTMLInputElement>();
   let playerLink = $derived(
     idPrefix && typeof window !== 'undefined'
       ? `${window.location.origin}${window.location.pathname}#/player/${encodeURIComponent(idPrefix)}`
