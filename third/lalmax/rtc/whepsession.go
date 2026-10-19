@@ -204,8 +204,6 @@ func (conn *whepSession) Run() {
 				Protocol:     maxlogic.SubscriberProtocolWHEP,
 			}, conn)
 			goto connected
-		case <-statsTicker.C:
-			nazalog.Infof("WHEP video stats subscriber=%s rtp_packets=%d write_errors=%d pli=%d nack=%d", conn.subscriberId, conn.videoPackets.Load(), conn.videoWriteErrs.Load(), conn.pliRequests.Load(), conn.nackRequests.Load())
 		case <-conn.closeChan:
 			nazalog.Info("RemoveConsumer, connid:", conn.subscriberId)
 			conn.group.RemoveSubscriber(conn.subscriberId)
@@ -233,6 +231,8 @@ connected:
 			} else if msg.Header.MsgTypeId == base.RtmpTypeIdVideo && conn.videoTrack != nil {
 				conn.sendVideo(msg)
 			}
+		case <-statsTicker.C:
+			nazalog.Infof("WHEP video stats subscriber=%s rtp_packets=%d write_errors=%d pli=%d nack=%d", conn.subscriberId, conn.videoPackets.Load(), conn.videoWriteErrs.Load(), conn.pliRequests.Load(), conn.nackRequests.Load())
 		case <-conn.closeChan:
 			nazalog.Info("RemoveConsumer, connid:", conn.subscriberId)
 			conn.group.RemoveSubscriber(conn.subscriberId)
