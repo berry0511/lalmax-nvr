@@ -357,10 +357,11 @@ func buildWHEPPlayHTML() string {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WHEP Player</title>
 <style>
-body{margin:0;background:#0f172a;color:#e2e8f0;font:14px/1.4 system-ui}
-main{max-width:960px;margin:0 auto;padding:24px}
-video{width:100%;background:#000;border-radius:12px}
-pre{display:none;white-space:pre-wrap;background:#111827;padding:12px;border-radius:12px;min-height:72px}
+html,body{width:100%;height:100%;margin:0;overflow:hidden}
+body{background:#000;color:#e2e8f0;font:14px/1.4 system-ui}
+main{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden}
+video{display:block;width:100%;height:100%;object-fit:contain;background:#000}
+pre{display:none;position:absolute;bottom:16px;left:16px;right:16px;z-index:1;max-height:35vh;overflow:auto;white-space:pre-wrap;background:#111827;padding:12px;border-radius:12px;min-height:72px}
 </style>
 </head>
 <body>
