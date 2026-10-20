@@ -83,7 +83,8 @@ func TestWHEPCachedReplayLargerThanQueueDoesNotDisconnect(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	for i := 0; i < replayFrames+2; i++ {
 		select {
-		case <-session.msgChan:
+		case msg := <-session.msgChan:
+			session.consumeReplayControl(msg)
 		case <-time.After(3 * time.Second):
 			t.Fatalf("cached replay stalled at message %d", i)
 		}
@@ -94,6 +95,7 @@ func TestWHEPCachedReplayLargerThanQueueDoesNotDisconnect(t *testing.T) {
 		t.Fatal("replay producer did not terminate")
 	}
 	if session.closing.Load() { t.Fatal("cached GOP was misclassified as slow live viewer") }
+	if session.replayEnqueuing.Load() { t.Fatal("consumer did not finish draining the cached replay") }
 	if cap(session.msgChan) != 32 { t.Fatal("replay removed bounded queue protection") }
 	// After replay completion, a real-time overflow must still close.
 	for i := 0; i < 33; i++ { session.enqueue(base.RtmpMsg{}) }

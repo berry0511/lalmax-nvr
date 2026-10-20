@@ -280,20 +280,7 @@ connected:
 	for {
 		select {
 		case msg := <-conn.msgChan:
-			if msg.Header.MsgTypeId == 0 {
-				if len(msg.Payload) == 1 && msg.Payload[0] == 1 {
-					conn.replayingCache = true
-				} else {
-					conn.replayingCache = false
-					// Only the consumer can mark replay drained: the producer
-					// finishing AddSubscriber does not mean queued GOP is consumed.
-					conn.replayEnqueuing.Store(false)
-				}
-				conn.paceBaseAt = time.Time{}
-				conn.paceBaseDts = 0
-				conn.paceStarted = false
-				continue
-			}
+			if conn.consumeReplayControl(msg) { continue }
 			// Codec changes must run on the same goroutine as sendVideo.
 			if msg.IsVideoKeySeqHeader() {
 				conn.updateVideoCodec(msg)
@@ -325,6 +312,23 @@ func (conn *whepSession) signalConnected() {
 		conn.refreshRemoteAddr()
 		conn.connectedChan <- struct{}{}
 	})
+}
+
+// consumeReplayControl runs only on the queue reader goroutine. Replay
+// boundary markers preserve FIFO order across the synchronous GOP snapshot.
+func (conn *whepSession) consumeReplayControl(msg base.RtmpMsg) bool {
+	if msg.Header.MsgTypeId != 0 { return false }
+	if len(msg.Payload) == 1 && msg.Payload[0] == 1 {
+		conn.replayingCache = true
+	} else {
+		conn.replayingCache = false
+		// End-of-replay is reached only after queued GOP messages were read.
+		conn.replayEnqueuing.Store(false)
+	}
+	conn.paceBaseAt = time.Time{}
+	conn.paceBaseDts = 0
+	conn.paceStarted = false
+	return true
 }
 
 func (conn *whepSession) OnReplayStart() {
