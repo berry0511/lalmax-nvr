@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/q191201771/lal/pkg/base"
 	maxlogic "github.com/q191201771/lalmax/logic"
+	"github.com/pion/webrtc/v4"
 )
 
 func TestWHEPQueueBoundedAndSlowViewerClosed(t *testing.T) {
@@ -82,6 +83,12 @@ func TestWHEPCachedReplayDoesNotBlockPublisher(t *testing.T) {
 		msgChan: make(chan base.RtmpMsg, 32),
 		closeChan: make(chan bool, 2), done: make(chan struct{}),
 	}
+	// This dummy track lets the test exercise the real H.264 resume gate
+	// without creating an ICE connection or packetizing the cached media.
+	track, err := webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264}, "video", "test")
+	if err != nil { t.Fatal(err) }
+	session.videoTrack = track
 	session.replayPending.Store(true)
 	snapshot, ok := group.AddSubscriberWithSnapshot(maxlogic.SubscriberInfo{
 		SubscriberID: session.subscriberId, Protocol: maxlogic.SubscriberProtocolWHEP,
