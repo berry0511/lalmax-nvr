@@ -37,15 +37,15 @@ type whepSession struct {
 	onRunEnd       func()
 	closeOnce      sync.Once
 	closing        atomic.Bool
-	replayEnqueuing atomic.Bool // true only while Group synchronously replays cached GOP
-	done           chan struct{} // broadcast close to a blocked replay producer
+	replayPending  atomic.Bool // true while the viewer plays a private GOP snapshot
+	awaitKeyframe  atomic.Bool // drop intervening live deltas until a fresh keyframe
+	done           chan struct{} // allow close to interrupt snapshot playback
 	closeChan      chan bool
 	connectedChan  chan struct{}
 	connectedOnce  sync.Once
 	paceBaseDts    uint32
 	paceBaseAt     time.Time
 	paceStarted    bool
-	replayingCache bool
 	wroteBytes     atomic.Uint64
 	videoPackets   atomic.Uint64
 	videoWriteErrs atomic.Uint64
@@ -75,23 +75,10 @@ func (conn *whepSession) requestClose() {
 	})
 }
 
-// enqueue prevents the synchronous cached GOP replay from looking like a slow
-// live consumer. Replay applies bounded backpressure while Run drains in
-// parallel; live traffic keeps the existing fail-fast overflow protection.
+// enqueue must never block the publisher's OnMsg path while Group holds a
+// subscriber's writeMux. Cached GOPs bypass this channel entirely.
 func (conn *whepSession) enqueue(msg base.RtmpMsg) {
 	if conn == nil || conn.closing.Load() { return }
-	if conn.replayEnqueuing.Load() {
-		timer := time.NewTimer(3 * time.Second)
-		defer timer.Stop()
-		select {
-		case conn.msgChan <- msg:
-		case <-conn.done:
-		case <-timer.C:
-			nazalog.Warnf("WHEP replay queue stalled; disconnecting. id=%s stream=%s", conn.subscriberId, conn.streamID)
-			conn.requestClose()
-		}
-		return
-	}
 	select {
 	case conn.msgChan <- msg:
 	default:
@@ -250,22 +237,22 @@ func (conn *whepSession) Run() {
 		conn.signalConnected()
 	}
 
-	var replayDone <-chan struct{}
 	for {
 		select {
 		case <-conn.connectedChan:
-			// AddSubscriber replays cached GOP synchronously before returning.
-			// Start it alongside the consumer loop so replay cannot fill the
-			// bounded queue before any message is consumed.
-			subscriptionDone := make(chan struct{})
-			replayDone = subscriptionDone
-			go func() {
-				defer close(subscriptionDone)
-				conn.group.AddSubscriber(maxlogic.SubscriberInfo{
-					SubscriberID: conn.subscriberId,
-					Protocol:     maxlogic.SubscriberProtocolWHEP,
-				}, conn)
-			}()
+			// Register with an atomic GOP snapshot; never replay while
+			// holding Group's per-subscriber delivery lock.
+			conn.replayPending.Store(true)
+			snapshot, ok := conn.group.AddSubscriberWithSnapshot(maxlogic.SubscriberInfo{
+				SubscriberID: conn.subscriberId,
+				Protocol:     maxlogic.SubscriberProtocolWHEP,
+			}, conn)
+			if !ok { return }
+			// Live frames arriving during replay are skipped, not queued
+			// or blocked. Resume only on a fresh video keyframe.
+			conn.playCachedSnapshot(snapshot)
+			conn.awaitKeyframe.Store(conn.videoTrack != nil)
+			conn.replayPending.Store(false)
 			goto connected
 		case <-conn.closeChan:
 			nazalog.Info("RemoveConsumer, connid:", conn.subscriberId)
@@ -280,26 +267,10 @@ connected:
 	for {
 		select {
 		case msg := <-conn.msgChan:
-			if conn.consumeReplayControl(msg) { continue }
-			// Codec changes must run on the same goroutine as sendVideo.
-			if msg.IsVideoKeySeqHeader() {
-				conn.updateVideoCodec(msg)
-				continue
-			}
-			if conn.replayingCache {
-				conn.paceReplayMsg(msg)
-			}
-			if msg.Header.MsgTypeId == base.RtmpTypeIdAudio && conn.audioTrack != nil {
-				conn.sendAudio(msg)
-			} else if msg.Header.MsgTypeId == base.RtmpTypeIdVideo && conn.videoTrack != nil {
-				conn.sendVideo(msg)
-			}
+			conn.sendMediaMessage(msg, false)
 		case <-statsTicker.C:
 			nazalog.Infof("WHEP video stats subscriber=%s rtp_packets=%d write_errors=%d pli=%d nack=%d", conn.subscriberId, conn.videoPackets.Load(), conn.videoWriteErrs.Load(), conn.pliRequests.Load(), conn.nackRequests.Load())
 		case <-conn.closeChan:
-			// The replay producer must finish before RemoveSubscriber, or a
-			// subscription could be registered after removal during shutdown.
-			if replayDone != nil { <-replayDone }
 			nazalog.Info("RemoveConsumer, connid:", conn.subscriberId)
 			conn.group.RemoveSubscriber(conn.subscriberId)
 			return
@@ -314,32 +285,42 @@ func (conn *whepSession) signalConnected() {
 	})
 }
 
-// consumeReplayControl runs only on the queue reader goroutine. Replay
-// boundary markers preserve FIFO order across the synchronous GOP snapshot.
-func (conn *whepSession) consumeReplayControl(msg base.RtmpMsg) bool {
-	if msg.Header.MsgTypeId != 0 { return false }
-	if len(msg.Payload) == 1 && msg.Payload[0] == 1 {
-		conn.replayingCache = true
-	} else {
-		conn.replayingCache = false
-		// End-of-replay is reached only after queued GOP messages were read.
-		conn.replayEnqueuing.Store(false)
+// playCachedSnapshot processes a bounded-by-GOP-cache snapshot in the
+// viewer's own Run goroutine. Its pacing can never hold Group.writeMux or
+// block any publisher/recorder. Close interrupts the replay promptly.
+func (conn *whepSession) playCachedSnapshot(snapshot []base.RtmpMsg) {
+	conn.paceBaseAt = time.Time{}
+	conn.paceBaseDts = 0
+	conn.paceStarted = false
+	for _, msg := range snapshot {
+		if conn.closing.Load() { break }
+		if conn.done != nil {
+			select {
+			case <-conn.done:
+				return
+			default:
+			}
+		}
+		conn.sendMediaMessage(msg, true)
 	}
 	conn.paceBaseAt = time.Time{}
 	conn.paceBaseDts = 0
 	conn.paceStarted = false
-	return true
 }
 
-func (conn *whepSession) OnReplayStart() {
-	conn.replayEnqueuing.Store(true)
-	// Start/end markers maintain replay ordering and pacing state on the
-	// queue consumer goroutine instead of racing producer callbacks.
-	conn.enqueue(base.RtmpMsg{Payload: []byte{1}})
-}
-
-func (conn *whepSession) OnReplayStop() {
-	conn.enqueue(base.RtmpMsg{})
+// sendMediaMessage is owned by the viewer's Run goroutine, including codec
+// changes and RTP packetization. It never runs from the publisher's OnMsg.
+func (conn *whepSession) sendMediaMessage(msg base.RtmpMsg, cached bool) {
+	if msg.IsVideoKeySeqHeader() {
+		conn.updateVideoCodec(msg)
+		return
+	}
+	if cached { conn.paceReplayMsg(msg) }
+	if msg.Header.MsgTypeId == base.RtmpTypeIdAudio && conn.audioTrack != nil {
+		conn.sendAudio(msg)
+	} else if msg.Header.MsgTypeId == base.RtmpTypeIdVideo && conn.videoTrack != nil {
+		conn.sendVideo(msg)
+	}
 }
 
 func (conn *whepSession) paceReplayMsg(msg base.RtmpMsg) {
@@ -375,11 +356,14 @@ func (conn *whepSession) paceReplayMsg(msg base.RtmpMsg) {
 }
 
 func (conn *whepSession) OnMsg(msg base.RtmpMsg) {
+	// OnMsg is invoked under Group's per-subscriber writeMux. It must
+	// never wait for cached replay pacing or a full viewer queue.
+	if conn.replayPending.Load() || conn.closing.Load() { return }
 	switch msg.Header.MsgTypeId {
 	case base.RtmpTypeIdMetadata:
 		return
 	case base.RtmpTypeIdAudio:
-		if conn.audioTrack != nil {
+		if conn.audioTrack != nil && !conn.awaitKeyframe.Load() {
 			conn.enqueue(msg)
 		}
 	case base.RtmpTypeIdVideo:
@@ -387,9 +371,12 @@ func (conn *whepSession) OnMsg(msg base.RtmpMsg) {
 			conn.enqueue(msg)
 			return
 		}
-		if conn.videoTrack != nil {
-			conn.enqueue(msg)
+		if conn.videoTrack == nil { return }
+		if conn.awaitKeyframe.Load() {
+			if !msg.IsVideoKeyNalu() { return }
+			conn.awaitKeyframe.Store(false)
 		}
+		conn.enqueue(msg)
 	}
 }
 

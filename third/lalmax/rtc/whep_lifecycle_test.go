@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/q191201771/lal/pkg/base"
+	maxlogic "github.com/q191201771/lalmax/logic"
 )
 
 func TestWHEPQueueBoundedAndSlowViewerClosed(t *testing.T) {
@@ -61,43 +62,66 @@ func TestWHEPDeleteTerminatesOnlyAuthorizedSession(t *testing.T) {
 	if got := request("/webrtc/whep/viewer-1?token=allowed"); got != http.StatusNotFound { t.Fatalf("repeat DELETE status %d", got) }
 }
 
-func TestWHEPCachedReplayLargerThanQueueDoesNotDisconnect(t *testing.T) {
-	const replayFrames = 1101
+// WHEP snapshot replay is independent of both the live bounded queue and
+// Group's per-subscriber write lock. This reproduces the 200-frame / 32-queue
+// publisher stall reported by upstream.
+func TestWHEPCachedReplayDoesNotBlockPublisher(t *testing.T) {
+	mgr := maxlogic.NewComplexGroupManager()
+	group, created := mgr.GetOrCreateGroup(maxlogic.NewStreamKey("live", "whep-snapshot-test"), "test", nil, 1, 1024)
+	if !created || group == nil { t.Fatal("failed to create group") }
+	video := func(key bool) base.RtmpMsg {
+		frame := byte(base.RtmpAvcInterFrame)
+		if key { frame = base.RtmpAvcKeyFrame }
+		return base.RtmpMsg{Header: base.RtmpHeader{MsgTypeId: base.RtmpTypeIdVideo},
+			Payload: []byte{frame, base.RtmpAvcPacketTypeNalu, 0, 0, 0, 7}}
+	}
+	group.OnMsg(video(true))
+	for i := 0; i < 200; i++ { group.OnMsg(video(false)) }
 	session := &whepSession{
-		streamID: "cached", subscriberId: "cached-viewer",
+		streamID: "whep-snapshot-test", subscriberId: "viewer",
+		msgChan: make(chan base.RtmpMsg, 32),
+		closeChan: make(chan bool, 2), done: make(chan struct{}),
+	}
+	session.replayPending.Store(true)
+	snapshot, ok := group.AddSubscriberWithSnapshot(maxlogic.SubscriberInfo{
+		SubscriberID: session.subscriberId, Protocol: maxlogic.SubscriberProtocolWHEP,
+	}, session)
+	if !ok || len(snapshot) < 200 { t.Fatalf("GOP snapshot too small: ok=%v count=%d", ok, len(snapshot)) }
+	published := make(chan struct{})
+	go func() {
+		group.OnMsg(video(true))
+		for i := 0; i < 200; i++ { group.OnMsg(video(false)) }
+		close(published)
+	}()
+	select {
+	case <-published:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Group.OnMsg blocked on WHEP replay, affecting live publisher")
+	}
+	if session.closing.Load() { t.Fatal("cached GOP falsely disconnected viewer") }
+	if len(session.msgChan) != 0 || cap(session.msgChan) != 32 {
+		t.Fatal("cached GOP filled or unbounded the live queue")
+	}
+	// Finishing the cached snapshot must resync to a fresh keyframe; stale
+	// delta frames and audio must not join an already-paced cached GOP.
+	session.awaitKeyframe.Store(true)
+	session.replayPending.Store(false)
+	session.OnMsg(video(false))
+	if len(session.msgChan) != 0 { t.Fatal("stale delta enqueued before keyframe") }
+	session.OnMsg(video(true))
+	if len(session.msgChan) != 1 { t.Fatal("fresh keyframe did not resume live WHEP") }
+	session.OnStop()
+	group.RemoveSubscriber(session.subscriberId)
+}
+
+func TestWHEPQueueRemainsBoundedAfterReplay(t *testing.T) {
+	session := &whepSession{
+		subscriberId: "slow-live", streamID: "live",
 		msgChan: make(chan base.RtmpMsg, 32),
 		closeChan: make(chan bool, 2),
 		done: make(chan struct{}),
 	}
-	session.OnReplayStart()
-	producerDone := make(chan struct{})
-	go func() {
-		defer close(producerDone)
-		for i := 0; i < replayFrames; i++ {
-			session.enqueue(base.RtmpMsg{Header: base.RtmpHeader{MsgTypeId: base.RtmpTypeIdVideo}})
-		}
-		session.OnReplayStop()
-	}()
-	// Deliberately let the producer fill its bounded queue before we drain it.
-	// The old fail-fast enqueue closed the session during this window.
-	time.Sleep(20 * time.Millisecond)
-	for i := 0; i < replayFrames+2; i++ {
-		select {
-		case msg := <-session.msgChan:
-			session.consumeReplayControl(msg)
-		case <-time.After(3 * time.Second):
-			t.Fatalf("cached replay stalled at message %d", i)
-		}
-	}
-	select {
-	case <-producerDone:
-	case <-time.After(3 * time.Second):
-		t.Fatal("replay producer did not terminate")
-	}
-	if session.closing.Load() { t.Fatal("cached GOP was misclassified as slow live viewer") }
-	if session.replayEnqueuing.Load() { t.Fatal("consumer did not finish draining the cached replay") }
-	if cap(session.msgChan) != 32 { t.Fatal("replay removed bounded queue protection") }
-	// After replay completion, a real-time overflow must still close.
 	for i := 0; i < 33; i++ { session.enqueue(base.RtmpMsg{}) }
-	if !session.closing.Load() { t.Fatal("live queue overflow must still disconnect slow viewers") }
+	if !session.closing.Load() { t.Fatal("slow viewer overflow did not close") }
+	if len(session.msgChan) > 32 { t.Fatal("queue exceeded configured bound") }
 }

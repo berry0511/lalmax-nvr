@@ -768,3 +768,43 @@ func TestStatSubscribersRefreshRuntimeStats(t *testing.T) {
 		t.Fatalf("write bitrate after increment = %d, want 8", stat.WriteBitrateKbits)
 	}
 }
+
+func TestAddSubscriberWithSnapshotNeverBlocksPublisherDuringPlayback(t *testing.T) {
+	group := newTestGroup("test-snapshot-no-block")
+	defer GetGroupManagerInstance().RemoveGroupByStreamName("test-snapshot-no-block")
+	group.OnMsg(videoSeqHeader(1))
+	group.OnMsg(videoKeyNalu(2))
+	for i := 0; i < 200; i++ { group.OnMsg(videoInterNalu(byte(i))) }
+	sub := &recordSubscriber{}
+	snapshot, ok := group.AddSubscriberWithSnapshot(SubscriberInfo{
+		SubscriberID: "snapshot", Protocol: SubscriberProtocolWHEP,
+	}, sub)
+	if !ok || len(snapshot) < 200 { t.Fatalf("snapshot missing cached GOP: ok=%v count=%d", ok, len(snapshot)) }
+	if sub.len() != 0 { t.Fatal("snapshot was synchronously delivered to subscriber") }
+	// Nobody consumes the snapshot while live frames arrive. A slow replay
+	// must not hold writeMux, stall OnMsg, or affect other subscribers.
+	done := make(chan struct{})
+	go func() {
+		group.OnMsg(videoKeyNalu(3))
+		for i := 0; i < 200; i++ { group.OnMsg(videoInterNalu(byte(i))) }
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("publisher blocked behind replay snapshot")
+	}
+	if sub.len() == 0 { t.Fatal("live subscriber did not receive live media") }
+	group.RemoveSubscriber("snapshot")
+}
+
+func TestAddSubscriberWithSnapshotDoesNotRegisterDuplicateOrClosedGroup(t *testing.T) {
+	group := newTestGroup("test-snapshot-duplicate")
+	defer GetGroupManagerInstance().RemoveGroupByStreamName("test-snapshot-duplicate")
+	sub := &recordSubscriber{}
+	_, ok := group.AddSubscriberWithSnapshot(SubscriberInfo{SubscriberID:"same"}, sub)
+	if !ok { t.Fatal("first subscriber rejected") }
+	_, ok = group.AddSubscriberWithSnapshot(SubscriberInfo{SubscriberID:"same"}, sub)
+	if ok { t.Fatal("duplicate subscriber accepted") }
+	group.RemoveSubscriber("same")
+}

@@ -293,6 +293,46 @@ func (group *Group) OnStop() {
 	})
 }
 
+// AddSubscriberWithSnapshot atomically captures a cached GOP and registers a
+// live subscriber without delivering the replay while a per-subscriber lock is
+// held. WHEP can play this snapshot on its own goroutine while its OnMsg
+// remains nonblocking on the publisher dispatch path. Existing synchronous
+// AddSubscriberWithReplay semantics are unchanged for other consumers.
+func (group *Group) AddSubscriberWithSnapshot(info SubscriberInfo, subscriber Subscriber) ([]base.RtmpMsg, bool) {
+	if info.SubscriberID == "" || subscriber == nil { return nil, false }
+	if info.Protocol == "" { info.Protocol = SubscriberProtocolLalmax }
+	group.lifecycleMux.RLock()
+	defer group.lifecycleMux.RUnlock()
+	if group.closed.Load() { return nil, false }
+
+	state := &subscriberState{
+		key: group.key, subscriber: subscriber, replayCache: false,
+		lastStatAt: time.Now(),
+		StatSession: base.StatSession{
+			SessionId: info.SubscriberID, Protocol: info.Protocol,
+			BaseType: base.SessionBaseTypeSubStr, RemoteAddr: info.RemoteAddr,
+			StartTime: time.Now().Format(time.DateTime),
+		},
+	}
+	if provider, ok := subscriber.(SubscriberStatProvider); ok {
+		state.statProvider = provider
+	}
+	// OnMsg feeds GOP cache under msgMux, then dispatches to registered
+	// subscribers. The snapshot and subscription therefore share one
+	// boundary: all earlier frames are in the snapshot, later frames are live.
+	group.msgMux.Lock()
+	if _, loaded := group.consumers.Load(info.SubscriberID); loaded {
+		group.msgMux.Unlock()
+		return nil, false
+	}
+	snapshot := group.getGopReplayMessages()
+	group.consumers.Store(info.SubscriberID, state)
+	group.msgMux.Unlock()
+	nazalog.Infof("AddSubscriberWithSnapshot, streamKey:%s, subscriberId:%s, replayMsgs:%d",
+		group.key.String(), info.SubscriberID, len(snapshot))
+	return snapshot, true
+}
+
 func (group *Group) AddSubscriber(info SubscriberInfo, subscriber Subscriber) {
 	group.AddSubscriberWithReplay(info, subscriber, true)
 }
