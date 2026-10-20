@@ -374,6 +374,14 @@ func (conn *whepSession) OnMsg(msg base.RtmpMsg) {
 		if conn.videoTrack == nil { return }
 		if conn.awaitKeyframe.Load() {
 			if !msg.IsVideoKeyNalu() { return }
+			// Cached GOP replay may have spanned a codec parameter change.
+			// Before the first fresh keyframe, forward the latest sequence
+			// header so the decoder does not resume with stale SPS/PPS/VPS.
+			if conn.group != nil {
+				if header := conn.group.GetVideoSeqHeaderMsg(); header != nil {
+					conn.enqueue(*header)
+				}
+			}
 			conn.awaitKeyframe.Store(false)
 		}
 		conn.enqueue(msg)

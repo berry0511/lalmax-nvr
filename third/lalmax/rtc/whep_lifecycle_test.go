@@ -76,6 +76,10 @@ func TestWHEPCachedReplayDoesNotBlockPublisher(t *testing.T) {
 		return base.RtmpMsg{Header: base.RtmpHeader{MsgTypeId: base.RtmpTypeIdVideo},
 			Payload: []byte{frame, base.RtmpAvcPacketTypeNalu, 0, 0, 0, 7}}
 	}
+	group.OnMsg(base.RtmpMsg{
+		Header: base.RtmpHeader{MsgTypeId: base.RtmpTypeIdVideo},
+		Payload: []byte{base.RtmpAvcKeyFrame, base.RtmpAvcPacketTypeSeqHeader, 0, 0, 0, 0x42},
+	})
 	group.OnMsg(video(true))
 	for i := 0; i < 200; i++ { group.OnMsg(video(false)) }
 	session := &whepSession{
@@ -116,7 +120,11 @@ func TestWHEPCachedReplayDoesNotBlockPublisher(t *testing.T) {
 	session.OnMsg(video(false))
 	if len(session.msgChan) != 0 { t.Fatal("stale delta enqueued before keyframe") }
 	session.OnMsg(video(true))
-	if len(session.msgChan) != 1 { t.Fatal("fresh keyframe did not resume live WHEP") }
+	if len(session.msgChan) != 2 { t.Fatalf("expected fresh video header and keyframe, got %d", len(session.msgChan)) }
+	header := <-session.msgChan
+	if !header.IsVideoKeySeqHeader() { t.Fatal("latest codec header must precede resumed keyframe") }
+	keyframe := <-session.msgChan
+	if !keyframe.IsVideoKeyNalu() { t.Fatal("resumed packet is not a fresh keyframe") }
 	session.OnStop()
 	group.RemoveSubscriber(session.subscriberId)
 }
