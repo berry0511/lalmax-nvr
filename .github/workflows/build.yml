@@ -52,7 +52,7 @@ jobs:
       - name: Test embedded lalmax RTC, server and VoIP
         run: |
           cd third/lalmax
-          go test -race -count=1 ./rtc ./server ./voip/...
+          go test -race -count=1 ./logic ./rtc ./server ./voip/...
 
       - name: Display coverage
         run: go tool cover -func=coverage.out
