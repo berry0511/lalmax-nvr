@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/q191201771/lal/pkg/base"
@@ -58,4 +59,43 @@ func TestWHEPDeleteTerminatesOnlyAuthorizedSession(t *testing.T) {
 	if _, ok := srv.whepSessions.Load("viewer-1"); ok { t.Fatal("DELETE kept the session registered") }
 	if !session.closing.Load() { t.Fatal("session did not receive termination") }
 	if got := request("/webrtc/whep/viewer-1?token=allowed"); got != http.StatusNotFound { t.Fatalf("repeat DELETE status %d", got) }
+}
+
+func TestWHEPCachedReplayLargerThanQueueDoesNotDisconnect(t *testing.T) {
+	const replayFrames = 1101
+	session := &whepSession{
+		streamID: "cached", subscriberId: "cached-viewer",
+		msgChan: make(chan base.RtmpMsg, 32),
+		closeChan: make(chan bool, 2),
+		done: make(chan struct{}),
+	}
+	session.OnReplayStart()
+	producerDone := make(chan struct{})
+	go func() {
+		defer close(producerDone)
+		for i := 0; i < replayFrames; i++ {
+			session.enqueue(base.RtmpMsg{Header: base.RtmpHeader{MsgTypeId: base.RtmpTypeIdVideo}})
+		}
+		session.OnReplayStop()
+	}()
+	// Deliberately let the producer fill its bounded queue before we drain it.
+	// The old fail-fast enqueue closed the session during this window.
+	time.Sleep(20 * time.Millisecond)
+	for i := 0; i < replayFrames+2; i++ {
+		select {
+		case <-session.msgChan:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("cached replay stalled at message %d", i)
+		}
+	}
+	select {
+	case <-producerDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("replay producer did not terminate")
+	}
+	if session.closing.Load() { t.Fatal("cached GOP was misclassified as slow live viewer") }
+	if cap(session.msgChan) != 32 { t.Fatal("replay removed bounded queue protection") }
+	// After replay completion, a real-time overflow must still close.
+	for i := 0; i < 33; i++ { session.enqueue(base.RtmpMsg{}) }
+	if !session.closing.Load() { t.Fatal("live queue overflow must still disconnect slow viewers") }
 }
