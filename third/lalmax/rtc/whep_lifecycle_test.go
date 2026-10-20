@@ -83,6 +83,7 @@ func TestWHEPCachedReplayDoesNotBlockPublisher(t *testing.T) {
 	group.OnMsg(video(true))
 	for i := 0; i < 200; i++ { group.OnMsg(video(false)) }
 	session := &whepSession{
+		group: group,
 		streamID: "whep-snapshot-test", subscriberId: "viewer",
 		msgChan: make(chan base.RtmpMsg, 32),
 		closeChan: make(chan bool, 2), done: make(chan struct{}),
