@@ -479,9 +479,22 @@ func (g *GB28181API) stopPlay(stream *Streams) error {
 	// Terminate the remote SIP dialog before releasing its RTP receiver.
 	// On failure retain the session so recovery does not issue another INVITE.
 	if err := g.sendPlayBye(stream); err != nil { return err }
-	if stream.SessionID != "" && g.mediaEngine != nil {
-		if err := g.mediaEngine.StopRTPReceive(context.Background(), stream.SessionID); err != nil { return fmt.Errorf("stop RTP receiver: %w", err) }
+	return g.stopPlayRTPReceiver(stream)
+}
+
+// stopPlayRTPReceiver is idempotent: an RTP receiver may have timed out
+// before its SIP dialog is closed. Only the exact lalmax 1003 condition is
+// accepted as "already gone"; transport failures and other errors must block
+// a new INVITE so that state cannot silently diverge.
+func (g *GB28181API) stopPlayRTPReceiver(stream *Streams) error {
+	if stream.SessionID == "" || g.mediaEngine == nil { return nil }
+	err := g.mediaEngine.StopRTPReceive(context.Background(), stream.SessionID)
+	if media.IsRTPReceiveSessionNotFound(err) {
+		slog.Info("GB28181 RTP receiver already absent; local session can be released",
+			"session_id", stream.SessionID, "device_id", stream.DeviceID)
+		return nil
 	}
+	if err != nil { return fmt.Errorf("stop RTP receiver: %w", err) }
 	return nil
 }
 

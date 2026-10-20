@@ -22,7 +22,29 @@ import (
 )
 
 // lal ErrorCodeGroupNotFound — group not in lalmax yet (e.g. GB28181 RTP port open, no packets).
-const lalErrorCodeGroupNotFound = 1001
+const (
+	lalErrorCodeGroupNotFound = 1001
+	lalErrorCodeRTPPubSessionNotFound = 1003
+)
+
+// LalmaxAPIError preserves numeric media API error codes for explicit recovery
+// policies. Never classify arbitrary network or media failures by message text.
+type LalmaxAPIError struct {
+	Code        int
+	Description string
+}
+
+func (e *LalmaxAPIError) Error() string {
+	return fmt.Sprintf("lalmax error %d: %s", e.Code, e.Description)
+}
+
+// IsRTPReceiveSessionNotFound identifies a media server's exact "RTP pub
+// session not found" response. Only callers stopping RTP receivers should
+// treat this as a successfully completed, idempotent stop.
+func IsRTPReceiveSessionNotFound(err error) bool {
+	var apiErr *LalmaxAPIError
+	return errors.As(err, &apiErr) && apiErr.Code == lalErrorCodeRTPPubSessionNotFound
+}
 
 type LalmaxHTTPConfig struct {
 	BaseURL           string
@@ -530,7 +552,7 @@ func (e *LalmaxHTTP) doJSON(req *http.Request, out any) (retErr error) {
 		return fmt.Errorf("decode lalmax response: %w", err)
 	}
 	if basic, ok := responseBasic(out); ok && basic.ErrorCode != 0 {
-		return fmt.Errorf("lalmax error %d: %s", basic.ErrorCode, basic.Description)
+		return &LalmaxAPIError{Code: basic.ErrorCode, Description: basic.Description}
 	}
 	return nil
 }
