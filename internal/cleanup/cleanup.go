@@ -396,10 +396,10 @@ func (cm *CleanupManager) cleanOrphansForCamera(ctx context.Context, cameraID st
 		if dbBasenames[name] {
 			continue
 		}
-		fullPath := filepath.Join(cm.store.RootDir(), cameraID, name)
+		fullPath := filepath.Join(cm.store.CameraDirPath(cameraID), name)
 		if info.IsDir() {
 			// MJPEG directories or .tmp directories
-			if strings.HasPrefix(name, cameraID+"_") || strings.HasSuffix(name, ".tmp") {
+			if strings.HasPrefix(name, cm.store.CameraRecordingPrefix(cameraID)) || strings.HasSuffix(name, ".tmp") {
 				if err := os.RemoveAll(fullPath); err != nil {
 					logger.Warn("orphan cleanup: failed to remove dir", "path", fullPath, "error", err)
 					continue
@@ -410,7 +410,7 @@ func (cm *CleanupManager) cleanOrphansForCamera(ctx context.Context, cameraID st
 				}
 				deleted++
 			}
-		} else if strings.HasSuffix(name, ".mp4") && strings.HasPrefix(name, cameraID+"_") {
+		} else if strings.HasSuffix(name, ".mp4") && strings.HasPrefix(name, cm.store.CameraRecordingPrefix(cameraID)) {
 			if err := os.Remove(fullPath); err != nil {
 				logger.Warn("orphan cleanup: failed to delete file", "path", fullPath, "error", err)
 				continue

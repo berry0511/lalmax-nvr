@@ -767,3 +767,33 @@ func TestDeleteRecordingKeepsIndexOnFileErrorAndRetriesMissingFile(t *testing.T)
 	require.NoError(t, err)
 	require.Nil(t, existing)
 }
+
+func TestOrphanCleanupUsesEncodedCameraDirectoryAndPrefix(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.close(t)
+	ctx := context.Background()
+	cameraID := "34020000001320000001:34020000001320000002"
+	require.NoError(t, env.db.UpsertCamera(ctx, cameraID, "GB channel", "gb28181", "", "", "", "", true, "", "", ""))
+	require.NoError(t, env.store.EnsureCameraDir(cameraID))
+	dir := env.store.CameraDirPath(cameraID)
+	prefix := env.store.CameraRecordingPrefix(cameraID)
+	require.NotEqual(t, cameraID+"_", prefix)
+	orphan := filepath.Join(dir, prefix+"20261001_120000_orphan.mp4")
+	registered := filepath.Join(dir, prefix+"20261001_120000_registered.mp4")
+	other := filepath.Join(dir, "other-camera_20261001_120000.mp4")
+	for _, path := range []string{orphan, registered, other} {
+		require.NoError(t, os.WriteFile(path, []byte("data"), 0600))
+		old := time.Now().Add(-2 * time.Hour)
+		require.NoError(t, os.Chtimes(path, old, old))
+	}
+	env.insertTestRecording(t, "registered-encoded", cameraID, filepath.Join(filepath.Base(dir), filepath.Base(registered)), time.Now().Add(-48*time.Hour), false)
+	cm, err := NewCleanupManager(env.db, env.store, defaultCleanupConfig())
+	require.NoError(t, err)
+	require.Equal(t, 1, cm.cleanOrphansForCamera(ctx, cameraID))
+	_, err = os.Stat(orphan)
+	require.True(t, os.IsNotExist(err), "encoded orphan recording must be reclaimed")
+	_, err = os.Stat(registered)
+	require.NoError(t, err, "registered recording must survive cleanup")
+	_, err = os.Stat(other)
+	require.NoError(t, err, "other prefix must not be deleted")
+}

@@ -485,6 +485,11 @@ func (g *GB28181API) stopPlay(stream *Streams) error {
 	return nil
 }
 
+// A remote SIP 481 means the dialog is already gone, so local cleanup is safe.
+func byeConfirmsRemoteDialogGone(status int) bool {
+	return status >= 200 && status < 300 || status == 481
+}
+
 func (g *GB28181API) sendPlayBye(stream *Streams) error {
 	if stream.CallID == "" || stream.FromTag == "" || stream.ToTag == "" { return fmt.Errorf("missing confirmed SIP dialog for %s:%s", stream.DeviceID, stream.ChannelID) }
 	dev, ok := g.store.Load(stream.DeviceID)
@@ -506,7 +511,10 @@ func (g *GB28181API) sendPlayBye(stream *Streams) error {
 	defer cancel()
 	resp, err := g.client.Do(ctx, req)
 	if err != nil { return fmt.Errorf("SIP BYE %s: %w", stream.CallID, err) }
-	if !resp.IsSuccess() { return fmt.Errorf("SIP BYE rejected %s: %d %s", stream.CallID, resp.StatusCode, resp.Reason) }
+	if !byeConfirmsRemoteDialogGone(resp.StatusCode) { return fmt.Errorf("SIP BYE rejected %s: %d %s", stream.CallID, resp.StatusCode, resp.Reason) }
+	if resp.StatusCode == 481 {
+		slog.Info("[SIP] BYE remote dialog already absent, proceeding with local cleanup", "call_id", stream.CallID)
+	}
 	slog.Info("[SIP] BYE acknowledged", "call_id", stream.CallID, "device_id", stream.DeviceID, "channel_id", stream.ChannelID)
 	return nil
 }

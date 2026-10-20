@@ -75,6 +75,16 @@ func originalRecordingID(diskName string) (string, bool) {
 	return string(decoded), err == nil && len(decoded) > 0
 }
 
+// CameraDirPath is the exact encoded recording directory for a camera ID.
+func (m *Manager) CameraDirPath(cameraID string) string {
+	return filepath.Join(m.rootDir, recordingDiskName(cameraID))
+}
+
+// CameraRecordingPrefix matches names emitted by CreateSegment for a camera.
+func (m *Manager) CameraRecordingPrefix(cameraID string) string {
+	return recordingDiskName(cameraID) + "_"
+}
+
 // EnsureCameraDir creates the directory for a camera if it doesn't exist.
 func (m *Manager) EnsureCameraDir(cameraID string) error {
 	dir := filepath.Join(m.rootDir, recordingDiskName(cameraID))
