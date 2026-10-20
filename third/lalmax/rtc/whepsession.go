@@ -285,6 +285,9 @@ connected:
 					conn.replayingCache = true
 				} else {
 					conn.replayingCache = false
+					// Only the consumer can mark replay drained: the producer
+					// finishing AddSubscriber does not mean queued GOP is consumed.
+					conn.replayEnqueuing.Store(false)
 				}
 				conn.paceBaseAt = time.Time{}
 				conn.paceBaseDts = 0
@@ -333,7 +336,6 @@ func (conn *whepSession) OnReplayStart() {
 
 func (conn *whepSession) OnReplayStop() {
 	conn.enqueue(base.RtmpMsg{})
-	conn.replayEnqueuing.Store(false)
 }
 
 func (conn *whepSession) paceReplayMsg(msg base.RtmpMsg) {
