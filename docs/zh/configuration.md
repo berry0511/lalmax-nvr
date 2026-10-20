@@ -615,7 +615,7 @@ IPTV 导入、浏览器代理播放无需启动媒体拉流；发布频道或按
 
 ### `streaming.default_protocol`
 - **类型**: string
-- **默认**: `"hls"`
+- **默认**: `"webrtc"`
 - **选项**: `webrtc`, `flv`, `ws-flv`, `hls`, `ll-hls`
 - **描述**: 默认流媒体协议
 
@@ -649,7 +649,7 @@ streaming:
 websocket:
   max_viewers: 10        # 最大并发观看数
   write_buf_size: 1024   # 写缓冲区大小
-  idle_timeout: "60s"    # 空闲超时
+  # idle_timeout: 60000000000 # 60s (time.Duration nanoseconds; omitted uses default)
 ```
 
 ## RTMP 推流配置

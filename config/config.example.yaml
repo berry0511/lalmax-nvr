@@ -3,7 +3,7 @@
 # Or use: ./lalmax-nvr init --password <your-password>
 #
 # All durations use Go duration format: 30s, 5m, 1h, 24h
-# Camera IDs must be unique and kebab-case (e.g., "front-door")
+# Camera IDs must be unique; IDs with special characters are encoded safely on disk.
 # Enables, ports, and thresholds are validated on startup
 
 # HTTP server listen address (default: ":9090")
@@ -21,6 +21,9 @@ storage:
   # database_driver: "postgres"     # postgres | mysql
   # database_dsn: "postgres://nvr:password@127.0.0.1:5432/lalmax_nvr?sslmode=disable"
   # database_dsn: "nvr:password@tcp(127.0.0.1:3306)/lalmax_nvr?parseTime=true"
+  # database_migration_target:            # Test-only destination; does NOT change the active DB
+  #   driver: "postgres"
+  #   dsn: "postgres://nvr:replace-me@127.0.0.1:5432/new_nvr?sslmode=disable"
 
 # lal/lalmax media engine configuration.
 media:
@@ -42,6 +45,9 @@ media:
   # rtsp_port: 15544                      # External lal RTSP port (default: 15544)
   # Native RTSP Basic/Digest auth is disabled by default.
   # rtsp_auth_enable: false
+  # rtsp_auth_method: 1                  # 0=Basic (default), 1=Digest
+  # rtsp_username: "viewer"              # Required only with rtsp_auth_enable: true
+  # rtsp_password: "replace-with-private-secret" # Required only when auth is enabled
   # By default a configured auth.publish_tokens also applies to RTSP publishers.
   # For explicitly anonymous RTSP publishing (no native login and no shared
   # publish token), set BOTH rtsp_auth_enable: false and the following flag:
@@ -63,7 +69,10 @@ media:
 # dlna:
 #   enabled: false
 #   friendly_name: "Lalmax NVR"
+#   uuid: ""                            # Optional stable UPnP UUID; empty uses generated/default identity
 #   port: 8200
+#   advertise_url: ""                   # Optional reachable http://LAN-IP:8200/ URL, never loopback
+#   allowed_cidrs: []                  # Restrict LAN clients, e.g. ["192.168.1.0/24"]
 #   interface: ""                      # optional NIC name; empty uses the detected LAN address
 #   include_live: true
 #   include_recordings: true
@@ -102,8 +111,24 @@ cameras: []
 #     protocol: "rtsp"        # Transport: rtsp, http, onvif, xiaomi
 #     encoding: "h264"         # Encoding: h264, h265, mjpeg, jpeg
 #     url: "rtsp://192.168.1.100:554/stream"
+#     rtsp_transport: "tcp"             # tcp | udp; defaults to tcp
+#     stream_id: ""                     # Optional lalmax group ID override
+#     stream_encoding: ""               # Optional detected/overridden source stream encoding
+#     sub_stream_url: ""                 # Optional preview RTSP URL
+#     sub_profile_token: ""             # Optional ONVIF sub-stream profile
+#     snapshot_url: ""                  # Optional HTTP snapshot endpoint
+#     frame_watchdog_timeout: ""        # Optional duration for lost-frame detection
+#     pull_retry_num: 0                 # Source-specific pull retries; tune per camera
 #     enabled: true
 #     audio_enabled: true           # Supported H.264/H.265 cameras default to audio on
+#     adaptive:
+#       timelapse_interval: "30s"   # Sparse-recording calm-state keyframe interval
+#     timelapse:
+#       enabled: false
+#       interval: "30s"
+#       output_fps: 25
+#       video_codec: "h264"
+#       delete_original: false
 #   - id: "backyard"
 #     name: "Back Yard"
 #     protocol: "http"
@@ -171,6 +196,7 @@ mqtt:
 #   scan_interval: 60s
 #   default_username: ""
 #   default_password: ""
+#   network_interface: ""               # Optional NIC for ONVIF discovery
 
 # Event / adaptive recording windows
 # event:
@@ -179,6 +205,26 @@ mqtt:
 
 # Health IP self-healing (default on)
 # health:
+#   enabled: false
+#   events_retention: "720h"           # Retain health events for 30 days
+#   alerts:
+#     cooldown: "5m"
+#     mqtt: false
+#   layer1:
+#     offline_threshold: "30s"
+#   layer2:
+#     bitrate_change_threshold: 0.5
+#     min_fps: 5
+#     max_idr_interval: "60s"
+#   layer2_5:
+#     freeze_timeout: "10s"
+#   auto_remediation:
+#     enabled: false
+#     max_restarts_per_hour: 3
+#     cooldown_minutes: 5
+#     blacklist_hours: 1
+#     global_max_per_min: 10
+#     offline_restart_seconds: 90
 #   rediscovery:
 #     enabled: true
 #     max_parallel: 16
@@ -186,7 +232,26 @@ mqtt:
 
 # Sub-stream preview idle stop (seconds, default 60)
 # streaming:
+#   default_protocol: "webrtc"           # webrtc | flv | ws-flv | hls | ll-hls
+#   auto_stop_no_view_sec: 300           # Stop idle publisher after 5m; 0 currently defaults to 300
 #   preview_auto_stop_sec: 60
+#   webrtc:
+#     enabled: true
+#     max_viewers: 2
+#     idle_timeout: "60s"
+#   flv:
+#     enabled: true
+#     max_viewers: 10
+#     idle_timeout: "60s"
+#     gop_cache_size: 1
+#
+# WebSocket streaming (not the same as WHEP signaling)
+# websocket:
+#   max_viewers: 10
+#   write_buf_size: 100
+#   # idle_timeout is a Go time.Duration. When explicitly set in YAML,
+#   # this field is parsed as integer nanoseconds (60s = 60000000000).
+#   # idle_timeout: 60000000000
 #
 # IPTV is an independent module (Web UI: #/iptv). Import and validate M3U,
 # play in the browser, or publish through NVR for protocol playback.
@@ -222,6 +287,7 @@ webdav:
 # Camera streamid format: #!::h=<stream_id>,m=publish,u=<token>
 # srt:
 #   enabled: true
+#   port: 19000                          # Embedded SRT UDP ingress; default 19000
 #   stream_keys:
 #     front-door: "generate-a-long-random-token"
 
@@ -245,6 +311,7 @@ webdav:
 #   id: "34020000002000000001"          # 20-digit platform SIP ID (required)
 #   password: "replace-with-a-private-secret" # Required for device registration digest auth
 #   media_ip: "192.168.1.100"           # IP for SDP media reception (required, your server's IP)
+#   media_port: 0                       # 0=auto/multi-port; >0=single RTP receive port
 #   host: ""                            # SIP listen host (optional, auto-detect from media_ip)
 #   standard_version: "2016"             # GB28181 standard version: 2016 or 2022
 #   whep_on_demand_enabled: false          # Opt-in: direct WHEP URL starts offline-media registered GB28181 channel via INVITE
@@ -268,6 +335,18 @@ webdav:
 # HLS streaming — on-demand live view via Web Web UI
 # RPi constraint: max 4 concurrent streams
 hls:
+  # enabled: false                      # HLS disabled by default to avoid unnecessary disk writes
+  # on_demand: true                     # Slice only while a client requests HLS
+  # idle_timeout: "60s"                 # Stop HLS slicing after the idle period
+  # low_latency: true                   # ApplyDefaults currently forces this to true
+  # part_min_duration: "200ms"          # LL-HLS part duration; 100ms..1s
+  # lal_fragment_duration_ms: 3000      # MPEG-TS fragment duration
+  # lal_fragment_num: 6                 # Live MPEG-TS playlist entries
+  # lal_cleanup_mode: 2                 # Forced ASAP cleanup by ApplyDefaults
+  # lal_use_memory: false               # Store TS segments in RAM instead of files
+  # lal_temp_dir: "hls-temp"            # MPEG-TS storage temp directory
+  # lalmax_segment_duration: 1          # fMP4 segment duration in seconds
+  # lalmax_part_duration: 200           # LL-HLS partial duration in milliseconds
   write_buffer_size: 40            # Async frame buffer per stream (default: 100)
   segment_max_size_mb: 10          # HLS segment max size in MB (default: 10)
   segment_count: 7                 # Segments per stream (range: 3-10, default: 7)
@@ -343,3 +422,57 @@ voip:
   srtp_enable: false
   srtp_mandatory: false
   bundle_enable: false
+  # Additional optional SIP listeners; leave empty to disable protocols.
+  # sip_tls_listen_addr: ""             # e.g. "0.0.0.0:5071"; requires certificate + key
+  # sip_dtls_listen_addr: ""            # e.g. "0.0.0.0:5072"; requires certificate + key
+  # sip_ws_listen_addr: ""              # e.g. "0.0.0.0:5080"
+  # sip_wss_listen_addr: ""             # e.g. "0.0.0.0:5081"; requires certificate + key
+  # sip_tls_cert_file: ""               # TLS PEM certificate path
+  # sip_tls_key_file: ""                # Private key PEM path; never commit actual keys
+
+# Optional metrics Basic authentication. Empty config leaves /metrics public.
+# metrics_auth:
+#   username: ""                        # Set username and exactly one credential field
+#   password_hash: ""                   # Prefer a supported password hash over plaintext
+#   # password: ""                       # Plaintext alternative; keep secrets out of Git
+
+# Remote log export. Disabled by default.
+# remote_log:
+#   enabled: false
+#   endpoint: ""                        # e.g. http://127.0.0.1:9428/insert/jsonline
+#   format: "jsonline"                  # jsonline | loki
+
+# Scheduled camera snapshots. Disabled by default.
+# snapshot:
+#   enabled: false
+#   interval: "5m"                      # Minimum 1m
+#   quality: 80                         # JPEG 1..100
+#   max_age: "24h"                      # Age before snapshot cleanup
+
+# Optional AI subsystem. Never commit real provider API keys.
+# ai:
+#   enabled: false
+#   backend: "disabled"                 # disabled | browser | webhook
+#   model_url: "/models/yolo11n.onnx"
+#   frame_skip_rate: 3
+#   confidence_threshold: 0.3
+#   inference_timeout_ms: 30000
+#   webhook:
+#     enabled: false
+#   multimodal:
+#     enabled: false
+#     provider: "deepseek"              # Select one entry in providers
+#     analysis_prompt: ""
+#     analysis_interval: "5m"
+#     save_results: false
+#     max_results: 1000
+#     providers:
+#       deepseek:
+#         provider: "deepseek"
+#         api_key: ""                   # Configure privately
+#         endpoint: ""
+#         model: ""
+#         vision_model: ""
+#         max_tokens: 2000
+#         temperature: 0.2
+#         timeout: 60

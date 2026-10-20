@@ -1494,3 +1494,27 @@ func TestVoIPConfiguration(t *testing.T) {
 	cfg.VoIP.MediaPortMax = cfg.VoIP.MediaPortMin - 1
 	require.ErrorContains(t, Validate(cfg), "port range")
 }
+
+func TestConfigExampleDocumentsOptionalConfigFields(t *testing.T) {
+	path := filepath.Join("..", "..", "config", "config.example.yaml")
+	b, err := os.ReadFile(path)
+	require.NoError(t, err)
+	content := string(b)
+	for _, field := range []string{
+		"rtsp_auth_method:", "rtsp_username:", "rtsp_password:",
+		"media_port:", "whep_on_demand_enabled:",
+		"sip_tls_listen_addr:", "sip_wss_listen_addr:",
+		"auto_stop_no_view_sec:", "default_protocol:",
+		"database_migration_target:", "allowed_cidrs:",
+		"websocket:", "remote_log:", "metrics_auth:", "snapshot:", "ai:",
+	} {
+		require.Contains(t, content, field, "config example missing "+field)
+	}
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.True(t, cfg.Media.RTSPPublishTokenAuthEnabled())
+	require.True(t, cfg.RTMP.RTMPPublishAuthEnabled())
+	require.False(t, cfg.GB28181.WHEPOnDemandEnabled)
+	require.False(t, cfg.RemoteLog.Enabled)
+	require.False(t, cfg.AI.Enabled)
+}
