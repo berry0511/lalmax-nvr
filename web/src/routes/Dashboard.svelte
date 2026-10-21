@@ -1341,6 +1341,7 @@
                   cameraId={stream.stream_id}
                   cameraName={title}
                   whepUrl={mediaURL}
+                  expectVideo={stream.source_type !== 'voip'}
                   expanded={expandedCameraId === stream.stream_id}
                   {tabVisible}
                 />
