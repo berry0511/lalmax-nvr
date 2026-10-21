@@ -29,6 +29,18 @@
   const coordinator = getContext<ReconnectCoordinator | undefined>('reconnect-coordinator');
   let coordinatedTimer: ReturnType<typeof setTimeout> | null = null;
   let hasActiveCoordinatedReconnect = false;
+  // A queued reconnect has no slot yet; an in-flight failed attempt must
+  // release its granted slot before requesting the next retry.
+  let reconnectSlotGranted = false;
+  let coordinatedAttemptRunning = false;
+  function finishCoordinatedReconnect() {
+    if (!coordinator || !hasActiveCoordinatedReconnect) return;
+    if (reconnectSlotGranted) coordinator.completeReconnect(cameraId);
+    else coordinator.cancelRequest(cameraId);
+    hasActiveCoordinatedReconnect = false;
+    reconnectSlotGranted = false;
+    coordinatedAttemptRunning = false;
+  }
 
   function coordinatedReconnect(reconnectFn: () => void) {
     if (coordinatedTimer) { clearTimeout(coordinatedTimer); coordinatedTimer = null; }
@@ -36,18 +48,21 @@
       reconnectFn();
       return;
     }
+    finishCoordinatedReconnect();
     hasActiveCoordinatedReconnect = true;
+    const execute = () => {
+      coordinatedTimer = null;
+      if (destroyed) { finishCoordinatedReconnect(); return; }
+      coordinatedAttemptRunning = true;
+      reconnectFn();
+    };
     const delay = coordinator.requestReconnect(cameraId, (grantedDelay) => {
-      coordinatedTimer = setTimeout(() => {
-        coordinatedTimer = null;
-        reconnectFn();
-      }, grantedDelay);
+      reconnectSlotGranted = true;
+      coordinatedTimer = setTimeout(execute, grantedDelay);
     });
     if (delay >= 0) {
-      coordinatedTimer = setTimeout(() => {
-        coordinatedTimer = null;
-        reconnectFn();
-      }, delay);
+      reconnectSlotGranted = true;
+      coordinatedTimer = setTimeout(execute, delay);
     }
   }
   type WebrtcState = 'connecting' | 'connected' | 'disconnected' | 'failed';
@@ -169,10 +184,7 @@ let destroyed = false;
     if (videoEl.videoWidth === 0 || videoEl.videoHeight === 0) return;
     hasFirstVideoFrame = true;
     reconnectAttempts = 0;
-    if (coordinator && hasActiveCoordinatedReconnect) {
-      coordinator.completeReconnect(cameraId);
-      hasActiveCoordinatedReconnect = false;
-    }
+    finishCoordinatedReconnect();
   }
 
   function watchFirstVideoFrame(peer: RTCPeerConnection, epoch: number) {
@@ -194,7 +206,13 @@ let destroyed = false;
   function scheduleReconnect() {
     // One pending retry per player. Multiple ICE state callbacks must not
     // schedule concurrent offers or consume extra coordinator slots.
-    if (reconnectTimer || coordinatedTimer || hasActiveCoordinatedReconnect) return;
+    if (reconnectTimer || coordinatedTimer) return;
+    if (hasActiveCoordinatedReconnect) {
+      if (!coordinatedAttemptRunning) return; // queued, or not yet started
+      // A granted WHEP attempt failed before ever producing a frame.
+      // Release its slot; otherwise future retries are permanently blocked.
+      finishCoordinatedReconnect();
+    }
     if (reconnectAttempts >= maxReconnectAttempts) {
       enterSnapshotMode();
       return;
@@ -204,6 +222,7 @@ let destroyed = false;
 
     const doReconnect = () => {
       reconnectTimer = null;
+      if (coordinator && hasActiveCoordinatedReconnect) coordinatedAttemptRunning = true;
       destroyPeerConnection();
       initWebRTC();
     };
@@ -213,10 +232,18 @@ let destroyed = false;
       if (coordinatedTimer) { clearTimeout(coordinatedTimer); coordinatedTimer = null; }
       hasActiveCoordinatedReconnect = true;
       const delay = coordinator.requestReconnect(cameraId, (grantedDelay) => {
-        coordinatedTimer = setTimeout(doReconnect, grantedDelay);
+        reconnectSlotGranted = true;
+        coordinatedTimer = setTimeout(() => {
+          coordinatedTimer = null;
+          doReconnect();
+        }, grantedDelay);
       });
       if (delay >= 0) {
-        coordinatedTimer = setTimeout(doReconnect, delay);
+        reconnectSlotGranted = true;
+        coordinatedTimer = setTimeout(() => {
+          coordinatedTimer = null;
+          doReconnect();
+        }, delay);
       }
       return;
     }
@@ -411,10 +438,7 @@ let destroyed = false;
             if (disconnectGraceTimer) { clearTimeout(disconnectGraceTimer); disconnectGraceTimer = null; }
             if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
             if (coordinatedTimer) { clearTimeout(coordinatedTimer); coordinatedTimer = null; }
-            if (coordinator && hasActiveCoordinatedReconnect) {
-              coordinator.completeReconnect(cameraId);
-              hasActiveCoordinatedReconnect = false;
-            }
+            finishCoordinatedReconnect();
             webrtcState = 'connected';
             connectedAt = Date.now();
             watchFirstVideoFrame(peerConnection, epoch);
@@ -558,7 +582,7 @@ let destroyed = false;
     destroyed = true;
     stopSnapshotMode();
     if (coordinatedTimer) { clearTimeout(coordinatedTimer); coordinatedTimer = null; }
-    if (coordinator) coordinator.cancelRequest(cameraId);
+    finishCoordinatedReconnect();
     if (freezeClearTimer) { clearTimeout(freezeClearTimer); freezeClearTimer = null; }
     frozenFrameUrl = null;
     destroyPeerConnection();
