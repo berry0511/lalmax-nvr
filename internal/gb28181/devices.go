@@ -401,11 +401,37 @@ func (s *DeviceStore) SaveDeviceInfo(deviceID, manufacturer, model, firmware str
 	return s.db.UpsertGB28181Device(ctx, dbDev)
 }
 
-// DeleteDevice removes a device from memory and database.
+// DeleteOfflineDevice removes only a registered offline SIP device and its
+// catalog channels. Camera records, recordings and history are not touched.
+// The per-device registration lock prevents removing an online device while
+// a concurrent REGISTER / keepalive status update is being applied.
+func (s *DeviceStore) DeleteOfflineDevice(deviceID string) error {
+	dev, ok := s.Load(deviceID)
+	if !ok { return ErrDeviceNotExist }
+	dev.registerWithKeepaliveMutex.Lock()
+	defer dev.registerWithKeepaliveMutex.Unlock()
+	if dev.IsOnline { return ErrDeviceOnline }
+	hasActive := false
+	dev.Channels.Range(func(_, value any) bool {
+		ch := value.(*Channel)
+		if globalStreams.isPlaying(deviceID, ch.ChannelID) {
+			hasActive = true
+			return false
+		}
+		return true
+	})
+	if hasActive { return ErrDeviceHasActiveStream }
+	if err := s.db.DeleteGB28181Device(context.Background(), deviceID); err != nil {
+		return err
+	}
+	s.devices.CompareAndDelete(deviceID, dev)
+	return nil
+}
+
+// DeleteDevice retains its public name but enforces the same offline-only
+// policy, so no caller can accidentally delete a live SIP registration.
 func (s *DeviceStore) DeleteDevice(deviceID string) error {
-	s.devices.Delete(deviceID)
-	ctx := context.Background()
-	return s.db.DeleteGB28181Device(ctx, deviceID)
+	return s.DeleteOfflineDevice(deviceID)
 }
 
 func filterUnknowDevices(deviceID string) error {

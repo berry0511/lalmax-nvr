@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -15,6 +16,35 @@ import (
 	"github.com/lalmax-pro/lalmax-nvr/internal/gb28181"
 	"github.com/lalmax-pro/lalmax-nvr/internal/media"
 )
+
+// handleGB28181DeleteDevice removes only an offline SIP device and its
+// discovered channels, never camera records, recordings or stream history.
+func (h *Handler) handleGB28181DeleteDevice(w http.ResponseWriter, r *http.Request) {
+	if h.gb28181Server == nil {
+		writeError(w, http.StatusServiceUnavailable, "GB28181 server not available")
+		return
+	}
+	deviceID := chi.URLParam(r, "deviceID")
+	if deviceID == "" {
+		writeError(w, http.StatusBadRequest, "device ID is required")
+		return
+	}
+	err := h.gb28181Server.GetDeviceStore().DeleteOfflineDevice(deviceID)
+	switch {
+	case errors.Is(err, gb28181.ErrDeviceNotExist):
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	case errors.Is(err, gb28181.ErrDeviceOnline), errors.Is(err, gb28181.ErrDeviceHasActiveStream):
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "unable to remove GB28181 device")
+		return
+	}
+	h.logSuccess(r, "gb28181.device.delete", "gb28181", deviceID,
+		"offline GB28181 registration removed", nil)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "device_id": deviceID})
+}
 
 // handleGB28181ListDevices returns all registered GB28181 devices.
 func (h *Handler) handleGB28181ListDevices(w http.ResponseWriter, r *http.Request) {
