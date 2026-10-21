@@ -154,6 +154,10 @@ let destroyed = false;
   });
 
   function updateStreamState() {
+    if (snapshotMode) {
+      streamState = 'snapshot';
+      return;
+    }
     const prevState = streamState;
     if (whepPlaybackReady(webrtcState, expectVideo, hasFirstVideoFrame)) {
       streamState = 'playing';
@@ -323,6 +327,9 @@ let destroyed = false;
       } catch (e) { console.warn('WebRTC close error:', e); }
       pc = null;
     }
+    // Avoid treating the last frame of an old peer as proof that the next
+    // connection is rendering. A captured freeze frame is handled separately.
+    if (videoEl) videoEl.srcObject = null;
   }
 
   function startZombieDetector() {
