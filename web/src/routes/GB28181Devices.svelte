@@ -1,14 +1,15 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { listGB28181Devices, playGB28181Stream, stopGB28181Stream, apiRequest } from '$lib/api';
+  import { listGB28181Devices, playGB28181Stream, stopGB28181Stream, deleteGB28181Device, apiRequest } from '$lib/api';
   import type { GB28181Device } from '$lib/api';
   import { t } from '$lib/i18n';
   import PlaybackURLs from '$lib/components/PlaybackURLs.svelte';
   import { selectPlaybackURLs } from '$lib/playback-urls';
   import { showToast } from '$lib/toast';
-  import { Video, RefreshCw, Play, Square, Wifi, WifiOff, ExternalLink, Clock, Info, Link as LinkIcon } from 'lucide-svelte';
+  import { Video, RefreshCw, Play, Square, Wifi, WifiOff, ExternalLink, Clock, Info, Trash2, Link as LinkIcon } from 'lucide-svelte';
 
   let devices = $state<GB28181Device[]>([]);
+  let deletingDeviceId = $state<string | null>(null);
   let loading = $state(true);
   let error = $state('');
   let playingStreams = $state<Set<string>>(new Set());
@@ -150,6 +151,23 @@
       await loadDevices();
     } catch (e) {
       showToast(e instanceof Error ? e.message : 'Failed to stop stream', 'error');
+    }
+  }
+
+  async function deleteOfflineDevice(device: GB28181Device) {
+    if (device.is_online || deletingDeviceId) return;
+    if (!window.confirm(`确定移除离线设备 ${device.device_id} 的 SIP 注册记录与通道目录吗？\n\n不会删除摄像机配置、录像文件或历史记录。设备再次注册后仍可能重新出现。`)) return;
+    deletingDeviceId = device.device_id;
+    try {
+      await deleteGB28181Device(device.device_id);
+      if (expandedDevice === device.device_id) expandedDevice = null;
+      showToast('离线设备记录已移除', 'success');
+      await loadDevices();
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : '删除失败；设备可能已经重新上线', 'error');
+      await loadDevices();
+    } finally {
+      deletingDeviceId = null;
     }
   }
 
@@ -323,6 +341,17 @@
                     </div>
                   {/if}
                 </div>
+                {#if !device.is_online}
+                  <div class="flex flex-wrap items-center justify-between gap-2 pt-3 border-t th-border">
+                    <p class="text-xs th-text-tertiary">长期离线设备可手动移除注册记录和通道目录，录像与摄像机档案不受影响；设备再次注册可能重新出现。</p>
+                    <button type="button" class="btn btn-sm btn-danger flex items-center gap-1"
+                      disabled={deletingDeviceId !== null}
+                      onclick={() => deleteOfflineDevice(device)}>
+                      <Trash2 class="w-3.5 h-3.5" />
+                      {deletingDeviceId === device.device_id ? '删除中...' : '移除离线设备'}
+                    </button>
+                  </div>
+                {/if}
               </div>
             {/if}
 

@@ -128,6 +128,14 @@ export async function playGB28181Stream(req: GB28181PlayRequest, signal?: AbortS
   });
 }
 
+// A manual cleanup operation, not a SIP unregister or a camera/recording delete.
+// The server rejects online devices or devices with an active stream.
+export async function deleteGB28181Device(deviceId: string): Promise<{status: string; device_id: string}> {
+  return apiRequest(`/gb28181/devices/${encodeURIComponent(deviceId)}`, {
+    method: 'DELETE',
+  });
+}
+
 export async function stopGB28181Stream(deviceId: string, channelId: string, signal?: AbortSignal): Promise<{ status: string }> {
   return apiRequest<{ status: string }>('/gb28181/stop', {
     method: 'POST',
