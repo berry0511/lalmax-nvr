@@ -6,6 +6,7 @@
   import { getSnapshotUrl } from '$lib/api/cameras';
   import { captureFrame } from '$lib/freeze-frame';
   import { sendTelemetry } from '$lib/telemetry';
+  import { whepPlaybackReady, whepFirstVideoFrameTimedOut } from '$lib/whep-readiness';
   import type { StreamState } from '$lib/hls-errors';
   import type { ReconnectCoordinator } from '$lib/reconnect-coordinator.svelte';
 
@@ -154,7 +155,7 @@ let destroyed = false;
 
   function updateStreamState() {
     const prevState = streamState;
-    if (webrtcState === 'connected' && (!expectVideo || hasFirstVideoFrame)) {
+    if (whepPlaybackReady(webrtcState, expectVideo, hasFirstVideoFrame)) {
       streamState = 'playing';
       if (prevState !== 'playing' && frozenFrameUrl) clearFreezeFrame();
       if (coordinator && hasActiveCoordinatedReconnect) {
@@ -340,7 +341,7 @@ let destroyed = false;
         zombieCount = 0;
         return;
       }
-      if (expectVideo && !hasFirstVideoFrame && connectedAt > 0 && now - connectedAt >= 15000) {
+      if (whepFirstVideoFrameTimedOut(connectedAt, now, expectVideo, hasFirstVideoFrame, tabVisible && !document.hidden)) {
         console.warn(`WebRTC connected without first video frame for ${cameraId}, retrying`);
         sendTelemetry('stream_degradation', cameraId, undefined, { protocol: 'webrtc', reason: 'first_video_frame_timeout' });
         scheduleReconnect();
