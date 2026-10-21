@@ -137,6 +137,11 @@
   // WebRTCPlayer itself handles WHEP startup and reconnection; do not block
   // its creation on sampled FPS/Publisher statistics from EnsurePlay.
   const gbPlayInFlight = new Set<string>();
+  // Re-ensure only if the dashboard never received decoded WHEP video.
+  // The backend owns its 45-second new-INVITE grace and recovery cooldown.
+  const gbVideoReady = new Set<string>();
+  const gbLastEnsureAt = new Map<string, number>();
+  const GB_ENSURE_RETRY_MS = 20000;
 
   function isGB28181WallCamera(camera: Camera): boolean {
     return normalizeProtocol(camera.protocol || '') === 'gb28181';
@@ -166,6 +171,7 @@
     if (!slotAssignments.includes(cameraId)) return;
 
     gbPlayInFlight.add(cameraId);
+    gbLastEnsureAt.set(cameraId, Date.now());
     gbPlayStates[cameraId] = 'starting';
     delete gbPlayErrors[cameraId];
 
@@ -192,6 +198,25 @@
       }
     } finally {
       gbPlayInFlight.delete(cameraId);
+    }
+  }
+
+  function onDashboardPlayerStateChange(event: CustomEvent<{ cameraId: string; state: string }>) {
+    const { cameraId, state } = event.detail || {};
+    const camera = cameraById.get(cameraId);
+    if (!camera || !isGB28181WallCamera(camera) || defaultProtocol !== 'webrtc') return;
+    if (state === 'playing') gbVideoReady.add(cameraId);
+    else gbVideoReady.delete(cameraId);
+  }
+
+  function retryUnreadyGBPlayers() {
+    if (dashboardDisposed || loading || defaultProtocol !== 'webrtc') return;
+    const now = Date.now();
+    for (const id of assignedCameraIds) {
+      const cam = cameraById.get(id);
+      if (!cam || !isGB28181WallCamera(cam) || gbVideoReady.has(id) || gbPlayInFlight.has(id)) continue;
+      if (now - (gbLastEnsureAt.get(id) ?? now) < GB_ENSURE_RETRY_MS) continue;
+      void ensureDashboardGBPlay(cam);
     }
   }
 
@@ -800,6 +825,7 @@
     loading = false;
     streamStatusTimer = window.setInterval(() => {
       void refreshWallStreams();
+      retryUnreadyGBPlayers();
     }, 10000);
     if (dashboardDisposed) window.clearInterval(streamStatusTimer);
     document.addEventListener('fullscreenchange', handleFullscreenChange);
@@ -1054,6 +1080,7 @@
         class="grid gap-2 sm:gap-3 {getGridClass(gridLayout)}"
         onexpand={(e: CustomEvent) => expandToHls(e.detail.cameraId)}
         onshrink={(e: CustomEvent) => shrinkToGrid()}
+        onstatechange={onDashboardPlayerStateChange}
       >
         {#each slotAssignments as cameraId, slotIndex (`${slotIndex}:${cameraId ?? ''}`)}
           {@const camera = cameraId ? cameraById.get(cameraId) : null}

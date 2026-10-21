@@ -12,6 +12,9 @@ import (
 	"github.com/lalmax-pro/lalmax-nvr/internal/media"
 )
 
+// The initial RTP receiver must outlive WHEP's 12s video-codec wait.
+const initialGB28181RTPTimeout = 25 * time.Second
+
 // PlayInput contains parameters for starting a GB28181 play session.
 type PlayInput struct {
 	DeviceID     string
@@ -190,7 +193,7 @@ func (g *GB28181API) play(in *PlayInput, reuseExisting bool) (string, error) {
 		StreamID: in.InternalID,
 		AppName:  "rtp",
 		Protocol: protocol,
-		Timeout:  10 * time.Second,
+		Timeout:  initialGB28181RTPTimeout,
 	}
 	// Single port mode: use configured port
 	if g.cfg.MediaPort > 0 {
