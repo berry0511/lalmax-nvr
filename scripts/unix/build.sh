@@ -13,6 +13,10 @@ HOST_OS="$(go env GOHOSTOS)"
 HOST_ARCH="$(go env GOHOSTARCH)"
 TARGET_OS="${GOOS:-${HOST_OS}}"
 TARGET_ARCH="${GOARCH:-${HOST_ARCH}}"
+if [[ "${HOST_OS}" == "windows" ]]; then
+  echo "On Windows use scripts/windows/build-linux.bat or nvr.ps1 -BuildOS linux (no Git Bash)." >&2
+  exit 1
+fi
 GO_BUILD_JOBS="${GO_BUILD_JOBS:-1}"
 if ! [[ "${GO_BUILD_JOBS}" =~ ^[1-9][0-9]*$ ]]; then
   echo "GO_BUILD_JOBS must be >= 1" >&2
@@ -21,15 +25,8 @@ fi
 export NODE_OPTIONS="${NODE_OPTIONS:-} --no-deprecation"
 unset npm_config_devdir NPM_CONFIG_DEVDIR || true
 
-# Keep native binary name for run.sh and start.sh; cross targets are explicit.
-OUTPUT_BASE="${BIN_PATH%.exe}"
-if [[ "${TARGET_OS}" == "${HOST_OS}" && "${TARGET_ARCH}" == "${HOST_ARCH}" ]]; then
-  OUTPUT_BIN="${OUTPUT_BASE}"
-elif [[ "${TARGET_ARCH}" == "arm" && -n "${GOARM:-}" ]]; then
-  OUTPUT_BIN="${OUTPUT_BASE}-${TARGET_OS}-armv${GOARM}"
-else
-  OUTPUT_BIN="${OUTPUT_BASE}-${TARGET_OS}-${TARGET_ARCH}"
-fi
+# Stable deployment filenames for native and cross builds; no platform suffix.
+OUTPUT_BIN="${BIN_PATH%.exe}"
 if [[ "${TARGET_OS}" == "windows" ]]; then OUTPUT_BIN="${OUTPUT_BIN}.exe"; fi
 mkdir -p "$(dirname "${OUTPUT_BIN}")"
 

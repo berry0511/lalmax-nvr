@@ -1,8 +1,5 @@
 @echo off
 setlocal
-rem Complete Linux/amd64 cross build from a Windows workstation.
-set "GOOS=linux"
-set "GOARCH=amd64"
-set "CGO_ENABLED=0"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0nvr.ps1" build %*
+rem Cross-compile Linux ELF directly in PowerShell, never via Git Bash / .sh.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0nvr.ps1" build -BuildOS linux -BuildArch amd64 %*
 exit /b %ERRORLEVEL%

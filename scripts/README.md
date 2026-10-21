@@ -12,25 +12,29 @@ Old embedded frontend assets are never used as an implicit fallback.
 
 ```powershell
 .\scripts\windows\build.bat          # Windows amd64 -> bin/lalmax-nvr.exe
-.\scripts\windows\build-linux.bat    # Linux amd64 -> bin/lalmax-nvr-linux-amd64
+.\scripts\windows\build-linux.bat    # Linux amd64 -> bin/lalmax-nvr
 ```
 
-The wrappers override previous GOOS/GOARCH values. The Linux binary is never executed on Windows.
-For other architectures, use the original configurable build entrypoint:
+Both .bat wrappers invoke PowerShell directly, without Git Bash or scripts/unix/build.sh.
+The build targets are passed as -BuildOS/-BuildArch parameters. nvr.ps1 sets
+GOOS/GOARCH/CGO_ENABLED only during its build and restores their prior values.
+Windows and Linux outputs coexist in bin/ as lalmax-nvr.exe and lalmax-nvr.
+For other architectures, use the same configurable PowerShell entrypoint:
 
 ```powershell
-$env:GOOS = 'linux'; $env:GOARCH = 'arm64'
-.\scripts\windows\nvr.ps1 build     # -> bin/lalmax-nvr-linux-arm64
+.\scripts\windows\nvr.ps1 build -BuildOS linux -BuildArch arm64   # -> bin/lalmax-nvr
 ```
 
 ### On Linux / macOS
 
 ```bash
 ./scripts/unix/build.sh              # native -> bin/lalmax-nvr
-GOOS=linux GOARCH=arm64 ./scripts/unix/build.sh
+GOOS=linux GOARCH=arm64 ./scripts/unix/build.sh   # -> bin/lalmax-nvr
 ```
 
-`scripts/unix/build.sh` remains the Linux native build script; the name is unchanged for existing tooling.
+`scripts/unix/build.sh` is for Unix hosts only; on Windows use the PowerShell/batch entrypoints.
+Cross-compilation on Unix also uses the stable filename `lalmax-nvr`, so different Unix architectures
+will replace that output rather than creating suffixed files.
 
 ### Prerequisites and notes
 

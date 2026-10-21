@@ -4,7 +4,11 @@
 param(
     [Parameter(Position = 0)]
     [ValidateSet('build', 'run', 'start', 'stop', 'restart', 'status', 'logs', 'test', 'help')]
-    [string]$Command = 'help'
+    [string]$Command = 'help',
+    [ValidateSet('windows', 'linux', 'darwin')]
+    [string]$BuildOS = '',
+    [ValidateSet('amd64', 'arm64', 'arm', '386')]
+    [string]$BuildArch = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -16,7 +20,9 @@ function Show-NvrHelp {
 lalmax-nvr scripts (Windows)
 
 Usage:
-  .\scripts\windows\nvr.ps1 build      build bin/lalmax-nvr.exe
+  .\scripts\windows\nvr.ps1 build      build native bin/lalmax-nvr.exe
+  .\scripts\windows\nvr.ps1 build -BuildOS linux -BuildArch amd64
+                                   build Linux bin/lalmax-nvr
   .\scripts\windows\nvr.ps1 run        run in foreground
   .\scripts\windows\nvr.ps1 start      start in background
   .\scripts\windows\nvr.ps1 stop       stop background process
@@ -27,7 +33,8 @@ Usage:
 
 Command Prompt:
   scripts\windows\start.bat
-  scripts\windows\build.bat
+  scripts\windows\build.bat          native Windows amd64
+  scripts\windows\build-linux.bat    cross-compile Linux amd64 (PowerShell only)
   ...
 
 Environment overrides:
@@ -49,8 +56,9 @@ function Invoke-NvrBuild {
     $Version = if ($env:VERSION) { $env:VERSION } else { 'dev' }
     $HostOs = (go env GOHOSTOS).Trim()
     $HostArch = (go env GOHOSTARCH).Trim()
-    $TargetOs = if ($env:GOOS) { $env:GOOS.ToLowerInvariant() } else { $HostOs }
-    $TargetArch = if ($env:GOARCH) { $env:GOARCH.ToLowerInvariant() } else { $HostArch }
+    # Build target comes from script arguments, NOT inherited shell GOOS/GOARCH.
+    $TargetOs = if ($BuildOS) { $BuildOS } else { $HostOs }
+    $TargetArch = if ($BuildArch) { $BuildArch } else { $HostArch }
     $BuildJobs = if ($env:GO_BUILD_JOBS) { [int]$env:GO_BUILD_JOBS } else { 1 }
     if ($BuildJobs -lt 1) { throw 'GO_BUILD_JOBS must be >= 1' }
 
@@ -58,13 +66,9 @@ function Invoke-NvrBuild {
     if ($OutputBase.EndsWith('.exe', [System.StringComparison]::OrdinalIgnoreCase)) {
         $OutputBase = $OutputBase.Substring(0, $OutputBase.Length - 4)
     }
-    $NativeTarget = ($TargetOs -eq $HostOs) -and ($TargetArch -eq $HostArch)
-    $Suffix = if ($NativeTarget) { '' } elseif ($TargetArch -eq 'arm' -and $env:GOARM) {
-        "-$TargetOs-armv$($env:GOARM)"
-    } else {
-        "-$TargetOs-$TargetArch"
-    }
-    $OutputBin = "$OutputBase$Suffix"
+    # Keep the original deployment filenames; .exe is only for Windows PE.
+    # Windows and Linux results coexist: lalmax-nvr.exe and lalmax-nvr.
+    $OutputBin = $OutputBase
     if ($TargetOs -eq 'windows') { $OutputBin += '.exe' }
     $OutputDir = Split-Path -Parent $OutputBin
     if ($OutputDir -and -not (Test-Path -LiteralPath $OutputDir)) {
@@ -76,11 +80,17 @@ function Invoke-NvrBuild {
         $env:NODE_OPTIONS = "$($env:NODE_OPTIONS) --no-deprecation"
     }
 
+    # Save process environment so a direct nvr.ps1 invocation also leaves
+    # GOOS/GOARCH/CGO_ENABLED exactly as they were before the build.
+    $PreviousGOOS = [Environment]::GetEnvironmentVariable('GOOS', 'Process')
+    $PreviousGOARCH = [Environment]::GetEnvironmentVariable('GOARCH', 'Process')
+    $PreviousCGO = [Environment]::GetEnvironmentVariable('CGO_ENABLED', 'Process')
+
     Write-Host "building complete $AppName source tree"
     Write-Host "  host:   $HostOs/$HostArch"
     Write-Host "  target: $TargetOs/$TargetArch"
     Write-Host "  output: $OutputBin"
-    Write-Host "  cgo:    $CgoEnabled"
+    Write-Host "  cgo:    0 (temporary)"
 
     Push-Location $RootDir
     try {
@@ -110,9 +120,10 @@ function Invoke-NvrBuild {
             throw 'copying frontend assets into Go embed failed'
         }
 
+        # Temporary build-only target environment, restored in finally.
         $env:GOOS = $TargetOs
         $env:GOARCH = $TargetArch
-        $env:CGO_ENABLED = $CgoEnabled
+        $env:CGO_ENABLED = '0'
 
         Write-Host '[4/5] compile every Go module'
         foreach ($module in @('.', 'third/lal', 'third/lalmax')) {
@@ -147,6 +158,9 @@ function Invoke-NvrBuild {
         # Deliberately do not execute cross-compiled binaries on Windows.
     }
     finally {
+        [Environment]::SetEnvironmentVariable('GOOS', $PreviousGOOS, 'Process')
+        [Environment]::SetEnvironmentVariable('GOARCH', $PreviousGOARCH, 'Process')
+        [Environment]::SetEnvironmentVariable('CGO_ENABLED', $PreviousCGO, 'Process')
         Pop-Location
     }
 }
