@@ -104,6 +104,27 @@ func whepMediaReady(group *maxlogic.Group) bool {
 	}
 }
 
+// GB28181 camera streams carry a 20-digit device ID and a 20-digit
+// channel ID. They must negotiate a video track even if G711 audio arrived
+// first. Ordinary standalone/VoIP audio-only streams remain supported.
+func whepGB28181VideoStream(streamID string) bool {
+	if len(streamID) != 41 || streamID[20] != ':' { return false }
+	for i := 0; i < len(streamID); i++ {
+		if i == 20 { continue }
+		if streamID[i] < '0' || streamID[i] > '9' { return false }
+	}
+	return true
+}
+
+func whepMediaReadyForStream(group *maxlogic.Group, streamID string) bool {
+	if group == nil { return false }
+	if whepGB28181VideoStream(streamID) {
+		header := group.GetVideoSeqHeaderMsg()
+		return header != nil && (header.IsAvcKeySeqHeader() || header.IsHevcKeySeqHeader())
+	}
+	return whepMediaReady(group)
+}
+
 // waitStreamReady requests a missing publisher once and waits for the requested
 // protocol's readiness. WHEP must see a supported codec sequence header before
 // SDP negotiation; RTSP/other call sites retain their existing Group semantics.
@@ -115,7 +136,7 @@ func (s *RtcServer) waitStreamReady(appName, streamid, schema string) bool {
 			return false
 		}
 		if schema == "whep" {
-			return whepMediaReady(group)
+			return whepMediaReadyForStream(group, streamid)
 		}
 		return true
 	}
