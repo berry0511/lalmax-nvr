@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { 
-    listGB28181Devices, playGB28181Stream, stopGB28181Stream, 
+    listGB28181Devices, playGB28181Stream, stopGB28181Stream, deleteGB28181Device, 
     listStreams, listCameras, deleteCamera, permanentlyDeleteCamera,
     startCamera, stopCamera, updateCamera, pauseRecording, resumeRecording,
     xiaomiDevices, listProtocols, DEFAULT_PROTOCOLS, buildProtocolsMap,
@@ -56,6 +56,7 @@
   // GB28181 state
   let gb28181Devices = $state<GB28181Device[]>([]);
   let gb28181Loading = $state(false);
+  let deletingGB28181DeviceId = $state<string | null>(null);
   let playingStreams = $state<Set<string>>(new Set());
   let gb28181Cameras = $state<Map<string, Camera>>(new Map()); // streamId -> Camera
 
@@ -345,6 +346,26 @@
   function getGB28181ChannelCamera(device: GB28181Device, channelId: string): Camera | undefined {
     const streamId = `${device.device_id}_${channelId}`;
     return gb28181Cameras.get(streamId);
+  }
+
+  // Remove only the offline SIP registration and its discovered channels.
+  // Server-side checks enforce offline/no-active-stream even after this view loads.
+  async function handleDeleteOfflineGB28181Device(device: GB28181Device) {
+    if (device.is_online || deletingGB28181DeviceId !== null) return;
+    const message = `确定移除离线设备 ${device.device_id} 吗？\n\n这只删除 GB28181 注册记录和通道目录，不删除摄像机配置、录像和历史记录。设备再次注册后仍会重新出现。`;
+    if (!window.confirm(message)) return;
+
+    deletingGB28181DeviceId = device.device_id;
+    try {
+      await deleteGB28181Device(device.device_id);
+      showToast('离线设备记录已移除', 'success');
+      await loadGB28181Devices();
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : '删除失败，设备可能已重新上线', 'error');
+      await loadGB28181Devices();
+    } finally {
+      deletingGB28181DeviceId = null;
+    }
   }
 
   async function handleGB28181Play(device: GB28181Device, channelId: string) {
@@ -1464,9 +1485,23 @@
                       </p>
                     </div>
                   </div>
-                  <span class="px-2 py-1 text-xs rounded-full {device.is_online ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}">
-                    {device.is_online ? '在线' : '离线'}
-                  </span>
+                  <div class="flex flex-wrap items-center justify-end gap-2">
+                    <span class="px-2 py-1 text-xs rounded-full {device.is_online ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}">
+                      {device.is_online ? '在线' : '离线'}
+                    </span>
+                    {#if !device.is_online}
+                      <button
+                        type="button"
+                        class="btn btn-sm btn-danger flex items-center gap-1"
+                        disabled={deletingGB28181DeviceId !== null}
+                        title="仅移除离线设备的 SIP 注册记录与通道，不删除录像"
+                        onclick={() => handleDeleteOfflineGB28181Device(device)}
+                      >
+                        <Trash2 size={14} />
+                        {deletingGB28181DeviceId === device.device_id ? '移除中...' : '移除离线设备'}
+                      </button>
+                    {/if}
+                  </div>
                 </div>
 
                 <!-- Device Info -->
