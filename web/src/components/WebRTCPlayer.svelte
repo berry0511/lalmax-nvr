@@ -6,7 +6,7 @@
   import { getSnapshotUrl } from '$lib/api/cameras';
   import { captureFrame } from '$lib/freeze-frame';
   import { sendTelemetry } from '$lib/telemetry';
-  import { whepPlaybackReady, whepFirstVideoFrameTimedOut } from '$lib/whep-readiness';
+  import { whepPlaybackReady, whepFirstVideoFrameTimedOut, sdpHasActiveVideoMedia } from '$lib/whep-readiness';
   import type { StreamState } from '$lib/hls-errors';
   import type { ReconnectCoordinator } from '$lib/reconnect-coordinator.svelte';
 
@@ -16,7 +16,7 @@
     expanded = false,
     tabVisible = true,
     whepUrl = '',
-    expectVideo = true,
+    expectVideo,
   }: {
     cameraId: string;
     cameraName: string;
@@ -71,7 +71,13 @@
   let streamState: StreamState | 'loading' = $state('loading');
   let webrtcState: WebrtcState = $state('connecting');
   let hasFirstVideoFrame = $state(false);
+  let negotiatedHasVideo: boolean | null = $state(null);
   let connectedAt = 0;
+  // Explicit caller knowledge wins; otherwise follow the actual WHEP SDP answer.
+  // Before an answer exists, retain video black-screen detection conservatively.
+  function shouldExpectVideo(): boolean {
+    return expectVideo ?? negotiatedHasVideo ?? true;
+  }
   let videoFrameCallbackId: number | null = null;
   let videoEl: HTMLVideoElement | undefined = $state();
   let pc: RTCPeerConnection | null = null;
@@ -159,7 +165,7 @@ let destroyed = false;
       return;
     }
     const prevState = streamState;
-    if (whepPlaybackReady(webrtcState, expectVideo, hasFirstVideoFrame)) {
+    if (whepPlaybackReady(webrtcState, shouldExpectVideo(), hasFirstVideoFrame)) {
       streamState = 'playing';
       if (prevState !== 'playing' && frozenFrameUrl) clearFreezeFrame();
       if (coordinator && hasActiveCoordinatedReconnect) {
@@ -185,7 +191,7 @@ let destroyed = false;
   // ICE connected only means transport is ready, not that a decodable video
   // frame has reached the <video>. Prevent "green online but black screen".
   function markFirstVideoFrame() {
-    if (destroyed || !expectVideo || hasFirstVideoFrame || !videoEl) return;
+    if (destroyed || !shouldExpectVideo() || hasFirstVideoFrame || !videoEl) return;
     if (videoEl.videoWidth === 0 || videoEl.videoHeight === 0) return;
     hasFirstVideoFrame = true;
     reconnectAttempts = 0;
@@ -193,7 +199,7 @@ let destroyed = false;
   }
 
   function watchFirstVideoFrame(peer: RTCPeerConnection, epoch: number) {
-    if (!videoEl || !expectVideo || hasFirstVideoFrame || videoFrameCallbackId !== null) return;
+    if (!videoEl || !shouldExpectVideo() || hasFirstVideoFrame || videoFrameCallbackId !== null) return;
     const element = videoEl;
     if ('requestVideoFrameCallback' in element) {
       videoFrameCallbackId = element.requestVideoFrameCallback(() => {
@@ -348,7 +354,7 @@ let destroyed = false;
         zombieCount = 0;
         return;
       }
-      if (whepFirstVideoFrameTimedOut(connectedAt, now, expectVideo, hasFirstVideoFrame, tabVisible && !document.hidden)) {
+      if (whepFirstVideoFrameTimedOut(connectedAt, now, shouldExpectVideo(), hasFirstVideoFrame, tabVisible && !document.hidden)) {
         console.warn(`WebRTC connected without first video frame for ${cameraId}, retrying`);
         sendTelemetry('stream_degradation', cameraId, undefined, { protocol: 'webrtc', reason: 'first_video_frame_timeout' });
         scheduleReconnect();
@@ -403,6 +409,7 @@ let destroyed = false;
     streamState = 'loading';
     webrtcState = 'connecting';
     hasFirstVideoFrame = false;
+    negotiatedHasVideo = null;
     connectedAt = 0;
     const epoch = ++connectionEpoch;
     const isCurrent = (candidate: RTCPeerConnection) => !destroyed && epoch === connectionEpoch && pc === candidate;
@@ -450,7 +457,7 @@ let destroyed = false;
             webrtcState = 'connected';
             connectedAt = Date.now();
             watchFirstVideoFrame(peerConnection, epoch);
-            if (!expectVideo || hasFirstVideoFrame) reconnectAttempts = 0;
+            if (!shouldExpectVideo() || hasFirstVideoFrame) reconnectAttempts = 0;
             startZombieDetector();
             break;
           case 'disconnected':
@@ -528,6 +535,9 @@ let destroyed = false;
       // Parse SDP answer
       const answerSDP = await response.text();
       if (destroyed) return;
+      // Audio-only streams are valid WHEP sessions. Use negotiated media
+      // capabilities rather than source_type labels to decide whether a frame is required.
+      negotiatedHasVideo = sdpHasActiveVideoMedia(answerSDP);
       const answer = new RTCSessionDescription({
         type: 'answer',
         sdp: answerSDP,

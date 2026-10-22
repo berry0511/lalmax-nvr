@@ -756,8 +756,7 @@
                       cameraId={encodedStreamId}
                       cameraName={displayName}
                       whepUrl={streamMediaURL(stream.stream_id, 'webrtc')}
-                      expectVideo={stream.source_type !== 'voip'}
-                      expanded={true}
+                                            expanded={true}
                     />
                   {:else if selectedProtocol === 'flv' || selectedProtocol === 'ws-flv'}
                     <FlvPlayer
