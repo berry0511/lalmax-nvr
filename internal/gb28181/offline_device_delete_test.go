@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/emiago/sipgo/sip"
 	"github.com/lalmax-pro/lalmax-nvr/internal/storage"
 )
 
@@ -79,29 +80,29 @@ func TestREGISTERAfterConcurrentOfflineDeleteRecreatesPersistedDevice(t *testing
 	go func() { deleteDone <- store.DeleteOfflineDevice(id) }()
 	<-repo.deleteStarted
 	registerStarted := make(chan struct{})
-	registerDone := make(chan error, 1)
+	registerDone := make(chan struct{})
+	req := sip.NewRequest(sip.REGISTER, sip.Uri{Host: "127.0.0.1"})
+	req.SetSource("127.0.0.1:5060")
+	req.SetTransport("UDP")
+	api := &GB28181API{store: store, cfg: &Config{StandardVersion: "2016"}}
 	go func() {
 		close(registerStarted)
-		_, err := store.ChangeAndSaveDevice(id, &Device{
-			DeviceID: id, source: "127.0.0.1:5060", GBVersion: GBVersionUnknown,
-		}, func(d *Device) {
-			d.IsOnline = true
-			d.Address = "127.0.0.1:5060"
-			d.Transport = "UDP"
-			d.LastRegisterAt = time.Now()
-			d.LastKeepaliveAt = time.Now()
-		})
-		registerDone <- err
+		api.login(req, id)
+		close(registerDone)
 	}()
 	<-registerStarted
 	select {
-	case err := <-registerDone:
-		t.Fatalf("REGISTER escaped while deletion held lifecycle lock: %v", err)
+	case <-registerDone:
+		t.Fatal("REGISTER login escaped while deletion held lifecycle lock")
 	case <-time.After(25 * time.Millisecond):
 	}
 	close(repo.allowDelete)
 	if err := <-deleteDone; err != nil { t.Fatalf("delete: %v", err) }
-	if err := <-registerDone; err != nil { t.Fatalf("REGISTER transition: %v", err) }
+	select {
+	case <-registerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("REGISTER login did not finish after deletion")
+	}
 	registered, ok := store.Load(id)
 	if !ok || !registered.IsOnline {
 		t.Fatalf("REGISTER completed but online device is absent: present=%v dev=%+v", ok, registered)
