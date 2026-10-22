@@ -18,14 +18,25 @@ func newGB28181DeleteTestDB(t *testing.T) *DB {
 	require.NoError(t, db.Init(context.Background()))
 	_, err = db.DB().Exec("PRAGMA foreign_keys = OFF;")
 	require.NoError(t, err)
+	groupID, err := db.CreateDeviceGroup(context.Background(), &DeviceGroup{Name: "delete-test-group"})
+	require.NoError(t, err)
 	for _, id := range []string{"deleted-device", "retained-device"} {
 		require.NoError(t, db.UpsertGB28181Device(context.Background(), &GB28181DeviceRow{DeviceID: id}))
 		require.NoError(t, db.BatchUpsertChannels(context.Background(), id, []GB28181ChannelRow{{DeviceID: id, ChannelID: "camera", Name: id}}))
 		channels, err := db.ListGB28181Channels(context.Background(), id)
 		require.NoError(t, err)
 		require.Len(t, channels, 1)
+		require.NoError(t, db.AddGroupChannel(context.Background(), groupID, id, "camera"))
 	}
 	return db
+}
+
+func requireGroupChannelCount(t *testing.T, db *DB, deviceID string, want int) {
+	t.Helper()
+	var count int
+	err := db.DB().QueryRow("SELECT COUNT(*) FROM device_group_channels WHERE device_id = ?", deviceID).Scan(&count)
+	require.NoError(t, err)
+	require.Equal(t, want, count, "unexpected group associations for device %s", deviceID)
 }
 
 func TestDeleteGB28181DeviceRemovesOwnChannelsWithoutForeignKeys(t *testing.T) {
@@ -42,6 +53,8 @@ func TestDeleteGB28181DeviceRemovesOwnChannelsWithoutForeignKeys(t *testing.T) {
 	channels, err = db.ListGB28181Channels(ctx, "retained-device")
 	require.NoError(t, err)
 	require.Len(t, channels, 1)
+	requireGroupChannelCount(t, db, "deleted-device", 0)
+	requireGroupChannelCount(t, db, "retained-device", 1)
 }
 
 func TestDeleteGB28181DeviceRollsBackChannelsOnDeviceDeleteFailure(t *testing.T) {
@@ -57,4 +70,5 @@ func TestDeleteGB28181DeviceRollsBackChannelsOnDeviceDeleteFailure(t *testing.T)
 	channels, err := db.ListGB28181Channels(ctx, "deleted-device")
 	require.NoError(t, err)
 	require.Len(t, channels, 1, "failed device removal must roll back the catalog removal")
-}
+	requireGroupChannelCount(t, db, "deleted-device", 1, "failed device removal must roll back group association cleanup")
+	requireGroupChannelCount(t, db, "retained-device", 1)
