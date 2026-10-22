@@ -72,3 +72,4 @@ func TestDeleteGB28181DeviceRollsBackChannelsOnDeviceDeleteFailure(t *testing.T)
 	require.Len(t, channels, 1, "failed device removal must roll back the catalog removal")
 	requireGroupChannelCount(t, db, "deleted-device", 1)
 	requireGroupChannelCount(t, db, "retained-device", 1)
+}
