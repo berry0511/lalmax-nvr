@@ -112,3 +112,63 @@ func TestREGISTERAfterConcurrentOfflineDeleteRecreatesPersistedDevice(t *testing
 		t.Fatalf("REGISTER state not persisted after delete: row=%+v err=%v", row, err)
 	}
 }
+
+
+// A heartbeat arriving after an offline deletion must not UPSERT the device
+// back into the database. This protects against stale NOTIFY/MESSAGE traffic.
+func TestKeepaliveAfterConcurrentOfflineDeleteDoesNotResurrectDevice(t *testing.T) {
+	db, err := storage.New(filepath.Join(t.TempDir(), "keepalive-delete-race.db"))
+	if err != nil { t.Fatal(err) }
+	defer db.Close()
+	if err := db.Init(context.Background()); err != nil { t.Fatal(err) }
+	repo := &blockingDeleteGB28181Repository{
+		GB28181DeviceStoreRepository: db,
+		deleteStarted: make(chan struct{}),
+		allowDelete: make(chan struct{}),
+	}
+	store := NewDeviceStore(repo, nil)
+	const id = "34020000001320000992"
+	dev := &Device{
+		DeviceID: id,
+		IsOnline: false,
+		Address: "127.0.0.1:5060",
+		LastRegisterAt: time.Now(),
+		GBVersion: GBVersion2016,
+	}
+	store.Store(id, dev)
+	if err := store.SaveDevice(id, dev); err != nil { t.Fatal(err) }
+	api := &GB28181API{store: store}
+
+	deleteDone := make(chan error, 1)
+	go func() { deleteDone <- store.DeleteOfflineDevice(id) }()
+	<-repo.deleteStarted
+
+	keepaliveStarted := make(chan struct{})
+	keepaliveDone := make(chan struct{})
+	go func() {
+		close(keepaliveStarted)
+		api.handleKeepalive(id, "127.0.0.1:5099", "ON")
+		close(keepaliveDone)
+	}()
+	<-keepaliveStarted
+	select {
+	case <-keepaliveDone:
+		t.Fatal("keepalive completed while deletion held the lifecycle lock")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(repo.allowDelete)
+	if err := <-deleteDone; err != nil { t.Fatalf("delete: %v", err) }
+	select {
+	case <-keepaliveDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("keepalive did not finish after deletion")
+	}
+	if _, ok := store.Load(id); ok {
+		t.Fatal("keepalive recreated the deleted in-memory device")
+	}
+	row, err := db.GetGB28181Device(context.Background(), id)
+	if !errors.Is(err, sql.ErrNoRows) || row != nil {
+		t.Fatalf("keepalive resurrected deleted DB row: row=%+v err=%v", row, err)
+	}
+}
