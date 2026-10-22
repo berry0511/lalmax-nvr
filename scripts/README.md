@@ -1,74 +1,56 @@
-# `lalmax-nvr` Scripts
+# lalmax-nvr Build and Runtime Scripts
 
-Platform-specific scripts live in subfolders. Run from the project root.
+## One-command complete builds
 
-## Linux / macOS — `scripts/unix/`
+After updating Git, run the appropriate script from the repository root (or any working directory).
+Each build runs **npm ci**, **Vite production build**, **copies the current web/dist into internal/ui/static**,
+**go build ./...** for root, third/lal and third/lalmax, then **builds the final Go executable**.
+Builds fail immediately if npm, Go, a required artifact, or any build command is missing or fails.
+Old embedded frontend assets are never used as an implicit fallback.
 
-```sh
-./scripts/unix/build.sh      # build bin/lalmax-nvr
-./scripts/unix/run.sh        # run in foreground
-./scripts/unix/start.sh      # start in background
-./scripts/unix/stop.sh       # stop background process
-./scripts/unix/restart.sh    # restart background process
-./scripts/unix/status.sh     # show pid and /api/health
-./scripts/unix/logs.sh       # follow logs/lalmax-nvr.log
-./scripts/unix/test.sh       # run all Go tests
-```
-
-Environment overrides:
-
-```sh
-CONFIG_FILE=./lalmax-nvr.dev.yaml ./scripts/unix/start.sh
-BIN_PATH=./bin/lalmax-nvr-dev ./scripts/unix/build.sh
-LINES=200 ./scripts/unix/logs.sh
-```
-
-## Windows — `scripts/windows/`
-
-PowerShell（统一入口 `nvr.ps1`）：
+### On a Windows workstation — build both targets
 
 ```powershell
-.\scripts\windows\nvr.ps1 build      # build bin/lalmax-nvr.exe
-.\scripts\windows\nvr.ps1 run        # run in foreground
-.\scripts\windows\nvr.ps1 start      # start in background
-.\scripts\windows\nvr.ps1 stop       # stop background process
-.\scripts\windows\nvr.ps1 restart    # restart background process
-.\scripts\windows\nvr.ps1 status     # show pid and /api/health
-.\scripts\windows\nvr.ps1 logs       # follow logs/lalmax-nvr.log
-.\scripts\windows\nvr.ps1 test       # run all Go tests
+.\scripts\windows\build.bat          # Windows amd64 -> bin/lalmax-nvr.exe
+.\scripts\windows\build-linux.bat    # Linux amd64 -> bin/lalmax-nvr
 ```
 
-Command Prompt（`.bat` 薄包装，内部同样调用 `nvr.ps1`）：
-
-```cmd
-scripts\windows\build.bat
-scripts\windows\start.bat
-scripts\windows\stop.bat
-```
-
-Environment overrides:
+Both .bat wrappers invoke PowerShell directly, without Git Bash or scripts/unix/build.sh.
+The build targets are passed as -BuildOS/-BuildArch parameters. nvr.ps1 sets
+GOOS/GOARCH/CGO_ENABLED only during its build and restores their prior values.
+Windows and Linux outputs coexist in bin/ as lalmax-nvr.exe and lalmax-nvr.
+For other architectures, use the same configurable PowerShell entrypoint:
 
 ```powershell
-$env:CONFIG_FILE = '.\config\lalmax-nvr.dev.yaml'; .\scripts\windows\nvr.ps1 start
-$env:BIN_PATH = '.\bin\lalmax-nvr-dev'; .\scripts\windows\nvr.ps1 build
-$env:LINES = '200'; .\scripts\windows\nvr.ps1 logs
+.\scripts\windows\nvr.ps1 build -BuildOS linux -BuildArch arm64   # -> bin/lalmax-nvr
 ```
 
-Cross-compilation:
+### On Linux / macOS
 
-```powershell
-$env:GOOS = 'linux'; $env:GOARCH = 'arm64'; .\scripts\windows\nvr.ps1 build
+```bash
+./scripts/unix/build.sh              # native -> bin/lalmax-nvr
+GOOS=linux GOARCH=arm64 ./scripts/unix/build.sh   # -> bin/lalmax-nvr
 ```
 
-Implementation: `scripts/windows/nvr.ps1` + `scripts/windows/env.ps1`.
+`scripts/unix/build.sh` is for Unix hosts only; on Windows use the PowerShell/batch entrypoints.
+Cross-compilation on Unix also uses the stable filename `lalmax-nvr`, so different Unix architectures
+will replace that output rather than creating suffixed files.
 
-Unix helpers: `scripts/unix/env.sh`.
+### Prerequisites and notes
 
-## Runtime files
+- Go matching root go.mod (CI uses Go 1.26.2) and Node/npm (CI uses Node 22).
+- npm ci runs on every build so Git updates to web/package-lock.json are reflected.
+- GO_BUILD_JOBS defaults to 1 to reduce memory use; set a larger value on faster machines.
+- Configurable entrypoints continue to accept GOOS, GOARCH, GOARM, CGO_ENABLED, BIN_PATH, VERSION.
+- Building is **not testing**: use scripts/windows/nvr.ps1 test or scripts/unix/test.sh for tests.
+- Building does not deploy, change the runtime configuration, or restart a service.
 
-```text
-bin/lalmax-nvr          # bin/lalmax-nvr.exe on Windows
-run/lalmax-nvr.pid
-logs/lalmax-nvr.log
-data/
-```
+## Runtime commands
+
+Windows: .\scripts\windows\nvr.ps1 run|start|stop|restart|status|logs|test.
+
+Linux: scripts/unix/run.sh, start.sh, stop.sh, restart.sh, status.sh, logs.sh, test.sh.
+
+Runtime output defaults: bin/lalmax-nvr (Windows: .exe), run/lalmax-nvr.pid, logs/lalmax-nvr.log, data/.
+
+Override example: `CONFIG_FILE=./lalmax-nvr.dev.yaml ./scripts/unix/start.sh`.

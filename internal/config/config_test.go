@@ -62,6 +62,88 @@ func TestDefaultsApplied(t *testing.T) {
 	require.Equal(t, "/dav", cfg.WebDAV.PathPrefix)
 }
 
+func TestMediaHTTPPlaybackAuthDefaultAndExplicitOptOut(t *testing.T) {
+	cfg := &Config{}
+	cfg.ApplyDefaults()
+	require.NotNil(t, cfg.Media.HTTPPlayAuthEnabled)
+	require.True(t, *cfg.Media.HTTPPlayAuthEnabled)
+
+	off := false
+	cfg = &Config{Media: MediaConfig{HTTPPlayAuthEnabled: &off}}
+	cfg.ApplyDefaults()
+	require.NotNil(t, cfg.Media.HTTPPlayAuthEnabled)
+	require.False(t, *cfg.Media.HTTPPlayAuthEnabled)
+	require.NoError(t, Validate(cfg))
+
+	on := true
+	cfg = &Config{Media: MediaConfig{HTTPPlayAuthEnabled: &on}}
+	cfg.ApplyDefaults()
+	require.True(t, *cfg.Media.HTTPPlayAuthEnabled)
+}
+
+func TestRTMPPublishAuthDefaultAndExplicitOptOut(t *testing.T) {
+	cfg := &Config{}
+	if !cfg.RTMP.RTMPPublishAuthEnabled() {
+		t.Fatal("RTMP publisher auth must default to enabled before ApplyDefaults")
+	}
+	cfg.ApplyDefaults()
+	require.NotNil(t, cfg.RTMP.PublishAuthEnabled)
+	require.True(t, *cfg.RTMP.PublishAuthEnabled)
+
+	off := false
+	cfg = &Config{RTMP: RTMPConfig{PublishAuthEnabled: &off}}
+	cfg.ApplyDefaults()
+	require.False(t, cfg.RTMP.RTMPPublishAuthEnabled())
+	require.NotNil(t, cfg.RTMP.PublishAuthEnabled)
+	require.False(t, *cfg.RTMP.PublishAuthEnabled)
+	require.NoError(t, Validate(cfg))
+
+	on := true
+	cfg = &Config{RTMP: RTMPConfig{PublishAuthEnabled: &on}}
+	cfg.ApplyDefaults()
+	require.True(t, cfg.RTMP.RTMPPublishAuthEnabled())
+}
+
+func TestRTSPPublishAuthDefaultAndExplicitOptOut(t *testing.T) {
+	cfg := &Config{}
+	require.True(t, cfg.Media.RTSPPublishTokenAuthEnabled())
+	cfg.ApplyDefaults()
+	require.NotNil(t, cfg.Media.RTSPPublishAuthEnabled)
+	require.True(t, *cfg.Media.RTSPPublishAuthEnabled)
+	require.False(t, cfg.Media.RTSPAuthEnable, "native RTSP Basic/Digest auth is separately disabled by default")
+
+	off := false
+	cfg = &Config{Media: MediaConfig{RTSPPublishAuthEnabled: &off, RTSPAuthEnable: false}}
+	cfg.ApplyDefaults()
+	require.False(t, cfg.Media.RTSPPublishTokenAuthEnabled())
+	require.NoError(t, Validate(cfg))
+
+	on := true
+	cfg = &Config{Media: MediaConfig{RTSPPublishAuthEnabled: &on}}
+	cfg.ApplyDefaults()
+	require.True(t, cfg.Media.RTSPPublishTokenAuthEnabled())
+}
+
+func TestRTSPPublishAuthConfigLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lalmax-nvr.yaml")
+	content := "media:\n  mode: embedded\n  rtsp_auth_enable: false\n  rtsp_publish_auth_enabled: false\n"
+	require.NoError(t, os.WriteFile(path, []byte(content), 0600))
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.False(t, cfg.Media.RTSPPublishTokenAuthEnabled())
+	require.False(t, cfg.Media.RTSPAuthEnable)
+}
+
+func TestRTMPPublishAuthConfigLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lalmax-nvr.yaml")
+	content := "rtmp:\n  enabled: true\n  port: 11935\n  publish_auth_enabled: false\n"
+	require.NoError(t, os.WriteFile(path, []byte(content), 0600))
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.RTMP.PublishAuthEnabled)
+	require.False(t, cfg.RTMP.RTMPPublishAuthEnabled())
+}
+
 func TestFrameWatchdogTimeoutDefaultEmpty(t *testing.T) {
 	cfg := &Config{Cameras: []CameraConfig{{ID: "cam1", URL: "rtsp://localhost/stream"}}}
 	cfg.ApplyDefaults()
@@ -174,21 +256,37 @@ func TestSaveAtomic(t *testing.T) {
 	err := Save(path, cfg)
 	require.NoError(t, err)
 
-	// Make directory read-only so a second Save should fail
-	require.NoError(t, os.Chmod(filepath.Dir(path), 0o555))
-	defer os.Chmod(filepath.Dir(path), 0o755) // restore for cleanup
-
-	// Read the original content before failed write attempt
+	// A non-empty directory at the destination deterministically rejects
+	// a file rename on Windows and Unix. chmod(0555) is not a portable
+	// way to make os.CreateTemp fail (notably on Windows or as root).
 	original, err := os.ReadFile(path)
 	require.NoError(t, err)
 
-	err = Save(path, &Config{Server: ServerConfig{Listen: ":0000"}})
+	blockedPath := filepath.Join(filepath.Dir(path), "blocked.yaml")
+	require.NoError(t, os.Mkdir(blockedPath, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(blockedPath, "keep"), []byte("keep"), 0o644))
+
+	err = Save(blockedPath, &Config{Server: ServerConfig{Listen: ":0000"}})
 	require.Error(t, err)
 
-	// Verify original file is untouched
+	// The failed rename must not affect the previously saved config,
+	// overwrite the destination directory, or leak a temporary file.
 	after, err := os.ReadFile(path)
 	require.NoError(t, err)
-	require.Equal(t, string(original), string(after))
+	require.Equal(t, original, after)
+	keep, err := os.ReadFile(filepath.Join(blockedPath, "keep"))
+	require.NoError(t, err)
+	require.Equal(t, "keep", string(keep))
+	tmpFiles, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".lalmax-nvr.yaml.tmp*"))
+	require.NoError(t, err)
+	require.Empty(t, tmpFiles)
+
+	// Creating the temporary file must also fail when the parent is absent.
+	missingParent := filepath.Join(dir, "missing", "lalmax-nvr.yaml")
+	require.Error(t, Save(missingParent, cfg))
+	after, err = os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, original, after)
 }
 
 func TestSaveOverwrite(t *testing.T) {
@@ -478,12 +576,34 @@ func TestFTPPortZeroRejected(t *testing.T) {
 	require.Contains(t, err.Error(), "ftp port out of range")
 }
 
-func TestSegmentDurationExceeds30s(t *testing.T) {
-	cfg := &Config{Storage: StorageConfig{SegmentDuration: "60s"}}
-	cfg.ApplyDefaults()
-	err := Validate(cfg)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "must be <= 30s")
+func TestSegmentDurationRange(t *testing.T) {
+	for _, tc := range []struct {
+		duration string
+		valid    bool
+	}{
+		{"1s", true},
+		{"30s", true},
+		{"1m", true},
+		{"5m", true},
+		{"10m", true},
+		{"30m", true},
+		{"500ms", false},
+		{"0s", false},
+		{"30m1s", false},
+		{"not-a-duration", false},
+	} {
+		t.Run(tc.duration, func(t *testing.T) {
+			cfg := &Config{}
+			cfg.ApplyDefaults()
+			cfg.Storage.SegmentDuration = tc.duration
+			err := Validate(cfg)
+			if tc.valid {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
 }
 
 func TestHLSSegmentDurationDefault30sPasses(t *testing.T) {
@@ -1373,4 +1493,28 @@ func TestVoIPConfiguration(t *testing.T) {
 	cfg.Media.Mode = "embedded"
 	cfg.VoIP.MediaPortMax = cfg.VoIP.MediaPortMin - 1
 	require.ErrorContains(t, Validate(cfg), "port range")
+}
+
+func TestConfigExampleDocumentsOptionalConfigFields(t *testing.T) {
+	path := filepath.Join("..", "..", "config", "config.example.yaml")
+	b, err := os.ReadFile(path)
+	require.NoError(t, err)
+	content := string(b)
+	for _, field := range []string{
+		"rtsp_auth_method:", "rtsp_username:", "rtsp_password:",
+		"media_port:", "whep_on_demand_enabled:",
+		"sip_tls_listen_addr:", "sip_wss_listen_addr:",
+		"auto_stop_no_view_sec:", "default_protocol:",
+		"database_migration_target:", "allowed_cidrs:",
+		"websocket:", "remote_log:", "metrics_auth:", "snapshot:", "ai:",
+	} {
+		require.Contains(t, content, field, "config example missing "+field)
+	}
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.True(t, cfg.Media.RTSPPublishTokenAuthEnabled())
+	require.True(t, cfg.RTMP.RTMPPublishAuthEnabled())
+	require.False(t, cfg.GB28181.WHEPOnDemandEnabled)
+	require.False(t, cfg.RemoteLog.Enabled)
+	require.False(t, cfg.AI.Enabled)
 }

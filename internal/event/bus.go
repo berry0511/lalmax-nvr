@@ -16,6 +16,7 @@ const (
 
 var (
 	ErrDuplicateSubscriber = errors.New("subscriber already registered for this topic")
+	ErrInvalidSubscriber = errors.New("event subscriber channel must be non-nil and buffered")
 )
 
 // subscriber holds a channel and its mutex.
@@ -46,42 +47,50 @@ func NewEventBus(bufferSize int) *EventBus {
 	}
 }
 
-// Subscribe registers a channel for the given topic.
-// The caller's channel is used directly as the ring buffer — Publish drains the oldest
-// event when the channel is full. The caller is responsible for reading from ch.
-// Returns ErrDuplicateSubscriber if the same channel is already subscribed.
+// Subscribe registers a caller-owned buffered channel for a topic.
+// bufferSize is retained for API compatibility, but capacity is determined
+// by the supplied channel. An unbuffered channel cannot support drop-oldest
+// delivery without blocking the media/control publisher.
 func (b *EventBus) Subscribe(topic string, ch chan Event, bufferSize int) error {
-	if bufferSize <= 0 {
-		bufferSize = b.bufferSize
+	if ch == nil || cap(ch) == 0 {
+		return ErrInvalidSubscriber
 	}
-
+	_ = bufferSize // Deprecated: callers own channel capacity.
 	b.mu.Lock()
 	defer b.mu.Unlock()
-
-	s := &subscriber{
-		ch: ch,
+	for _, s := range b.subscribers[topic] {
+		if s.ch == ch && !s.closed {
+			return ErrDuplicateSubscriber
+		}
 	}
-
-	b.subscribers[topic] = append(b.subscribers[topic], s)
-
+	b.subscribers[topic] = append(b.subscribers[topic], &subscriber{ch: ch})
 	return nil
 }
 
-// Unsubscribe removes all subscribers for the given topic and marks them closed.
-// It does NOT close the caller's channel — the caller owns it.
+// Unsubscribe removes only the requested subscriber. It never closes the
+// caller's channel or evicts other subscribers from the same topic.
 func (b *EventBus) Unsubscribe(topic string, ch chan Event) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-
 	subs := b.subscribers[topic]
+	if len(subs) == 0 {
+		return
+	}
+	remaining := make([]*subscriber, 0, len(subs))
 	for _, s := range subs {
-		s.mu.Lock()
-		if !s.closed {
-			s.closed = true
+		if s.ch != ch {
+			remaining = append(remaining, s)
+			continue
 		}
+		s.mu.Lock()
+		s.closed = true
 		s.mu.Unlock()
 	}
-	delete(b.subscribers, topic)
+	if len(remaining) == 0 {
+		delete(b.subscribers, topic)
+		return
+	}
+	b.subscribers[topic] = remaining
 }
 
 // Publish sends an event to all subscribers of the given topic.

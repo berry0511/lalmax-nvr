@@ -350,6 +350,7 @@ func (h *Handler) Routes() http.Handler {
 		})
 		r.Use(rl)
 		r.Get("/api/health", h.handleHealth)
+		r.Get("/api/health/cameras", h.handleHealthCameras)
 		r.Get("/api/readyz", h.handleReadyz)
 		r.Get("/api/capabilities", h.handleCapabilities)
 		// ONNX models are public, immutable runtime assets; auth headers are not
@@ -368,7 +369,6 @@ func (h *Handler) Routes() http.Handler {
 			r.Use(h.authMW)
 		}
 		r.Post("/api/auth/logout", h.handleLogout)
-		r.Get("/api/health/cameras", h.handleHealthCameras)
 		r.Get("/api/health/details", h.handleHealthDetails)
 		r.Route("/api/recordings", func(r chi.Router) {
 			r.Get("/", h.handleListRecordings)
@@ -670,6 +670,7 @@ func (h *Handler) Routes() http.Handler {
 		})
 		r.Route("/api/gb28181", func(r chi.Router) {
 			r.Get("/devices", h.handleGB28181ListDevices)
+			r.With(middleware.RequireOperatePermission()).Delete("/devices/{deviceID}", h.handleGB28181DeleteDevice)
 			r.Post("/play", h.handleGB28181Play)
 			r.Post("/stop", h.handleGB28181StopPlay)
 			r.Post("/record_info", h.handleGB28181RecordInfo)

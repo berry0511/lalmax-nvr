@@ -2,8 +2,10 @@ package cleanup
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -189,6 +191,41 @@ func TestRunOnce_TimeBasedCleanup(t *testing.T) {
 	require.True(t, os.IsNotExist(err))
 }
 
+// A failed deletion must be reported without preventing other expired
+// recordings from being deleted in the same retention pass.
+func TestRunOnce_TimeBasedCleanupReportsPartialFailure(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.close(t)
+
+	cfg := defaultCleanupConfig()
+	cfg.RetentionDays = 1
+	cfg.DiskThresholdPercent = 101
+	cm, err := NewCleanupManager(env.db, env.store, cfg)
+	require.NoError(t, err)
+
+	old := time.Now().Add(-48 * time.Hour)
+	env.insertTestRecording(t, "blocked-rec", "cam1", "cam1/blocked.mp4", old, false)
+	env.insertTestRecording(t, "deletable-rec", "cam1", "cam1/deletable.mp4", old, false)
+
+	// Force one SQLite deletion to fail while allowing the other to proceed.
+	_, err = env.db.DB().Exec(`CREATE TRIGGER reject_blocked_cleanup
+		BEFORE DELETE ON recordings
+		WHEN OLD.id = 'blocked-rec'
+		BEGIN SELECT RAISE(ABORT, 'injected deletion failure'); END`)
+	require.NoError(t, err)
+
+	err = cm.RunOnce(context.Background())
+	require.ErrorContains(t, err, "blocked-rec")
+	require.ErrorContains(t, err, "injected deletion failure")
+
+	blocked, err := env.db.GetRecording(context.Background(), "blocked-rec")
+	require.NoError(t, err)
+	require.NotNil(t, blocked)
+	deleted, err := env.db.GetRecording(context.Background(), "deletable-rec")
+	require.NoError(t, err)
+	require.Nil(t, deleted)
+}
+
 func TestRunOnce_WithRetentionDays(t *testing.T) {
 	t.Parallel()
 	env := newTestEnv(t)
@@ -249,6 +286,91 @@ func TestRunOnce_TimeBasedCleanup_Ordering(t *testing.T) {
 		require.NoError(t, err)
 		require.Nil(t, got, "expected %s to be deleted", id)
 	}
+}
+
+// A failed database deletion in disk-pressure cleanup must be surfaced to
+// RunOnce without preventing deletion of other recordings.
+func TestRunOnce_DiskThresholdReportsPartialFailure(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.close(t)
+
+	cfg := defaultCleanupConfig()
+	cfg.RetentionDays = 365
+	cfg.DiskThresholdPercent = 0
+	cm, err := NewCleanupManager(env.db, env.store, cfg)
+	require.NoError(t, err)
+
+	old := time.Now().Add(-48 * time.Hour)
+	env.insertTestRecording(t, "disk-blocked", "cam1", "cam1/disk-blocked.mp4", old, false)
+	env.insertTestRecording(t, "disk-deletable", "cam1", "cam1/disk-deletable.mp4", old, false)
+
+	_, err = env.db.DB().Exec(`CREATE TRIGGER reject_disk_cleanup
+		BEFORE DELETE ON recordings
+		WHEN OLD.id = 'disk-blocked'
+		BEGIN SELECT RAISE(ABORT, 'injected disk cleanup failure'); END`)
+	require.NoError(t, err)
+
+	err = cm.RunOnce(context.Background())
+	require.ErrorContains(t, err, "disk-blocked")
+	require.ErrorContains(t, err, "injected disk cleanup failure")
+	require.Equal(t, 1, strings.Count(err.Error(), "delete oldest recording disk-blocked"), "each failed recording should be attempted only once per cleanup pass")
+
+	blocked, err := env.db.GetRecording(context.Background(), "disk-blocked")
+	require.NoError(t, err)
+	require.NotNil(t, blocked)
+	deleted, err := env.db.GetRecording(context.Background(), "disk-deletable")
+	require.NoError(t, err)
+	require.Nil(t, deleted)
+}
+
+// Disk-pressure cleanup must look beyond the first full window of
+// undeletable records while retaining failure reporting.
+func TestRunOnce_DiskThresholdSkipsBlockedFirstFifty(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.close(t)
+	cfg := defaultCleanupConfig()
+	cfg.RetentionDays = 365
+	cfg.DiskThresholdPercent = 0
+	cm, err := NewCleanupManager(env.db, env.store, cfg)
+	require.NoError(t, err)
+
+	old := time.Now().Add(-48 * time.Hour)
+	for i := 0; i < 50; i++ {
+		id := fmt.Sprintf("stuck-%03d", i)
+		env.insertTestRecording(t, id, "cam1", "cam1/"+id+".mp4", old.Add(time.Duration(i)*time.Second), false)
+	}
+	env.insertTestRecording(t, "later-deletable", "cam1", "cam1/later-deletable.mp4", old.Add(time.Minute), false)
+	_, err = env.db.DB().Exec(`CREATE TRIGGER reject_stuck_disk_cleanup
+		BEFORE DELETE ON recordings
+		WHEN OLD.id LIKE 'stuck-%'
+		BEGIN SELECT RAISE(ABORT, 'injected blocked oldest'); END`)
+	require.NoError(t, err)
+
+	err = cm.RunOnce(context.Background())
+	require.ErrorContains(t, err, "injected blocked oldest")
+	later, err := env.db.GetRecording(context.Background(), "later-deletable")
+	require.NoError(t, err)
+	require.Nil(t, later, "recordings beyond a blocked first batch must still be cleaned")
+	stuck, err := env.db.GetRecording(context.Background(), "stuck-000")
+	require.NoError(t, err)
+	require.NotNil(t, stuck)
+}
+
+func TestDiskThresholdCleanupHonorsCancellation(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.close(t)
+	cfg := defaultCleanupConfig()
+	cfg.DiskThresholdPercent = 0
+	cm, err := NewCleanupManager(env.db, env.store, cfg)
+	require.NoError(t, err)
+	env.insertTestRecording(t, "cancelled-disk", "cam1", "cam1/cancelled-disk.mp4", time.Now().Add(-48*time.Hour), false)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, cm.diskThresholdCleanup(ctx), context.Canceled)
+	rec, err := env.db.GetRecording(context.Background(), "cancelled-disk")
+	require.NoError(t, err)
+	require.NotNil(t, rec, "a canceled cleanup must not delete records")
 }
 
 func TestRunOnce_DiskThresholdCleanup(t *testing.T) {
@@ -616,4 +738,62 @@ func TestTimeBasedCleanup_TimelapseExpired(t *testing.T) {
 	got, err = env.db.GetRecording(context.Background(), "h264-expired")
 	require.NoError(t, err)
 	require.Nil(t, got, "expired h264 recording should also be deleted")
+}
+
+func TestDeleteRecordingKeepsIndexOnFileErrorAndRetriesMissingFile(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.close(t)
+	ctx := context.Background()
+	env.insertTestRecording(t, "delete-retry", "cam1", "delete-retry.mp4", time.Now().Add(-48*time.Hour), false)
+	rec, err := env.db.GetRecording(ctx, "delete-retry")
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	// A directory with a child cannot be unlinked with os.Remove. Simulate
+	// a failing filesystem delete without relying on root privileges.
+	require.NoError(t, os.Remove(rec.FilePath))
+	require.NoError(t, os.Mkdir(rec.FilePath, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(rec.FilePath, "child"), []byte("x"), 0600))
+	cm, err := NewCleanupManager(env.db, env.store, defaultCleanupConfig())
+	require.NoError(t, err)
+	require.Error(t, cm.deleteRecording(ctx, rec))
+	existing, err := env.db.GetRecording(ctx, rec.ID)
+	require.NoError(t, err)
+	require.NotNil(t, existing, "failed file delete must preserve DB row for retries")
+	// After the failed unlink is corrected, even a missing file can be
+	// retried safely (e.g. process crash between unlink and DB delete).
+	require.NoError(t, os.RemoveAll(rec.FilePath))
+	require.NoError(t, cm.deleteRecording(ctx, rec))
+	existing, err = env.db.GetRecording(ctx, rec.ID)
+	require.NoError(t, err)
+	require.Nil(t, existing)
+}
+
+func TestOrphanCleanupUsesEncodedCameraDirectoryAndPrefix(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.close(t)
+	ctx := context.Background()
+	cameraID := "34020000001320000001:34020000001320000002"
+	require.NoError(t, env.db.UpsertCamera(ctx, cameraID, "GB channel", "gb28181", "", "", "", "", true, "", "", ""))
+	require.NoError(t, env.store.EnsureCameraDir(cameraID))
+	dir := env.store.CameraDirPath(cameraID)
+	prefix := env.store.CameraRecordingPrefix(cameraID)
+	require.NotEqual(t, cameraID+"_", prefix)
+	orphan := filepath.Join(dir, prefix+"20261001_120000_orphan.mp4")
+	registered := filepath.Join(dir, prefix+"20261001_120000_registered.mp4")
+	other := filepath.Join(dir, "other-camera_20261001_120000.mp4")
+	for _, path := range []string{orphan, registered, other} {
+		require.NoError(t, os.WriteFile(path, []byte("data"), 0600))
+		old := time.Now().Add(-2 * time.Hour)
+		require.NoError(t, os.Chtimes(path, old, old))
+	}
+	env.insertTestRecording(t, "registered-encoded", cameraID, filepath.Join(filepath.Base(dir), filepath.Base(registered)), time.Now().Add(-48*time.Hour), false)
+	cm, err := NewCleanupManager(env.db, env.store, defaultCleanupConfig())
+	require.NoError(t, err)
+	require.Equal(t, 1, cm.cleanOrphansForCamera(ctx, cameraID))
+	_, err = os.Stat(orphan)
+	require.True(t, os.IsNotExist(err), "encoded orphan recording must be reclaimed")
+	_, err = os.Stat(registered)
+	require.NoError(t, err, "registered recording must survive cleanup")
+	_, err = os.Stat(other)
+	require.NoError(t, err, "other prefix must not be deleted")
 }

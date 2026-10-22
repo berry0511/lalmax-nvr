@@ -3,10 +3,14 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -413,6 +417,8 @@ type App struct {
 	srtIngest   *media.IngestHandler
 	whipIngest  *media.IngestHandler
 	gb28181Svr  *gb28181.Server
+	gb28181Mu   sync.RWMutex
+	gbWHEPHook  *gbWHEPOnDemandHook
 	jt808Svr    *jt808.Server
 	voipSvr     *voip.Server
 	voipMu      sync.Mutex
@@ -622,9 +628,24 @@ func NewApp(cfg *config.Config, configPath string) (*App, error) {
 	a.mediaAuth.SetPublishTokens("whip", cfg.WHIP.PublishTokens)
 	a.mediaAuth.SetPlaybackTokens("media", cfg.Auth.PlaybackTokens)
 	a.banMgr = ban.NewManager(db, a.mediaAuth)
+	a.banMgr.SetRTMPPublishAuthEnabled(cfg.RTMP.RTMPPublishAuthEnabled())
+	a.banMgr.SetRTSPPublishAuthEnabled(cfg.Media.RTSPPublishTokenAuthEnabled())
+	if !cfg.RTMP.RTMPPublishAuthEnabled() {
+		slog.Warn("RTMP publish authentication is disabled; restrict RTMP port to trusted senders", "port", cfg.RTMP.Port)
+	}
+	if !cfg.Media.RTSPAuthEnable && !cfg.Media.RTSPPublishTokenAuthEnabled() {
+		slog.Warn("RTSP server and publisher token authentication are disabled; restrict RTSP port to trusted clients", "port", config.DefaultLalRTSPPort)
+	}
+
+	internalTokenBytes := make([]byte, 32)
+	if _, err := rand.Read(internalTokenBytes); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("generate internal media token: %w", err)
+	}
+	internalMediaToken := hex.EncodeToString(internalTokenBytes)
 
 	// Create media engine with ban manager's auth for proactive rejection
-	engine, err := newMediaEngine(cfg,
+	engine, err := newMediaEngine(cfg, internalMediaToken,
 		lalmaxserver.WithAuthentication(a.banMgr),
 		lalmaxserver.WithPublisherAuthorizer(a.banMgr.AuthorizePublish),
 		lalmaxserver.WithSubscriberAuthorizer(func(protocol, streamID, token string) error {
@@ -633,8 +654,10 @@ func NewApp(cfg *config.Config, configPath string) (*App, error) {
 			}
 			return a.mediaAuth.AuthorizePlayback(protocol, streamID, token)
 		}),
-		lalmaxserver.WithHTTPPlayAuth(a.multiUserMW),
-		lalmaxserver.WithHTTPControlAuth(a.multiUserMW),
+		lalmaxserver.WithHTTPPlayAuth(mediaHTTPPlaybackAuth(cfg.Media, a.multiUserMW)),
+		lalmaxserver.WithHTTPControlAuth(
+			newInternalMediaControlAuth(internalMediaToken, a.multiUserMW),
+		),
 	)
 	if err != nil {
 		db.Close()
@@ -658,7 +681,7 @@ func NewApp(cfg *config.Config, configPath string) (*App, error) {
 		return nil, fmt.Errorf("reconcile stream history: %w", err)
 	}
 	if emb, ok := engine.(*media.EmbeddedLalmax); ok {
-		if _, err := a.historyMgr.RegisterAsHookPlugin(emb.Server()); err != nil {
+		if _, err := a.historyMgr.RegisterAsHookPlugin(emb); err != nil {
 			slog.Warn("failed to register history hook plugin", "error", err)
 		}
 	}
@@ -720,12 +743,36 @@ func NewApp(cfg *config.Config, configPath string) (*App, error) {
 				return nil, fmt.Errorf("gb28181 config: %w", err)
 			}
 			gbCfg.ApplyDefaults()
-			gbSvr, _ := gb28181.NewServer(gbCfg, engine, db)
+			gbSvr, err := gb28181.NewServerChecked(gbCfg, engine, db)
+			if err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("start GB28181 SIP listeners: %w", err)
+			}
 			a.gb28181Svr = gbSvr
 			if cfg.GB28181.MediaPort > 0 {
 				slog.Info("GB28181 SIP server started (single port mode)", "port", cfg.GB28181.Port, "media_port", cfg.GB28181.MediaPort, "id", cfg.GB28181.ID)
 			} else {
 				slog.Info("GB28181 SIP server started (multi port mode)", "port", cfg.GB28181.Port, "id", cfg.GB28181.ID)
+			}
+		}
+	}
+
+
+	// Register on_stream_not_found even when disabled so GB28181 hot reload can
+	// toggle this capability. HTTP requests are authorized by lalmax before
+	// producing the hook; the hook itself only admits known online channels.
+	if emb, ok := engine.(*media.EmbeddedLalmax); ok {
+		hook := newGBWHEPOnDemandHook(a.gbWHEPEligible, a.startGBWHEP)
+		hook.SetEnabled(cfg.GB28181.WHEPOnDemandEnabled)
+		_, hookErr := emb.RegisterHookPlugin(hook, lalmaxserver.HookPluginOptions{
+			Filter: lalmaxserver.NewHookEventFilter("", "", "", []string{lalmaxserver.HookEventStreamNotFound}),
+		})
+		if hookErr != nil {
+			slog.Warn("failed to register GB28181 WHEP on-demand hook", "error", hookErr)
+		} else {
+			a.gbWHEPHook = hook
+			if cfg.GB28181.WHEPOnDemandEnabled {
+				slog.Warn("GB28181 WHEP on-demand enabled: remote WHEP requests may trigger SIP INVITE; restrict public access")
 			}
 		}
 	}
@@ -824,6 +871,9 @@ func NewApp(cfg *config.Config, configPath string) (*App, error) {
 
 // RestartGB28181 restarts the GB28181 SIP server with new configuration.
 func (a *App) RestartGB28181(ctx context.Context, cfg *config.GB28181Config) error {
+	a.gb28181Mu.Lock()
+	defer a.gb28181Mu.Unlock()
+	if a.gbWHEPHook != nil { a.gbWHEPHook.SetEnabled(false) }
 	// Dispose old server
 	if a.gb28181Svr != nil {
 		a.gb28181Svr.Stop()
@@ -860,8 +910,12 @@ func (a *App) RestartGB28181(ctx context.Context, cfg *config.GB28181Config) err
 	gbCfg.ApplyDefaults()
 
 	// Create new server
-	gbSvr, _ := gb28181.NewServer(gbCfg, a.mediaEngine, a.db)
+	gbSvr, err := gb28181.NewServerChecked(gbCfg, a.mediaEngine, a.db)
+	if err != nil {
+		return fmt.Errorf("restart GB28181 SIP listeners: %w", err)
+	}
 	a.gb28181Svr = gbSvr
+	if a.gbWHEPHook != nil { a.gbWHEPHook.SetEnabled(cfg.WHEPOnDemandEnabled) }
 
 	slog.Info("GB28181 SIP server restarted", "port", cfg.Port, "id", cfg.ID)
 	return nil
@@ -1175,7 +1229,7 @@ func (a *App) wireRecordTasks() {
 		segDur = recorder.DefaultSegmentDur
 	}
 	if _, ok := a.mediaEngine.(*media.EmbeddedLalmax); ok {
-		a.groupWriter = recorder.NewGroupWriter(a.store, a.db, a.eventBus, a.mediaEngine, segDur)
+		a.groupWriter = recorder.NewGroupWriter(a.store, a.db, a.eventBus, a.mediaEngine, segDur, a.metrics)
 		a.camMgr.SetGroupWriter(a.groupWriter)
 	}
 	tasks := recorder.NewTaskManager(a.mediaEngine, a.store, a.db, a.metrics, a.eventBus, segDur)
@@ -1687,6 +1741,49 @@ func (a *App) Stop() error {
 	return nil
 }
 
+
+// mediaHTTPPlaybackAuth retains account authentication unless the operator
+// explicitly disables it for embedded lalmax's direct HTTP playback routes.
+// NVR API authentication, internal media controls, and publishing credentials
+// are configured separately and remain unchanged.
+func mediaHTTPPlaybackAuth(
+	cfg config.MediaConfig,
+	userAuth func(http.Handler) http.Handler,
+) func(http.Handler) http.Handler {
+	if cfg.HTTPPlayAuthEnabled != nil && !*cfg.HTTPPlayAuthEnabled {
+		return nil
+	}
+	return userAuth
+}
+
+func newInternalMediaControlAuth(
+	token string,
+	userAuth func(http.Handler) http.Handler,
+) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			supplied := r.Header.Get("X-Lalmax-Internal-Token")
+
+			host, _, err := net.SplitHostPort(r.RemoteAddr)
+			remoteIP := net.ParseIP(host)
+
+			if err == nil &&
+				remoteIP != nil &&
+				remoteIP.IsLoopback() &&
+				supplied != "" &&
+				subtle.ConstantTimeCompare(
+					[]byte(supplied),
+					[]byte(token),
+				) == 1 {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			userAuth(next).ServeHTTP(w, r)
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -1772,7 +1869,7 @@ func main() {
 	}
 }
 
-func newMediaEngine(cfg *config.Config, opts ...interface{}) (media.Engine, error) {
+func newMediaEngine(cfg *config.Config, internalToken string, opts ...interface{}) (media.Engine, error) {
 	if cfg.Media.Mode == "http" {
 		return media.NewLalmaxHTTP(media.LalmaxHTTPConfig{
 			BaseURL:   cfg.Media.LalmaxHTTPAddr,
@@ -1793,6 +1890,7 @@ func newMediaEngine(cfg *config.Config, opts ...interface{}) (media.Engine, erro
 		HTTPAddr:              cfg.Media.LalmaxHTTPAddr,
 		PublicURL:             cfg.Media.LalmaxPublicURL,
 		ConfigPath:            cfg.Media.LalmaxConfigPath,
+		InternalAuthToken:     internalToken,
 		RTMPPort:              cfg.RTMP.Port,
 		RTSPPort:              cfg.Media.RTSPPort,
 		HTTPPort:              cfg.Media.HTTPPort,
@@ -1811,6 +1909,7 @@ func newMediaEngine(cfg *config.Config, opts ...interface{}) (media.Engine, erro
 		LalmaxSegmentDuration: cfg.HLS.LalmaxSegmentDuration,
 		LalmaxPartDuration:    cfg.HLS.LalmaxPartDuration,
 		RTSPAuthEnable:        cfg.Media.RTSPAuthEnable,
+		RTSPDisableNativeAuth: !cfg.Media.RTSPPublishTokenAuthEnabled() && !cfg.Media.RTSPAuthEnable,
 		RTSPAuthMethod:        cfg.Media.RTSPAuthMethod,
 		RTSPUsername:          cfg.Media.RTSPUsername,
 		RTSPPassword:          cfg.Media.RTSPPassword,

@@ -31,11 +31,13 @@ export interface GB28181PlayRequest {
   device_id: string;
   channel_id: string;
   stream_id?: string;
+  ensure?: boolean;
 }
 
 export interface GB28181PlayResponse {
   ssrc: string;
   stream_id: string;
+  state?: 'ready' | 'starting';
 }
 
 // Platform types
@@ -123,6 +125,14 @@ export async function playGB28181Stream(req: GB28181PlayRequest, signal?: AbortS
     method: 'POST',
     body: JSON.stringify(req),
     signal,
+  });
+}
+
+// A manual cleanup operation, not a SIP unregister or a camera/recording delete.
+// The server rejects online devices or devices with an active stream.
+export async function deleteGB28181Device(deviceId: string): Promise<{status: string; device_id: string}> {
+  return apiRequest(`/gb28181/devices/${encodeURIComponent(deviceId)}`, {
+    method: 'DELETE',
   });
 }
 

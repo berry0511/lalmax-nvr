@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
+	"sync"
 	"strings"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
+	"github.com/q191201771/lal/pkg/base"
 	"github.com/q191201771/lal/pkg/logic"
 	"github.com/q191201771/naza/pkg/nazalog"
 )
@@ -28,6 +31,7 @@ type RtcServer struct {
 	udpMux               ice.UDPMux
 	tcpMux               ice.TCPMux
 	streamNotFoundFn     StreamNotFoundFn
+	whepSessions         sync.Map // session UUID -> *whepSession
 }
 
 // SetPublisherAuthorizer installs an admission check for WHIP publishers.
@@ -58,6 +62,11 @@ func (s *RtcServer) SetStreamNotFoundFn(fn StreamNotFoundFn) {
 }
 
 func (s *RtcServer) Close() error {
+	s.whepSessions.Range(func(key, value any) bool {
+		if session, ok := value.(*whepSession); ok { session.Close() }
+		s.whepSessions.Delete(key)
+		return true
+	})
 	var firstErr error
 	if s.udpMux != nil {
 		if err := s.udpMux.Close(); err != nil && firstErr == nil {
@@ -72,23 +81,93 @@ func (s *RtcServer) Close() error {
 	return firstErr
 }
 
-// waitStreamReady 触发 on_stream_not_found 后轮询等待流就绪
-// 为什么：WebRTC 播放请求先于 GB28181 设备推流到达，需通知上层拉流后等待
+// whepMediaReady means that WHEP can offer a codec-backed media track.
+// A created Group alone is not enough: GB28181/RTP may have opened its
+// receiver without receiving a sequence header yet.
+func whepMediaReady(group *maxlogic.Group) bool {
+	if group == nil {
+		return false
+	}
+	video := group.GetVideoSeqHeaderMsg()
+	if video != nil && (video.IsAvcKeySeqHeader() || video.IsHevcKeySeqHeader()) {
+		return true
+	}
+	audio := group.GetAudioSeqHeaderMsg()
+	if audio == nil {
+		return false
+	}
+	switch audio.AudioCodecId() {
+	case base.RtmpSoundFormatG711A, base.RtmpSoundFormatG711U, base.RtmpSoundFormatOpus:
+		return true
+	default:
+		return false
+	}
+}
+
+// GB28181 camera streams carry a 20-digit device ID and a 20-digit
+// channel ID. They must negotiate a video track even if G711 audio arrived
+// first. Ordinary standalone/VoIP audio-only streams remain supported.
+func whepGB28181VideoStream(streamID string) bool {
+	if len(streamID) != 41 || streamID[20] != ':' { return false }
+	for i := 0; i < len(streamID); i++ {
+		if i == 20 { continue }
+		if streamID[i] < '0' || streamID[i] > '9' { return false }
+	}
+	return true
+}
+
+func whepMediaReadyForStream(group *maxlogic.Group, streamID string) bool {
+	if group == nil { return false }
+	if whepGB28181VideoStream(streamID) {
+		header := group.GetVideoSeqHeaderMsg()
+		return header != nil && (header.IsAvcKeySeqHeader() || header.IsHevcKeySeqHeader())
+	}
+	return whepMediaReady(group)
+}
+
+// waitStreamReady requests a missing publisher once and waits for the requested
+// protocol's readiness. WHEP must see a supported codec sequence header before
+// SDP negotiation; RTSP/other call sites retain their existing Group semantics.
 func (s *RtcServer) waitStreamReady(appName, streamid, schema string) bool {
 	key := maxlogic.NewStreamKey(appName, streamid)
-	if ok, _ := maxlogic.GetGroupManagerInstance().GetGroup(key); ok {
+	groups := maxlogic.GetGroupManagerInstance()
+	ready := func(group *maxlogic.Group) bool {
+		if group == nil {
+			return false
+		}
+		if schema == "whep" {
+			return whepMediaReadyForStream(group, streamid)
+		}
 		return true
 	}
 
-	if s.streamNotFoundFn != nil {
+	_, group := groups.GetGroup(key)
+	if ready(group) {
+		return true
+	}
+	// An existing Group can be waiting for media after SIP INVITE. Do not
+	// trigger another INVITE just because its codec headers are not ready.
+	if group == nil && s.streamNotFoundFn != nil {
 		nazalog.Infof("stream not found, triggering on_stream_not_found. app=%s, stream=%s", appName, streamid)
 		s.streamNotFoundFn(appName, streamid, schema)
 	}
 
-	ok, _ := maxlogic.GetGroupManagerInstance().WaitGroup(key, 500*time.Millisecond, 5*time.Second)
-	return ok
+	wait := 5 * time.Second
+	if schema == "whep" && len(streamid) == 41 && strings.Count(streamid, ":") == 1 {
+		wait = 12 * time.Second
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		_, group = groups.GetGroup(key)
+		if ready(group) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
-
 func NewRtcServer(config config.RtcConfig, lal logic.ILalServer) (*RtcServer, error) {
 	var udpMux ice.UDPMux
 	var tcpMux ice.TCPMux
@@ -289,9 +368,147 @@ func (s *RtcServer) ServeWHEPPlayPage(c *gin.Context) {
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(buildWHEPPlayHTML()))
 }
 
-// buildWHEPPlayHTML 与 topsmedia/pkg/httpflv buildWHEPPage 内嵌脚本与结构保持一致。
+// buildWHEPPlayHTML serves a diagnostic WHEP player that also handles remote
+// tracks with no MediaStream association (RTCTrackEvent.streams may be empty).
 func buildWHEPPlayHTML() string {
-	return "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>WHEP Player</title><style>body{margin:0;background:#0f172a;color:#e2e8f0;font:14px/1.4 system-ui}main{max-width:960px;margin:0 auto;padding:24px}video{width:100%;background:#000;border-radius:12px}pre{white-space:pre-wrap;background:#111827;padding:12px;border-radius:12px;min-height:72px}</style></head><body><main><video id=\"video\" autoplay playsinline controls muted></video><pre id=\"log\">connecting...</pre></main><script>(async()=>{const log=(m)=>document.getElementById('log').textContent=m;const video=document.getElementById('video');const pc=new RTCPeerConnection();pc.ontrack=(e)=>{video.srcObject=e.streams[0];};pc.addTransceiver('video',{direction:'recvonly'});pc.addTransceiver('audio',{direction:'recvonly'});const offer=await pc.createOffer();await pc.setLocalDescription(offer);await new Promise(r=>{if(pc.iceGatheringState==='complete')return r();pc.addEventListener('icegatheringstatechange',()=>pc.iceGatheringState==='complete'&&r(),{once:false});});const res=await fetch(location.href,{method:'POST',headers:{'Content-Type':'application/sdp'},body:pc.localDescription.sdp});if(!res.ok){log('whep failed: '+res.status+' '+await res.text());return;}const answer=await res.text();await pc.setRemoteDescription({type:'answer',sdp:answer});log('connected: '+location.href);})();</script></body></html>"
+	return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WHEP Player</title>
+<style>
+html,body{width:100%;height:100%;margin:0;overflow:hidden}
+body{background:#000;color:#e2e8f0;font:14px/1.4 system-ui}
+main{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden}
+video{display:block;width:100%;height:100%;object-fit:contain;background:#000}
+pre{display:none;position:absolute;bottom:16px;left:16px;right:16px;z-index:1;max-height:35vh;overflow:auto;white-space:pre-wrap;background:#111827;padding:12px;border-radius:12px;min-height:72px}
+</style>
+</head>
+<body>
+<main>
+<video id="video" autoplay playsinline controls muted></video>
+<pre id="status">Preparing WebRTC playback...</pre>
+</main>
+<script>
+(async () => {
+  const video = document.getElementById('video');
+  const status = document.getElementById('status');
+  // Default: video-only player. Append &debug=1 to reveal live diagnostics.
+  if (new URLSearchParams(location.search).get('debug') === '1') status.style.display = 'block';
+  const pc = new RTCPeerConnection();
+  const media = new MediaStream();
+
+  function updateStatus(detail = '') {
+    const parts = [
+      'Peer: ' + pc.connectionState,
+      'ICE: ' + pc.iceConnectionState,
+      'Video track: ' + (media.getVideoTracks().length ? 'attached' : 'waiting'),
+      'Video size: ' + video.videoWidth + 'x' + video.videoHeight
+    ];
+    if (detail) parts.push(detail);
+    status.textContent = parts.join('\n');
+  }
+
+  function playVideo() {
+    if (!media.getVideoTracks().length) return;
+    video.play().catch(err => updateStatus('video.play(): ' + err.message));
+  }
+
+  function attachTrack(track) {
+    if (!track || media.getTracks().includes(track)) return;
+    media.addTrack(track);
+    // A remote RTCTrackEvent may have streams=[], so always use our own
+    // MediaStream. Never depend on event.streams[0] existing.
+    if (video.srcObject !== media) video.srcObject = media;
+    track.addEventListener('unmute', playVideo);
+    if (track.kind === 'video') playVideo();
+    updateStatus('Received ' + track.kind + ' track');
+  }
+
+  pc.ontrack = event => {
+    if (event.streams && event.streams[0]) {
+      for (const track of event.streams[0].getTracks()) attachTrack(track);
+    }
+    attachTrack(event.track);
+  };
+
+  // Also handle browsers which expose the receiver track before firing
+  // the corresponding ontrack callback.
+  function attachReceiverTracks() {
+    for (const receiver of pc.getReceivers()) {
+      if (receiver.track && receiver.track.readyState === 'live') {
+        attachTrack(receiver.track);
+      }
+    }
+  }
+
+  pc.onconnectionstatechange = () => updateStatus();
+  pc.oniceconnectionstatechange = () => updateStatus();
+  video.onloadedmetadata = playVideo;
+  video.onplaying = () => updateStatus('Video is playing');
+  video.onerror = () => updateStatus('Video element error');
+  pc.addTransceiver('video', {direction: 'recvonly'});
+  pc.addTransceiver('audio', {direction: 'recvonly'});
+
+  async function waitForICEGathering() {
+    if (pc.iceGatheringState === 'complete') return;
+    await new Promise(resolve => {
+      const complete = () => {
+        if (pc.iceGatheringState !== 'complete') return;
+        clearTimeout(timeout);
+        pc.removeEventListener('icegatheringstatechange', complete);
+        resolve();
+      };
+      const timeout = setTimeout(() => {
+        pc.removeEventListener('icegatheringstatechange', complete);
+        resolve();
+      }, 5000);
+      pc.addEventListener('icegatheringstatechange', complete);
+    });
+  }
+
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await waitForICEGathering();
+    const response = await fetch(location.href, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/sdp'},
+      body: pc.localDescription.sdp
+    });
+    if (!response.ok) throw new Error('WHEP HTTP ' + response.status + ': ' + await response.text());
+    const answer = await response.text();
+    await pc.setRemoteDescription({type: 'answer', sdp: answer});
+    attachReceiverTracks();
+    updateStatus('SDP negotiated; waiting for media');
+    setInterval(async () => {
+      attachReceiverTracks();
+      try {
+        const stats = await pc.getStats();
+        let bytes = 0;
+        let frames = 0;
+        stats.forEach(item => {
+          if (item.type === 'inbound-rtp' && (item.kind === 'video' || item.mediaType === 'video')) {
+            bytes += item.bytesReceived || 0;
+            frames += item.framesDecoded || 0;
+          }
+        });
+        updateStatus('Video bytes: ' + bytes + ' | decoded frames: ' + frames);
+      } catch (err) {
+        updateStatus('Stats unavailable: ' + err.message);
+      }
+    }, 2000);
+  } catch (err) {
+    status.style.display = 'block';
+    updateStatus('WHEP failed: ' + err.message);
+    pc.close();
+  }
+  window.addEventListener('pagehide', () => pc.close(), {once: true});
+})();
+</script>
+</body>
+</html>`
 }
 
 func (s *RtcServer) HandleWHEP(c *gin.Context) {
@@ -318,7 +535,7 @@ func (s *RtcServer) HandleWHEP(c *gin.Context) {
 		return
 	}
 
-	if !s.waitStreamReady(appName, streamid, "rtsp") {
+	if !s.waitStreamReady(appName, streamid, "whep") {
 		nazalog.Errorf("stream not ready after waiting. app=%s, stream=%s", appName, streamid)
 		c.Status(http.StatusNotFound)
 		return
@@ -337,7 +554,12 @@ func (s *RtcServer) HandleWHEP(c *gin.Context) {
 		return
 	}
 
-	c.Header("Location", fmt.Sprintf("whep/%s", whepsession.subscriberId))
+	location := "/webrtc/whep/" + whepsession.subscriberId
+	if token := c.Request.URL.Query().Get("token"); token != "" {
+		location += "?token=" + url.QueryEscape(token)
+	}
+	c.Header("Location", location)
+	c.Header("Access-Control-Expose-Headers", "Location")
 
 	sdp := whepsession.GetAnswerSDP(string(body))
 	if sdp == "" {
@@ -346,9 +568,35 @@ func (s *RtcServer) HandleWHEP(c *gin.Context) {
 		return
 	}
 
+	whepsession.onRunEnd = func() { s.whepSessions.Delete(whepsession.subscriberId) }
+	s.whepSessions.Store(whepsession.subscriberId, whepsession)
 	go whepsession.Run()
 
 	c.Data(http.StatusCreated, "application/sdp", []byte(sdp))
+}
+
+
+// HandleWHEPDelete terminates the actual session created by a WHEP POST.
+// The session-specific Location is a random UUID rather than a stream ID;
+// enforce the same stream token policy as when the session was created.
+func (s *RtcServer) HandleWHEPDelete(c *gin.Context) {
+	id := c.Param("sessionid")
+	value, exists := s.whepSessions.Load(id)
+	if !exists {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	session := value.(*whepSession)
+	if !s.authorizeSubscriber(c, "whep", session.streamID) {
+		return
+	}
+	value, exists = s.whepSessions.LoadAndDelete(id)
+	if !exists {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	value.(*whepSession).Close()
+	c.Status(http.StatusNoContent)
 }
 
 // HandleZlmWebrtcPlay ZLM 兼容 WebRTC 播放，返回 SDP answer

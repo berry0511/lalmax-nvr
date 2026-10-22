@@ -16,6 +16,7 @@
   import Setup from './routes/Setup.svelte';
   import Streams from './routes/Streams.svelte';
   import StreamDetail from './routes/StreamDetail.svelte';
+  import StandalonePlayer from './routes/StandalonePlayer.svelte';
   import MediaSources from './routes/MediaSources.svelte';
 
   import Devices from './routes/Devices.svelte';
@@ -126,6 +127,12 @@
 
     if (segments[0] === 'map') {
       return { route: 'map', params: {} };
+    }
+
+    if (segments[0] === 'player' && segments.length === 2 && segments[1]) {
+      let streamId = segments[1];
+      try { streamId = decodeURIComponent(streamId); } catch { /* retain raw ID */ }
+      return { route: 'player', params: { id: streamId } };
     }
 
     if (segments[0] === 'streams') {
@@ -272,7 +279,9 @@
   </div>
 {/if}
 
-{#if currentRoute === 'login'}
+{#if currentRoute === 'player'}
+  <StandalonePlayer streamId={params.id} />
+{:else if currentRoute === 'login'}
     <Login />
   {:else if currentRoute === 'setup'}
     <Setup />

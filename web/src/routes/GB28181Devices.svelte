@@ -1,18 +1,45 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { listGB28181Devices, playGB28181Stream, stopGB28181Stream } from '$lib/api';
+  import { listGB28181Devices, playGB28181Stream, stopGB28181Stream, deleteGB28181Device, apiRequest } from '$lib/api';
   import type { GB28181Device } from '$lib/api';
   import { t } from '$lib/i18n';
+  import PlaybackURLs from '$lib/components/PlaybackURLs.svelte';
+  import { selectPlaybackURLs } from '$lib/playback-urls';
   import { showToast } from '$lib/toast';
-  import { Video, RefreshCw, Play, Square, Wifi, WifiOff, ExternalLink, Clock, Info } from 'lucide-svelte';
+  import { Video, RefreshCw, Play, Square, Wifi, WifiOff, ExternalLink, Clock, Info, Trash2, Link as LinkIcon } from 'lucide-svelte';
 
   let devices = $state<GB28181Device[]>([]);
+  let deletingDeviceId = $state<string | null>(null);
   let loading = $state(true);
   let error = $state('');
   let playingStreams = $state<Set<string>>(new Set());
   let expandedDevice = $state<string | null>(null);
   let ws = $state<WebSocket | null>(null);
   let wsConnected = $state(false);
+  let urlOpenFor = $state<string | null>(null);
+  let urlLoadingFor = $state<string | null>(null);
+  let playURLs = $state<{ rtsp: string; webrtc: string } | null>(null);
+
+  async function toggleURLs(deviceId: string, channelId: string, streamId?: string) {
+    const key = `${deviceId}:${channelId}`;
+    if (urlOpenFor === key) { urlOpenFor = null; playURLs = null; return; }
+    urlOpenFor = key;
+    playURLs = null;
+    urlLoadingFor = key;
+    try {
+      const res = await apiRequest<{ protocols: { Protocol: string; Available?: boolean; PlayURL?: string }[] }>(
+        `/cameras/${encodeURIComponent(streamId || key)}/protocols`
+      );
+      if (urlOpenFor !== key) return;
+      const urls = selectPlaybackURLs(res.protocols);
+      if (urls.rtsp || urls.webrtc) playURLs = urls;
+      else showToast('当前通道没有可用的播放地址', 'info');
+    } catch (e) {
+      if (urlOpenFor === key) showToast(e instanceof Error ? e.message : '无法获取播放地址', 'error');
+    } finally {
+      if (urlLoadingFor === key) urlLoadingFor = null;
+    }
+  }
 
   function syncPlayingStreams(deviceList: GB28181Device[]) {
     const newPlaying = new Set<string>();
@@ -124,6 +151,23 @@
       await loadDevices();
     } catch (e) {
       showToast(e instanceof Error ? e.message : 'Failed to stop stream', 'error');
+    }
+  }
+
+  async function deleteOfflineDevice(device: GB28181Device) {
+    if (device.is_online || deletingDeviceId) return;
+    if (!window.confirm(`确定移除离线设备 ${device.device_id} 的 SIP 注册记录与通道目录吗？\n\n不会删除摄像机配置、录像文件或历史记录。设备再次注册后仍可能重新出现。`)) return;
+    deletingDeviceId = device.device_id;
+    try {
+      await deleteGB28181Device(device.device_id);
+      if (expandedDevice === device.device_id) expandedDevice = null;
+      showToast('离线设备记录已移除', 'success');
+      await loadDevices();
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : '删除失败；设备可能已经重新上线', 'error');
+      await loadDevices();
+    } finally {
+      deletingDeviceId = null;
     }
   }
 
@@ -297,6 +341,17 @@
                     </div>
                   {/if}
                 </div>
+                {#if !device.is_online}
+                  <div class="flex flex-wrap items-center justify-between gap-2 pt-3 border-t th-border">
+                    <p class="text-xs th-text-tertiary">长期离线设备可手动移除注册记录和通道目录，录像与摄像机档案不受影响；设备再次注册可能重新出现。</p>
+                    <button type="button" class="btn btn-sm btn-danger flex items-center gap-1"
+                      disabled={deletingDeviceId !== null}
+                      onclick={() => deleteOfflineDevice(device)}>
+                      <Trash2 class="w-3.5 h-3.5" />
+                      {deletingDeviceId === device.device_id ? '删除中...' : '移除离线设备'}
+                    </button>
+                  </div>
+                {/if}
               </div>
             {/if}
 
@@ -307,7 +362,8 @@
                 <div class="grid gap-2">
                   {#each device.channels as channel}
                     {@const streamKey = `${device.device_id}:${channel.channel_id}`}
-                    <div class="flex items-center justify-between p-3 bg-white dark:bg-gray-800 rounded-lg border th-border">
+                    <div class="p-3 bg-white dark:bg-gray-800 rounded-lg border th-border">
+                      <div class="flex items-center justify-between gap-2">
                       <div class="flex items-center gap-2">
                         <Video class="w-4 h-4 th-text-tertiary" />
                         <span class="text-sm th-text-primary">{channel.channel_id}</span>
@@ -316,6 +372,7 @@
                         {/if}
                       </div>
                       <div class="flex items-center gap-2">
+                        <button type="button" class="btn btn-sm btn-secondary flex items-center gap-1" onclick={() => toggleURLs(device.device_id, channel.channel_id, channel.stream_id)} disabled={urlLoadingFor === streamKey} title="显示 RTSP 和 WebRTC 地址" aria-expanded={urlOpenFor === streamKey}><LinkIcon class="w-3 h-3" /> URL</button>
                         {#if channel.is_playing}
                           <button
                             onclick={() => goToLive(channel.stream_id)}
@@ -342,6 +399,12 @@
                           </button>
                         {/if}
                       </div>
+                      </div>
+                      {#if urlOpenFor === streamKey && playURLs}
+                        <div class="mt-3 border-t th-border pt-3">
+                          <PlaybackURLs idPrefix={streamKey} rtspUrl={playURLs.rtsp} webrtcUrl={playURLs.webrtc} />
+                        </div>
+                      {/if}
                     </div>
                   {/each}
                 </div>

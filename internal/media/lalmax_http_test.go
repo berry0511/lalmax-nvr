@@ -403,3 +403,37 @@ func TestIsLalGroupNotFound(t *testing.T) {
 	require.False(t, isLalGroupNotFound(fmt.Errorf("lalmax error 2002: listen fail")))
 	require.False(t, isLalGroupNotFound(nil))
 }
+
+func TestRTPStopRecognizesOnlyExactMediaNotFoundCode(t *testing.T) {
+	for _, tc := range []struct {
+		code int
+		wantNotFound bool
+	}{
+		{0, false}, {1001, false}, {1003, true}, {1004, false}, {2002, false},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || r.URL.Path != "/api/ctrl/stop_rtp_pub" ||
+				r.URL.Query().Get("session_id") != "old-receiver" {
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.String())
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error_code": tc.code, "desp": "rtp pub session not found", "data": nil,
+			})
+		}))
+		engine, err := NewLalmaxHTTP(LalmaxHTTPConfig{BaseURL: srv.URL})
+		require.NoError(t, err)
+		err = engine.StopRTPReceive(context.Background(), "old-receiver")
+		require.Equal(t, tc.wantNotFound, IsRTPReceiveSessionNotFound(err))
+		if tc.code == 0 {
+			require.NoError(t, err)
+		} else {
+			require.Error(t, err)
+			var typed *LalmaxAPIError
+			require.ErrorAs(t, err, &typed)
+			require.Equal(t, tc.code, typed.Code)
+		}
+		srv.Close()
+	}
+	require.False(t, IsRTPReceiveSessionNotFound(fmt.Errorf("lalmax error 1003: rtp pub session not found")))
+	require.False(t, IsRTPReceiveSessionNotFound(fmt.Errorf("backend unavailable: %w", context.DeadlineExceeded)))
+}

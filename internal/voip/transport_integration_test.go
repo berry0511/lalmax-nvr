@@ -210,9 +210,14 @@ func TestSIPCallAcrossTransports(t *testing.T) {
 				t.Fatalf("port leaked: %v", err)
 			}
 			exchangeMessage(bye, 200) // A lost final response must remain replayable.
+			// A nonce is single-use. Request a fresh REGISTER challenge for
+			// unregistration rather than replaying the successful registration.
 			register = makeRequest("REGISTER", 4)
-			authorize(register, challenge, "transport-test")
 			register.SetHeader("Expires", "0")
+			unregisterChallenge := exchangeMessage(register, 401)
+			register = makeRequest("REGISTER", 5)
+			register.SetHeader("Expires", "0")
+			authorize(register, unregisterChallenge, "transport-test")
 			exchangeMessage(register, 200)
 			if s.registrar.IsRegistered("1001") {
 				t.Fatal("unregistration failed")

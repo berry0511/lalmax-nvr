@@ -425,6 +425,7 @@ export type {
 // GB28181 — SIP device management
 export {
   listGB28181Devices,
+  deleteGB28181Device,
   playGB28181Stream,
   stopGB28181Stream,
   controlGB28181PTZ,

@@ -6,6 +6,7 @@
   import { getSnapshotUrl } from '$lib/api/cameras';
   import { captureFrame } from '$lib/freeze-frame';
   import { sendTelemetry } from '$lib/telemetry';
+  import { whepPlaybackReady, whepFirstVideoFrameTimedOut, sdpHasActiveVideoMedia } from '$lib/whep-readiness';
   import type { StreamState } from '$lib/hls-errors';
   import type { ReconnectCoordinator } from '$lib/reconnect-coordinator.svelte';
 
@@ -15,18 +16,32 @@
     expanded = false,
     tabVisible = true,
     whepUrl = '',
+    expectVideo,
   }: {
     cameraId: string;
     cameraName: string;
     expanded?: boolean;
     tabVisible?: boolean;
     whepUrl?: string;
+    expectVideo?: boolean; // false for legitimate audio-only VoIP/standalone streams
   } = $props();
 
   // Reconnection coordinator from Dashboard context
   const coordinator = getContext<ReconnectCoordinator | undefined>('reconnect-coordinator');
   let coordinatedTimer: ReturnType<typeof setTimeout> | null = null;
   let hasActiveCoordinatedReconnect = false;
+  // A queued reconnect has no slot yet; an in-flight failed attempt must
+  // release its granted slot before requesting the next retry.
+  let reconnectSlotGranted = false;
+  let coordinatedAttemptRunning = false;
+  function finishCoordinatedReconnect() {
+    if (!coordinator || !hasActiveCoordinatedReconnect) return;
+    if (reconnectSlotGranted) coordinator.completeReconnect(cameraId);
+    else coordinator.cancelRequest(cameraId);
+    hasActiveCoordinatedReconnect = false;
+    reconnectSlotGranted = false;
+    coordinatedAttemptRunning = false;
+  }
 
   function coordinatedReconnect(reconnectFn: () => void) {
     if (coordinatedTimer) { clearTimeout(coordinatedTimer); coordinatedTimer = null; }
@@ -34,27 +49,53 @@
       reconnectFn();
       return;
     }
+    finishCoordinatedReconnect();
     hasActiveCoordinatedReconnect = true;
+    const execute = () => {
+      coordinatedTimer = null;
+      if (destroyed) { finishCoordinatedReconnect(); return; }
+      coordinatedAttemptRunning = true;
+      reconnectFn();
+    };
     const delay = coordinator.requestReconnect(cameraId, (grantedDelay) => {
-      coordinatedTimer = setTimeout(() => {
-        coordinatedTimer = null;
-        reconnectFn();
-      }, grantedDelay);
+      reconnectSlotGranted = true;
+      coordinatedTimer = setTimeout(execute, grantedDelay);
     });
     if (delay >= 0) {
-      coordinatedTimer = setTimeout(() => {
-        coordinatedTimer = null;
-        reconnectFn();
-      }, delay);
+      reconnectSlotGranted = true;
+      coordinatedTimer = setTimeout(execute, delay);
     }
   }
   type WebrtcState = 'connecting' | 'connected' | 'disconnected' | 'failed';
 
   let streamState: StreamState | 'loading' = $state('loading');
   let webrtcState: WebrtcState = $state('connecting');
+  let hasFirstVideoFrame = $state(false);
+  let negotiatedHasVideo: boolean | null = $state(null);
+  let connectedAt = 0;
+  // Explicit caller knowledge wins; otherwise follow the actual WHEP SDP answer.
+  // Before an answer exists, retain video black-screen detection conservatively.
+  function shouldExpectVideo(): boolean {
+    return expectVideo ?? negotiatedHasVideo ?? true;
+  }
+  let videoFrameCallbackId: number | null = null;
   let videoEl: HTMLVideoElement | undefined = $state();
   let pc: RTCPeerConnection | null = null;
   let sessionUrl: string | null = null;
+  let connectionEpoch = 0;
+  let activeWhepRequest: AbortController | null = null;
+
+  function releaseWhep(url: string) {
+    const auth = getAuthHeader();
+    void fetch(url, { method: 'DELETE', headers: auth ? { Authorization: auth } : {} }).catch(() => {});
+  }
+
+  function whepSessionLocation(response: Response, camera: string): string | null {
+    const location = response.headers.get('Location');
+    if (!location) return null;
+    // Relative Location values are resolved against the request URL, not the dashboard URL.
+    return new URL(location, response.url || new URL(`/api/cameras/${camera}/stream/webrtc`, window.location.href).href).href;
+  }
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectAttempts = 0;
   const maxReconnectAttempts = 5;
@@ -86,6 +127,7 @@ let destroyed = false;
   const SNAPSHOT_REFRESH_MS = 2000;
   const SNAPSHOT_RESTORE_MS = 5 * 60 * 1000;
   let lastTabVisible = true;
+  let disconnectGraceTimer: ReturnType<typeof setTimeout> | null = null;
 
   function captureFreezeFrame() {
     if (frozenFrameUrl) return;
@@ -118,15 +160,19 @@ let destroyed = false;
   });
 
   function updateStreamState() {
+    if (snapshotMode) {
+      streamState = 'snapshot';
+      return;
+    }
     const prevState = streamState;
-    if (webrtcState === 'connected') {
+    if (whepPlaybackReady(webrtcState, shouldExpectVideo(), hasFirstVideoFrame)) {
       streamState = 'playing';
       if (prevState !== 'playing' && frozenFrameUrl) clearFreezeFrame();
       if (coordinator && hasActiveCoordinatedReconnect) {
         coordinator.completeReconnect(cameraId);
         hasActiveCoordinatedReconnect = false;
       }
-    } else if (webrtcState === 'connecting') {
+    } else if (webrtcState === 'connecting' || webrtcState === 'connected') {
       if (prevState === 'playing') captureFreezeFrame();
       streamState = 'buffering';
     } else if (webrtcState === 'disconnected') {
@@ -142,12 +188,42 @@ let destroyed = false;
     updateStreamState();
   });
 
+  // ICE connected only means transport is ready, not that a decodable video
+  // frame has reached the <video>. Prevent "green online but black screen".
+  function markFirstVideoFrame() {
+    if (destroyed || !shouldExpectVideo() || hasFirstVideoFrame || !videoEl) return;
+    if (videoEl.videoWidth === 0 || videoEl.videoHeight === 0) return;
+    hasFirstVideoFrame = true;
+    reconnectAttempts = 0;
+    finishCoordinatedReconnect();
+  }
+
+  function watchFirstVideoFrame(peer: RTCPeerConnection, epoch: number) {
+    if (!videoEl || !shouldExpectVideo() || hasFirstVideoFrame || videoFrameCallbackId !== null) return;
+    const element = videoEl;
+    if ('requestVideoFrameCallback' in element) {
+      videoFrameCallbackId = element.requestVideoFrameCallback(() => {
+        videoFrameCallbackId = null;
+        if (!destroyed && epoch === connectionEpoch && pc === peer) markFirstVideoFrame();
+      });
+    }
+  }
+
   function getBackoffDelay(): number {
     if (reconnectAttempts >= maxReconnectAttempts) return reconnectDelays[reconnectDelays.length - 1];
     return reconnectDelays[reconnectAttempts];
   }
 
   function scheduleReconnect() {
+    // One pending retry per player. Multiple ICE state callbacks must not
+    // schedule concurrent offers or consume extra coordinator slots.
+    if (reconnectTimer || coordinatedTimer) return;
+    if (hasActiveCoordinatedReconnect) {
+      if (!coordinatedAttemptRunning) return; // queued, or not yet started
+      // A granted WHEP attempt failed before ever producing a frame.
+      // Release its slot; otherwise future retries are permanently blocked.
+      finishCoordinatedReconnect();
+    }
     if (reconnectAttempts >= maxReconnectAttempts) {
       enterSnapshotMode();
       return;
@@ -157,6 +233,7 @@ let destroyed = false;
 
     const doReconnect = () => {
       reconnectTimer = null;
+      if (coordinator && hasActiveCoordinatedReconnect) coordinatedAttemptRunning = true;
       destroyPeerConnection();
       initWebRTC();
     };
@@ -166,10 +243,18 @@ let destroyed = false;
       if (coordinatedTimer) { clearTimeout(coordinatedTimer); coordinatedTimer = null; }
       hasActiveCoordinatedReconnect = true;
       const delay = coordinator.requestReconnect(cameraId, (grantedDelay) => {
-        coordinatedTimer = setTimeout(doReconnect, grantedDelay);
+        reconnectSlotGranted = true;
+        coordinatedTimer = setTimeout(() => {
+          coordinatedTimer = null;
+          doReconnect();
+        }, grantedDelay);
       });
       if (delay >= 0) {
-        coordinatedTimer = setTimeout(doReconnect, delay);
+        reconnectSlotGranted = true;
+        coordinatedTimer = setTimeout(() => {
+          coordinatedTimer = null;
+          doReconnect();
+        }, delay);
       }
       return;
     }
@@ -216,6 +301,15 @@ let destroyed = false;
   }
 
   function destroyPeerConnection() {
+    connectionEpoch++;
+    if (videoFrameCallbackId !== null && videoEl && 'cancelVideoFrameCallback' in videoEl) {
+      videoEl.cancelVideoFrameCallback(videoFrameCallbackId);
+    }
+    videoFrameCallbackId = null;
+    hasFirstVideoFrame = false;
+    connectedAt = 0;
+    activeWhepRequest?.abort();
+    activeWhepRequest = null;
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
@@ -225,14 +319,11 @@ let destroyed = false;
       zombieInterval = null;
     }
 
-    // Send DELETE to WHEP session for cleanup
+    if (disconnectGraceTimer) { clearTimeout(disconnectGraceTimer); disconnectGraceTimer = null; }
+
+    // Release the server-side WHEP subscriber before discarding the connection.
     if (sessionUrl) {
-      const url = sessionUrl;
-      const authHeader = getAuthHeader();
-      fetch(url, {
-        method: 'DELETE',
-        headers: authHeader ? { Authorization: authHeader } : {},
-      }).catch(() => {});
+      releaseWhep(sessionUrl);
       sessionUrl = null;
     }
 
@@ -242,20 +333,34 @@ let destroyed = false;
       } catch (e) { console.warn('WebRTC close error:', e); }
       pc = null;
     }
+    // Avoid treating the last frame of an old peer as proof that the next
+    // connection is rendering. A captured freeze frame is handled separately.
+    if (videoEl) videoEl.srcObject = null;
   }
 
   function startZombieDetector() {
     if (zombieInterval) clearInterval(zombieInterval);
-    lastPlaybackTime = Date.now();
+    lastPlaybackTime = videoEl?.currentTime ?? 0;
     zombieCount = 0;
 
     zombieInterval = setInterval(() => {
       if (!videoEl || !pc) return;
       const now = Date.now();
 
-      // Hidden dashboard tabs pause playback. Ignore the resulting lack of
-      // currentTime progress; visibility recovery already rebuilds the peer.
-      if (!tabVisible || document.hidden || videoEl.paused) {
+      // Do not penalize hidden tabs, but detect ICE-connected sessions
+      // which never deliver their FIRST decoded video frame.
+      if (!tabVisible || document.hidden) {
+        lastPlaybackTime = videoEl.currentTime;
+        zombieCount = 0;
+        return;
+      }
+      if (whepFirstVideoFrameTimedOut(connectedAt, now, shouldExpectVideo(), hasFirstVideoFrame, tabVisible && !document.hidden)) {
+        console.warn(`WebRTC connected without first video frame for ${cameraId}, retrying`);
+        sendTelemetry('stream_degradation', cameraId, undefined, { protocol: 'webrtc', reason: 'first_video_frame_timeout' });
+        scheduleReconnect();
+        return;
+      }
+      if (videoEl.paused) {
         lastPlaybackTime = videoEl.currentTime;
         zombieCount = 0;
         return;
@@ -303,6 +408,11 @@ let destroyed = false;
 
     streamState = 'loading';
     webrtcState = 'connecting';
+    hasFirstVideoFrame = false;
+    negotiatedHasVideo = null;
+    connectedAt = 0;
+    const epoch = ++connectionEpoch;
+    const isCurrent = (candidate: RTCPeerConnection) => !destroyed && epoch === connectionEpoch && pc === candidate;
 
     try {
       const iceServers: RTCConfiguration = {
@@ -319,26 +429,49 @@ let destroyed = false;
 
       // Handle incoming tracks
       peerConnection.ontrack = (event) => {
-        if (event.streams && event.streams[0] && videoEl) {
+        if (!isCurrent(peerConnection) || !videoEl) return;
+        // WHEP can deliver streamless tracks (msid omitted). A track is
+        // still valid in that case and must be attached to the video element.
+        if (event.streams[0]) {
           videoEl.srcObject = event.streams[0];
-          videoEl.play().catch(() => {});
+        } else {
+          const current = videoEl.srcObject instanceof MediaStream
+            ? videoEl.srcObject : new MediaStream();
+          if (!current.getTracks().includes(event.track)) current.addTrack(event.track);
+          videoEl.srcObject = current;
         }
+        videoEl.play().catch(() => {});
+        if (event.track.kind === 'video') watchFirstVideoFrame(peerConnection, epoch);
       };
 
       // Handle connection state changes
       peerConnection.onconnectionstatechange = () => {
+        if (!isCurrent(peerConnection)) return;
         const state = peerConnection.connectionState;
         switch (state) {
           case 'connected':
+            if (disconnectGraceTimer) { clearTimeout(disconnectGraceTimer); disconnectGraceTimer = null; }
+            if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+            if (coordinatedTimer) { clearTimeout(coordinatedTimer); coordinatedTimer = null; }
+            finishCoordinatedReconnect();
             webrtcState = 'connected';
-            reconnectAttempts = 0;
+            connectedAt = Date.now();
+            watchFirstVideoFrame(peerConnection, epoch);
+            if (!shouldExpectVideo() || hasFirstVideoFrame) reconnectAttempts = 0;
             startZombieDetector();
             break;
           case 'disconnected':
             webrtcState = 'disconnected';
-            scheduleReconnect();
+            // Allow transient ICE interruptions from background throttling to recover.
+            if (!disconnectGraceTimer) {
+              disconnectGraceTimer = setTimeout(() => {
+                disconnectGraceTimer = null;
+                if (isCurrent(peerConnection) && peerConnection.connectionState === 'disconnected') scheduleReconnect();
+              }, 5000);
+            }
             break;
           case 'failed':
+            if (disconnectGraceTimer) { clearTimeout(disconnectGraceTimer); disconnectGraceTimer = null; }
             webrtcState = 'failed';
             scheduleReconnect();
             break;
@@ -350,7 +483,7 @@ let destroyed = false;
       // Create offer
       const offer = await peerConnection.createOffer();
       await peerConnection.setLocalDescription(offer);
-      if (destroyed) return;
+      if (!isCurrent(peerConnection)) return;
 
       // Wait for ICE gathering to complete
       await new Promise<void>((resolve) => {
@@ -368,7 +501,7 @@ let destroyed = false;
           setTimeout(resolve, 5000);
         }
       });
-      if (destroyed) return;
+      if (!isCurrent(peerConnection)) return;
 
       // Send SDP offer to WHEP endpoint
       const authHeader = getAuthHeader();
@@ -378,7 +511,10 @@ let destroyed = false;
       if (authHeader) headers['Authorization'] = authHeader;
 
       const endpoint = whepUrl || `/api/cameras/${cameraId}/stream/webrtc`;
+      const request = new AbortController();
+      activeWhepRequest = request;
       const response = await fetch(endpoint, {
+        signal: request.signal,
         method: 'POST',
         headers,
         body: peerConnection.localDescription!.sdp,
@@ -388,25 +524,29 @@ let destroyed = false;
         const errorText = await response.text().catch(() => 'Unknown error');
         throw new Error(`WHEP server error: ${response.status} ${errorText}`);
       }
-      if (destroyed) return;
-
-      // Parse Location header for session URL (for DELETE on cleanup)
-      const location = response.headers.get('Location');
-      if (location) {
-        // Make absolute if relative
-        sessionUrl = location.startsWith('/') ? location : `/api/cameras/${cameraId}/stream/webrtc/${location}`;
+      const createdSession = whepSessionLocation(response, cameraId);
+      if (!isCurrent(peerConnection)) {
+        if (createdSession) releaseWhep(createdSession);
+        return;
       }
+      sessionUrl = createdSession;
+      if (activeWhepRequest === request) activeWhepRequest = null;
 
       // Parse SDP answer
       const answerSDP = await response.text();
       if (destroyed) return;
+      // Audio-only streams are valid WHEP sessions. Use negotiated media
+      // capabilities rather than source_type labels to decide whether a frame is required.
+      negotiatedHasVideo = sdpHasActiveVideoMedia(answerSDP);
       const answer = new RTCSessionDescription({
         type: 'answer',
         sdp: answerSDP,
       });
 
+      if (!isCurrent(peerConnection)) return;
       await peerConnection.setRemoteDescription(answer);
     } catch (e) {
+      if (!isCurrent(peerConnection)) return;
       console.warn('WebRTC init failed:', e);
       webrtcState = 'failed';
       scheduleReconnect();
@@ -441,26 +581,15 @@ let destroyed = false;
     };
   });
 
-  // Visibility change handler
-  // Coordinated visibility — pause when tab hidden, resume when visible
-  // Replaces per-player visibilitychange listener; Dashboard owns the signal
+  // Keep WHEP alive across browser tab switches, rather than recreating
+  // the subscriber and causing a black frame on every focus change.
   $effect(() => {
     const visible = tabVisible;
     const becameVisible = visible && !lastTabVisible;
     lastTabVisible = visible;
-
-    if (!visible) {
-      // Tab hidden — close peer connection to release decode resources
-      if (pc && !destroyed) {
-        try { pc.close(); } catch { /* ignore */ }
-        pc = null;
-      }
-    } else if (becameVisible) {
-      // Tab visible — resume: rebuild WebRTC connection
-      if (!destroyed) {
-        stopSnapshotMode();
-        reconnectAttempts = 0;
-        captureFreezeFrame();
+    if (becameVisible && !destroyed) {
+      videoEl?.play().catch(() => {});
+      if (!pc || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
         destroyPeerConnection();
         initWebRTC();
       }
@@ -471,7 +600,7 @@ let destroyed = false;
     destroyed = true;
     stopSnapshotMode();
     if (coordinatedTimer) { clearTimeout(coordinatedTimer); coordinatedTimer = null; }
-    if (coordinator) coordinator.cancelRequest(cameraId);
+    finishCoordinatedReconnect();
     if (freezeClearTimer) { clearTimeout(freezeClearTimer); freezeClearTimer = null; }
     frozenFrameUrl = null;
     destroyPeerConnection();
@@ -552,6 +681,7 @@ let destroyed = false;
       class="w-full h-full object-contain"
       autoplay
       muted={isMuted}
+      onloadeddata={markFirstVideoFrame}
       playsinline
       aria-label="{cameraName} — {dotTitle}"
     >

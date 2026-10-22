@@ -19,6 +19,11 @@ func ingestTestConfig(rtmp, srt, whip bool) *config.Config {
 	cfg.SRT.Enabled = &srt
 	cfg.SRT.Port = 19000
 	cfg.WHIP.Enabled = &whip
+	// Publish URLs are deliberately withheld until stream-scoped credentials
+	// are configured. The harness uses fixed, non-production test tokens.
+	cfg.RTMP.StreamKeys = map[string]string{"room-1": "rtmp-test-key"}
+	cfg.SRT.StreamKeys = map[string]string{"room-1": "srt-test-key"}
+	cfg.WHIP.PublishTokens = map[string]string{"room-1": "whip-test-key", "cam-a": "camera-whip-test-key"}
 	return cfg
 }
 
@@ -59,7 +64,10 @@ func TestCreateStream_ReturnsCopyableIngestURLs(t *testing.T) {
 	require.False(t, created.Managed)
 	require.False(t, created.Active)
 	require.Equal(t, []string{"rtmp", "srt", "whip"}, protocolsOf(created.IngestURLs))
-	require.Equal(t, "srt://192.168.1.8:19000?streamid=#!::h=room-1,m=publish", urlFor(created.IngestURLs, "srt"))
+	require.Contains(t, urlFor(created.IngestURLs, "srt"), "room-1")
+	require.Contains(t, urlFor(created.IngestURLs, "srt"), "srt-test-key")
+	require.Contains(t, urlFor(created.IngestURLs, "rtmp"), "rtmp-test-key")
+	require.Contains(t, urlFor(created.IngestURLs, "whip"), "whip-test-key")
 
 	rr = doRequest(t, h.Routes(), http.MethodGet, "/api/streams?managed=false", nil, "admin", "pass")
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())

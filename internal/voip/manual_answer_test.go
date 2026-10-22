@@ -10,7 +10,7 @@ import (
 	maxvoip "github.com/q191201771/lalmax/voip"
 )
 
-func newManualAnswerServer(t *testing.T) (*Server, chan *maxvoip.PubSession) {
+func newManualAnswerServer(t *testing.T, ringTimeoutMs int) (*Server, chan *maxvoip.PubSession) {
 	t.Helper()
 	probe, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
 	if err != nil {
@@ -19,7 +19,7 @@ func newManualAnswerServer(t *testing.T) (*Server, chan *maxvoip.PubSession) {
 	port := probe.LocalAddr().(*net.UDPAddr).Port
 	_ = probe.Close()
 	added := make(chan *maxvoip.PubSession, 2)
-	s, err := NewServer(ServerConfig{Config: Config{SipListenAddr: "127.0.0.1:0", MediaIP: "127.0.0.1", MediaPortMin: port, MediaPortMax: port, ManualAnswer: true, RingTimeoutMs: 5000},
+	s, err := NewServer(ServerConfig{Config: Config{SipListenAddr: "127.0.0.1:0", MediaIP: "127.0.0.1", MediaPortMin: port, MediaPortMax: port, ManualAnswer: true, RingTimeoutMs: ringTimeoutMs},
 		OnPubSession: func(p *maxvoip.PubSession) error { added <- p; return nil }})
 	if err != nil {
 		t.Fatal(err)
@@ -29,8 +29,7 @@ func newManualAnswerServer(t *testing.T) (*Server, chan *maxvoip.PubSession) {
 }
 
 func TestManualIncomingCallRingTimeoutAndRegistrationStatus(t *testing.T) {
-	s, _ := newManualAnswerServer(t)
-	s.config.RingTimeoutMs = 1000
+	s, _ := newManualAnswerServer(t, 1000)
 	_, exchangePeer := sipPeer(t, s)
 	if response := exchangePeer(request("INVITE", "manual-timeout")); !strings.Contains(response, "180 Ringing") {
 		t.Fatalf("expected ringing before timeout, got %s", response)
@@ -78,7 +77,7 @@ func sipPeer(t *testing.T, s *Server) (*net.UDPConn, func(string) string) {
 }
 
 func TestManualIncomingCallAnswerAndReject(t *testing.T) {
-	s, added := newManualAnswerServer(t)
+	s, added := newManualAnswerServer(t, 5000)
 	peer, exchangePeer := sipPeer(t, s)
 	invite := request("INVITE", "manual-answer")
 	if response := exchangePeer(invite); !strings.Contains(response, "180 Ringing") {

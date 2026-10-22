@@ -89,6 +89,10 @@ type DatabaseTargetConfig struct {
 
 type MediaConfig struct {
 	Mode             string `yaml:"mode"`
+	// HTTPPlayAuthEnabled controls NVR account authentication for direct embedded
+	// lalmax HTTP playback routes (WHEP/HLS/fMP4). Default true.
+	// Publishing and control APIs use separate authentication policies.
+	HTTPPlayAuthEnabled *bool `yaml:"http_play_auth_enabled,omitempty"`
 	LalmaxHTTPAddr   string `yaml:"lalmax_http_addr"`
 	LalmaxPublicURL  string `yaml:"lalmax_public_url"`
 	LalmaxConfigPath string `yaml:"lalmax_config_path"`
@@ -97,10 +101,19 @@ type MediaConfig struct {
 	RTSPPort int `yaml:"rtsp_port,omitempty"`
 	HTTPPort int `yaml:"http_port,omitempty"` // HTTP-FLV port
 	// RTSP server authentication
-	RTSPAuthEnable bool   `yaml:"rtsp_auth_enable,omitempty"` // Enable RTSP server auth (default false)
+	RTSPAuthEnable bool   `yaml:"rtsp_auth_enable,omitempty"` // RTSP Basic/Digest server auth (default false)
+	// RTSPPublishAuthEnabled controls shared auth.publish_tokens on RTSP publishes.
+	// It defaults to true; false skips RTSP publish token checks but still rejects banned streams.
+	RTSPPublishAuthEnabled *bool `yaml:"rtsp_publish_auth_enabled,omitempty"`
 	RTSPAuthMethod int    `yaml:"rtsp_auth_method,omitempty"` // 0=Basic, 1=Digest (default 0)
 	RTSPUsername   string `yaml:"rtsp_username,omitempty"`    // RTSP server username
 	RTSPPassword   string `yaml:"rtsp_password,omitempty"`    // RTSP server password
+}
+
+// RTSPPublishTokenAuthEnabled preserves the current shared-token policy when
+// the option is omitted, including configs loaded before ApplyDefaults.
+func (cfg MediaConfig) RTSPPublishTokenAuthEnabled() bool {
+	return cfg.RTSPPublishAuthEnabled == nil || *cfg.RTSPPublishAuthEnabled
 }
 
 // ValidateRTSPAuth checks that enabled RTSP authentication has usable credentials.
@@ -475,12 +488,19 @@ type SRTConfig struct {
 }
 
 // RTMPConfig configures the RTMP ingest server.
-// RTMP is served by lalmax on its default port (:11935). Each stream ID must
-// have a publish token in StreamKeys; publishers pass it as stream_key.
+// By default RTMP publishers authenticate using per-stream tokens passed as
+// ?stream_key=<token>. Anonymous publishing must be explicitly enabled.
 type RTMPConfig struct {
-	Enabled    *bool             `yaml:"enabled"` // default false
-	Port       int               `yaml:"port,omitempty"`
-	StreamKeys map[string]string `yaml:"stream_keys"` // stream_id → publish token
+	Enabled            *bool             `yaml:"enabled"` // default false
+	Port               int               `yaml:"port,omitempty"`
+	PublishAuthEnabled *bool             `yaml:"publish_auth_enabled,omitempty"` // default true; false allows anonymous RTMP publishing
+	StreamKeys         map[string]string `yaml:"stream_keys"` // stream_id → publish token
+}
+
+// RTMPPublishAuthEnabled preserves the existing fail-closed default even for
+// configs that have not yet applied defaults.
+func (cfg RTMPConfig) RTMPPublishAuthEnabled() bool {
+	return cfg.PublishAuthEnabled == nil || *cfg.PublishAuthEnabled
 }
 
 // WHIPConfig configures WebRTC-HTTP ingest (WHIP).
@@ -527,6 +547,7 @@ type GB28181Config struct {
 	MediaIP         string `yaml:"media_ip"`         // IP address for SDP media reception
 	MediaPort       int    `yaml:"media_port"`       // RTP media port (0=auto/multi-port, >0=single port mode)
 	StandardVersion string `yaml:"standard_version"` // GB28181 standard version: 2016 or 2022
+	WHEPOnDemandEnabled bool `yaml:"whep_on_demand_enabled"` // Opt in to WHEP-triggered SIP INVITE for known channels
 }
 
 // HealthConfig configures the camera health monitoring system.
@@ -825,8 +846,8 @@ func Validate(cfg *Config) error {
 	// Validate segment_duration
 	if dur, err := time.ParseDuration(cfg.Storage.SegmentDuration); err != nil {
 		return fmt.Errorf("storage.segment_duration invalid: %w", err)
-	} else if dur > 30*time.Second {
-		return fmt.Errorf("storage.segment_duration must be <= 30s on RPi 3B, got %s", cfg.Storage.SegmentDuration)
+	} else if dur < time.Second || dur > 30*time.Minute {
+		return fmt.Errorf("storage.segment_duration must be between 1s and 30m, got %s", cfg.Storage.SegmentDuration)
 	}
 	if cfg.Media.Mode != "embedded" && cfg.Media.Mode != "http" {
 		return fmt.Errorf("media.mode invalid: %s (must be embedded/http)", cfg.Media.Mode)
@@ -1132,6 +1153,14 @@ func (cfg *Config) ApplyDefaults() {
 	if strings.TrimSpace(cfg.Media.Mode) == "" {
 		cfg.Media.Mode = "embedded"
 	}
+	if cfg.Media.HTTPPlayAuthEnabled == nil {
+		enabled := true
+		cfg.Media.HTTPPlayAuthEnabled = &enabled
+	}
+	if cfg.Media.RTSPPublishAuthEnabled == nil {
+		enabled := true
+		cfg.Media.RTSPPublishAuthEnabled = &enabled
+	}
 	if strings.TrimSpace(cfg.Media.LalmaxHTTPAddr) == "" {
 		cfg.Media.LalmaxHTTPAddr = DefaultLalmaxHTTPAddr
 	}
@@ -1386,6 +1415,10 @@ func (cfg *Config) ApplyDefaults() {
 	}
 	if cfg.RTMP.Port == 0 {
 		cfg.RTMP.Port = DefaultLalRTMPPort
+	}
+	if cfg.RTMP.PublishAuthEnabled == nil {
+		enabled := true
+		cfg.RTMP.PublishAuthEnabled = &enabled
 	}
 	if cfg.RTMP.StreamKeys == nil {
 		cfg.RTMP.StreamKeys = make(map[string]string)

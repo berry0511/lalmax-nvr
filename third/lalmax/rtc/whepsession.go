@@ -2,16 +2,15 @@ package rtc
 
 import (
 	"bytes"
-	"context"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	maxlogic "github.com/q191201771/lalmax/logic"
-	"github.com/smallnest/chanx"
 
 	"github.com/gofrs/uuid"
 	"github.com/pion/rtp"
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 	"github.com/q191201771/lal/pkg/avc"
 	"github.com/q191201771/lal/pkg/base"
@@ -33,16 +32,59 @@ type whepSession struct {
 	audioSender    *webrtc.RTPSender
 	videopacker    *Packer
 	audiopacker    *Packer
-	msgChan        *chanx.UnboundedChan[base.RtmpMsg]
+	msgChan        chan base.RtmpMsg
+	streamID       string
+	onRunEnd       func()
+	closeOnce      sync.Once
+	closing        atomic.Bool
+	replayPending  atomic.Bool // true while the viewer plays a private GOP snapshot
+	awaitKeyframe  atomic.Bool // drop intervening live deltas until a fresh keyframe
+	done           chan struct{} // allow close to interrupt snapshot playback
 	closeChan      chan bool
 	connectedChan  chan struct{}
 	connectedOnce  sync.Once
 	paceBaseDts    uint32
 	paceBaseAt     time.Time
 	paceStarted    bool
-	replayingCache bool
 	wroteBytes     atomic.Uint64
+	videoPackets   atomic.Uint64
+	videoWriteErrs atomic.Uint64
+	pliRequests    atomic.Uint64
+	nackRequests   atomic.Uint64
 	remoteAddr     atomic.Value
+}
+
+// WebRTC viewers are unreliable network consumers; media queue memory must
+// never grow without bound. Disconnect slow consumers instead of stalling
+// publisher dispatch or silently accumulating a multi-minute backlog.
+func boundedWHEPQueueSize(requested int) int {
+	if requested <= 0 { return 256 }
+	if requested > 2048 { return 2048 }
+	return requested
+}
+
+func (conn *whepSession) requestClose() {
+	if conn == nil { return }
+	conn.closeOnce.Do(func() {
+		conn.closing.Store(true)
+		if conn.done != nil { close(conn.done) }
+		select {
+		case conn.closeChan <- true:
+		default:
+		}
+	})
+}
+
+// enqueue must never block the publisher's OnMsg path while Group holds a
+// subscriber's writeMux. Cached GOPs bypass this channel entirely.
+func (conn *whepSession) enqueue(msg base.RtmpMsg) {
+	if conn == nil || conn.closing.Load() { return }
+	select {
+	case conn.msgChan <- msg:
+	default:
+		nazalog.Warnf("WHEP subscriber too slow; disconnecting. id=%s stream=%s", conn.subscriberId, conn.streamID)
+		conn.requestClose()
+	}
 }
 
 func NewWhepSession(appName, streamid string, writeChanSize int, pc *peerConnection, lalServer logic.ILalServer) *whepSession {
@@ -58,8 +100,10 @@ func NewWhepSession(appName, streamid string, writeChanSize int, pc *peerConnect
 		pc:            pc,
 		lalServer:     lalServer,
 		subscriberId:  u.String(),
-		msgChan:       chanx.NewUnboundedChan[base.RtmpMsg](context.Background(), writeChanSize),
+		msgChan:       make(chan base.RtmpMsg, boundedWHEPQueueSize(writeChanSize)),
+		streamID:      streamid,
 		closeChan:     make(chan bool, 2),
+		done:          make(chan struct{}),
 		connectedChan: make(chan struct{}, 1),
 	}
 }
@@ -81,6 +125,7 @@ func (conn *whepSession) GetAnswerSDP(offer string) (sdp string) {
 				nazalog.Error(err)
 				return
 			}
+			go conn.observeVideoRTCP(conn.videoSender)
 
 			conn.videopacker = NewPacker(PacketH264, videoHeader.Payload)
 		} else if videoHeader.IsHevcKeySeqHeader() {
@@ -95,6 +140,7 @@ func (conn *whepSession) GetAnswerSDP(offer string) (sdp string) {
 				nazalog.Error(err)
 				return
 			}
+			go conn.observeVideoRTCP(conn.videoSender)
 
 			conn.videopacker = NewPacker(PacketHEVC, videoHeader.Payload)
 		}
@@ -170,6 +216,8 @@ func (conn *whepSession) GetAnswerSDP(offer string) (sdp string) {
 }
 
 func (conn *whepSession) Run() {
+	defer conn.Close()
+	if conn.onRunEnd != nil { defer conn.onRunEnd() }
 	conn.pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		nazalog.Info("peer connection state: ", state.String())
 
@@ -181,7 +229,7 @@ func (conn *whepSession) Run() {
 		case webrtc.PeerConnectionStateFailed:
 			fallthrough
 		case webrtc.PeerConnectionStateClosed:
-			conn.closeChan <- true
+			conn.requestClose()
 		}
 	})
 
@@ -192,10 +240,19 @@ func (conn *whepSession) Run() {
 	for {
 		select {
 		case <-conn.connectedChan:
-			conn.group.AddSubscriber(maxlogic.SubscriberInfo{
+			// Register with an atomic GOP snapshot; never replay while
+			// holding Group's per-subscriber delivery lock.
+			conn.replayPending.Store(true)
+			snapshot, ok := conn.group.AddSubscriberWithSnapshot(maxlogic.SubscriberInfo{
 				SubscriberID: conn.subscriberId,
 				Protocol:     maxlogic.SubscriberProtocolWHEP,
 			}, conn)
+			if !ok { return }
+			// Live frames arriving during replay are skipped, not queued
+			// or blocked. Resume only on a fresh video keyframe.
+			conn.playCachedSnapshot(snapshot)
+			conn.awaitKeyframe.Store(conn.videoTrack != nil)
+			conn.replayPending.Store(false)
 			goto connected
 		case <-conn.closeChan:
 			nazalog.Info("RemoveConsumer, connid:", conn.subscriberId)
@@ -205,23 +262,14 @@ func (conn *whepSession) Run() {
 	}
 
 connected:
+	statsTicker := time.NewTicker(15 * time.Second)
+	defer statsTicker.Stop()
 	for {
 		select {
-		case msg := <-conn.msgChan.Out:
-			if msg.Header.MsgTypeId == 0 {
-				conn.replayingCache = false
-				conn.paceBaseAt = time.Time{}
-				conn.paceStarted = false
-				continue
-			}
-			if conn.replayingCache {
-				conn.paceReplayMsg(msg)
-			}
-			if msg.Header.MsgTypeId == base.RtmpTypeIdAudio && conn.audioTrack != nil {
-				conn.sendAudio(msg)
-			} else if msg.Header.MsgTypeId == base.RtmpTypeIdVideo && conn.videoTrack != nil {
-				conn.sendVideo(msg)
-			}
+		case msg := <-conn.msgChan:
+			conn.sendMediaMessage(msg, false)
+		case <-statsTicker.C:
+			nazalog.Infof("WHEP video stats subscriber=%s rtp_packets=%d write_errors=%d pli=%d nack=%d", conn.subscriberId, conn.videoPackets.Load(), conn.videoWriteErrs.Load(), conn.pliRequests.Load(), conn.nackRequests.Load())
 		case <-conn.closeChan:
 			nazalog.Info("RemoveConsumer, connid:", conn.subscriberId)
 			conn.group.RemoveSubscriber(conn.subscriberId)
@@ -237,15 +285,42 @@ func (conn *whepSession) signalConnected() {
 	})
 }
 
-func (conn *whepSession) OnReplayStart() {
-	conn.replayingCache = true
+// playCachedSnapshot processes a bounded-by-GOP-cache snapshot in the
+// viewer's own Run goroutine. Its pacing can never hold Group.writeMux or
+// block any publisher/recorder. Close interrupts the replay promptly.
+func (conn *whepSession) playCachedSnapshot(snapshot []base.RtmpMsg) {
+	conn.paceBaseAt = time.Time{}
+	conn.paceBaseDts = 0
+	conn.paceStarted = false
+	for _, msg := range snapshot {
+		if conn.closing.Load() { break }
+		if conn.done != nil {
+			select {
+			case <-conn.done:
+				return
+			default:
+			}
+		}
+		conn.sendMediaMessage(msg, true)
+	}
 	conn.paceBaseAt = time.Time{}
 	conn.paceBaseDts = 0
 	conn.paceStarted = false
 }
 
-func (conn *whepSession) OnReplayStop() {
-	conn.msgChan.In <- base.RtmpMsg{}
+// sendMediaMessage is owned by the viewer's Run goroutine, including codec
+// changes and RTP packetization. It never runs from the publisher's OnMsg.
+func (conn *whepSession) sendMediaMessage(msg base.RtmpMsg, cached bool) {
+	if msg.IsVideoKeySeqHeader() {
+		conn.updateVideoCodec(msg)
+		return
+	}
+	if cached { conn.paceReplayMsg(msg) }
+	if msg.Header.MsgTypeId == base.RtmpTypeIdAudio && conn.audioTrack != nil {
+		conn.sendAudio(msg)
+	} else if msg.Header.MsgTypeId == base.RtmpTypeIdVideo && conn.videoTrack != nil {
+		conn.sendVideo(msg)
+	}
 }
 
 func (conn *whepSession) paceReplayMsg(msg base.RtmpMsg) {
@@ -281,26 +356,40 @@ func (conn *whepSession) paceReplayMsg(msg base.RtmpMsg) {
 }
 
 func (conn *whepSession) OnMsg(msg base.RtmpMsg) {
+	// OnMsg is invoked under Group's per-subscriber writeMux. It must
+	// never wait for cached replay pacing or a full viewer queue.
+	if conn.replayPending.Load() || conn.closing.Load() { return }
 	switch msg.Header.MsgTypeId {
 	case base.RtmpTypeIdMetadata:
 		return
 	case base.RtmpTypeIdAudio:
-		if conn.audioTrack != nil {
-			conn.msgChan.In <- msg
+		if conn.audioTrack != nil && !conn.awaitKeyframe.Load() {
+			conn.enqueue(msg)
 		}
 	case base.RtmpTypeIdVideo:
 		if msg.IsVideoKeySeqHeader() {
-			conn.updateVideoCodec(msg)
+			conn.enqueue(msg)
 			return
 		}
-		if conn.videoTrack != nil {
-			conn.msgChan.In <- msg
+		if conn.videoTrack == nil { return }
+		if conn.awaitKeyframe.Load() {
+			if !msg.IsVideoKeyNalu() { return }
+			// Cached GOP replay may have spanned a codec parameter change.
+			// Before the first fresh keyframe, forward the latest sequence
+			// header so the decoder does not resume with stale SPS/PPS/VPS.
+			if conn.group != nil {
+				if header := conn.group.GetVideoSeqHeaderMsg(); header != nil {
+					conn.enqueue(*header)
+				}
+			}
+			conn.awaitKeyframe.Store(false)
 		}
+		conn.enqueue(msg)
 	}
 }
 
 func (conn *whepSession) OnStop() {
-	conn.closeChan <- true
+	conn.requestClose()
 }
 
 func (conn *whepSession) sendAudio(msg base.RtmpMsg) {
@@ -320,6 +409,22 @@ func (conn *whepSession) sendAudio(msg base.RtmpMsg) {
 	}
 }
 
+// Read RTCP feedback to diagnose browser keyframe/retransmission requests.
+func (conn *whepSession) observeVideoRTCP(sender *webrtc.RTPSender) {
+	for {
+		packets, _, err := sender.ReadRTCP()
+		if err != nil { return }
+		for _, packet := range packets {
+			switch feedback := packet.(type) {
+			case *rtcp.PictureLossIndication:
+				conn.pliRequests.Add(1)
+			case *rtcp.TransportLayerNack:
+				conn.nackRequests.Add(uint64(len(feedback.Nacks)))
+			}
+		}
+	}
+}
+
 func (conn *whepSession) sendVideo(msg base.RtmpMsg) {
 	if conn.videopacker != nil {
 
@@ -331,8 +436,10 @@ func (conn *whepSession) sendVideo(msg base.RtmpMsg) {
 
 		for _, pkt := range pkts {
 			if err := conn.videoTrack.WriteRTP(pkt); err != nil {
+				conn.videoWriteErrs.Add(1)
 				continue
 			}
+			conn.videoPackets.Add(1)
 			conn.recordSentRTP(pkt)
 		}
 	}
@@ -378,6 +485,7 @@ func (conn *whepSession) updateVideoCodec(msg base.RtmpMsg) {
 }
 
 func (conn *whepSession) Close() {
+	conn.requestClose()
 	if conn.pc != nil {
 		conn.pc.Close()
 	}

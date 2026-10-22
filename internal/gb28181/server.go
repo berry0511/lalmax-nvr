@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/emiago/sipgo"
@@ -23,7 +24,12 @@ type Server struct {
 	cfg       *Config
 	db        storage.GB28181Repository
 	store     *DeviceStore
+	ctx       context.Context
 	cancel    context.CancelFunc
+	backgroundWG sync.WaitGroup
+	udpListener net.PacketConn
+	tcpListener net.Listener
+	stopOnce sync.Once
 	platforms *PlatformManager
 	broadcast *BroadcastManager
 	talk      *TalkManager
@@ -32,8 +38,19 @@ type Server struct {
 	hub       *WSHub
 }
 
-// NewServer creates and starts a GB28181 SIP server.
+// NewServer is the compatibility constructor. New integration code should
+// use NewServerChecked to propagate listener bind failures to its caller.
 func NewServer(cfg *Config, mediaEngine media.Engine, db storage.GB28181Repository) (*Server, func()) {
+	s, err := NewServerChecked(cfg, mediaEngine, db)
+	if err != nil {
+		slog.Error("failed to create GB28181 SIP server", "error", err)
+		return nil, func() {}
+	}
+	return s, s.Stop
+}
+
+// NewServerChecked binds UDP and TCP before reporting the SIP service ready.
+func NewServerChecked(cfg *Config, mediaEngine media.Engine, db storage.GB28181Repository) (*Server, error) {
 	hub := NewWSHub()
 	store := NewDeviceStore(db, hub)
 
@@ -53,14 +70,14 @@ func NewServer(cfg *Config, mediaEngine media.Engine, db storage.GB28181Reposito
 	)
 	if err != nil {
 		slog.Error("failed to create SIP UA", "error", err)
-		return nil, func() {}
+		return nil, fmt.Errorf("create SIP transport: %w", err)
 	}
 
 	srv, err := sipgo.NewServer(ua)
 	if err != nil {
 		slog.Error("failed to create SIP server", "error", err)
 		ua.Close()
-		return nil, func() {}
+		return nil, fmt.Errorf("create SIP transport: %w", err)
 	}
 
 	client, err := sipgo.NewClient(ua, sipgo.WithClientHostname(sipHost))
@@ -68,7 +85,7 @@ func NewServer(cfg *Config, mediaEngine media.Engine, db storage.GB28181Reposito
 		slog.Error("failed to create SIP client", "error", err)
 		srv.Close()
 		ua.Close()
-		return nil, func() {}
+		return nil, fmt.Errorf("create SIP transport: %w", err)
 	}
 
 	s := &Server{
@@ -100,28 +117,46 @@ func NewServer(cfg *Config, mediaEngine media.Engine, db storage.GB28181Reposito
 	srv.OnInvite(s.handlerInvite)
 	srv.OnAck(s.handlerAck)
 
+	// Bind both transports synchronously: a port conflict is a startup
+	// failure, not a silent partially functioning SIP service.
+	addr := fmt.Sprintf("0.0.0.0:%d", cfg.Port)
+	udpListener, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		_ = client.Close()
+		_ = srv.Close()
+		_ = ua.Close()
+		return nil, fmt.Errorf("bind GB28181 SIP UDP %s: %w", addr, err)
+	}
+	tcpListener, err := net.Listen("tcp", addr)
+	if err != nil {
+		_ = udpListener.Close()
+		_ = client.Close()
+		_ = srv.Close()
+		_ = ua.Close()
+		return nil, fmt.Errorf("bind GB28181 SIP TCP %s: %w", addr, err)
+	}
+	s.udpListener = udpListener
+	s.tcpListener = tcpListener
+
 	ctx, cancel := context.WithCancel(context.Background())
+	s.ctx = ctx
 	s.cancel = cancel
 
+	slog.Info("GB28181 SIP listeners bound", "udp", udpListener.LocalAddr(), "tcp", tcpListener.Addr())
 	go func() {
-		addr := fmt.Sprintf("0.0.0.0:%d", cfg.Port)
-		slog.Info("GB28181 SIP UDP server starting", "addr", addr)
-		if err := srv.ListenAndServe(ctx, "udp", addr); err != nil {
+		if err := srv.ServeUDP(udpListener); err != nil && ctx.Err() == nil {
 			slog.Error("SIP UDP listener error", "error", err)
 		}
 	}()
 	go func() {
-		addr := fmt.Sprintf("0.0.0.0:%d", cfg.Port)
-		slog.Info("GB28181 SIP TCP server starting", "addr", addr)
-		if err := srv.ListenAndServe(ctx, "tcp", addr); err != nil {
+		if err := srv.ServeTCP(tcpListener); err != nil && ctx.Err() == nil {
 			slog.Error("SIP TCP listener error", "error", err)
-		} else {
-			slog.Info("GB28181 SIP TCP server stopped")
 		}
 	}()
-	go s.startTickerCheck()
-	go s.hub.Run()
-	go s.startChannelMissingScan()
+	s.backgroundWG.Add(3)
+	go func() { defer s.backgroundWG.Done(); s.startTickerCheck() }()
+	go func() { defer s.backgroundWG.Done(); s.hub.Run() }()
+	go func() { defer s.backgroundWG.Done(); s.startChannelMissingScan() }()
 
 	// Load upstream platforms
 	go func() {
@@ -130,7 +165,7 @@ func NewServer(cfg *Config, mediaEngine media.Engine, db storage.GB28181Reposito
 		}
 	}()
 
-	return s, s.Stop
+	return s, nil
 }
 
 // startTickerCheck periodically checks for offline devices via heartbeat timeout.
@@ -138,7 +173,13 @@ func (s *Server) startTickerCheck() {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if s.ctx.Err() != nil { return }
 		now := time.Now()
 		s.store.RangeDevices(func(key string, dev *Device) bool {
 			if !dev.IsOnline {
@@ -179,14 +220,21 @@ func (s *Server) startChannelMissingScan() {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		s.scanMissingChannels()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			if s.ctx.Err() != nil { return }
+			s.scanMissingChannels()
+		}
 	}
 }
 
 // scanMissingChannels checks for channels with high missing_count and marks them offline.
 func (s *Server) scanMissingChannels() {
-	ctx := context.Background()
+	ctx := s.ctx
+	if ctx == nil { ctx = context.Background() }
 
 	// 查询 missing_count >= 3 的通道
 	channels, err := s.db.ListMissingChannels(ctx, 3)
@@ -235,6 +283,11 @@ func (s *Server) QueryCatalog(deviceID string) error {
 // Play starts a GB28181 play session.
 func (s *Server) Play(in *PlayInput) (string, error) {
 	return s.gb.Play(in)
+}
+
+// EnsurePlay starts a session if absent, or reuses the existing one.
+func (s *Server) EnsurePlay(in *PlayInput) (string, error) {
+	return s.gb.EnsurePlay(in)
 }
 
 // StopPlay stops a GB28181 play session.
@@ -626,10 +679,16 @@ func (s *Server) ListDevices() []map[string]interface{} {
 
 // Stop stops the SIP server.
 func (s *Server) Stop() {
+	s.stopOnce.Do(func() {
 	slog.Info("[SIP] stopping GB28181 server")
 	if s.cancel != nil {
 		s.cancel()
 	}
+	if s.hub != nil { s.hub.Stop() }
+	if s.udpListener != nil { _ = s.udpListener.Close() }
+	if s.tcpListener != nil { _ = s.tcpListener.Close() }
+	// Wait for canceled background scans and WebSocket pumps before disposing the SIP dependencies.
+	s.backgroundWG.Wait()
 	// Stop platform manager
 	if s.platforms != nil {
 		s.platforms.mu.Lock()
@@ -654,6 +713,7 @@ func (s *Server) Stop() {
 		s.ua.Close()
 	}
 	slog.Info("[SIP] GB28181 server stopped")
+	})
 }
 
 // resolveHost resolves a hostname to IP address.

@@ -2,9 +2,12 @@ package storage
 
 import (
 	"context"
+	"encoding/hex"
+	"github.com/google/uuid"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -41,9 +44,50 @@ func (m *Manager) RootDir() string {
 	return m.rootDir
 }
 
+// recordingDiskName maps arbitrary camera IDs to portable, reversible file names.
+// Existing simple ASCII IDs keep their historical on-disk layout.
+// The reserved id~ prefix prevents collisions with encoded IDs.
+func recordingDiskName(id string) string {
+	valid := len(id) > 0 && !strings.HasPrefix(id, "id~")
+	for _, c := range id {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+			valid = false
+			break
+		}
+	}
+	// Windows reserves device names even without an extension.
+	upper := strings.ToUpper(id)
+	switch upper {
+	case "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9":
+		valid = false
+	}
+	if valid {
+		return id
+	}
+	return "id~" + hex.EncodeToString([]byte(id))
+}
+
+func originalRecordingID(diskName string) (string, bool) {
+	if !strings.HasPrefix(diskName, "id~") {
+		return diskName, true
+	}
+	decoded, err := hex.DecodeString(strings.TrimPrefix(diskName, "id~"))
+	return string(decoded), err == nil && len(decoded) > 0
+}
+
+// CameraDirPath is the exact encoded recording directory for a camera ID.
+func (m *Manager) CameraDirPath(cameraID string) string {
+	return filepath.Join(m.rootDir, recordingDiskName(cameraID))
+}
+
+// CameraRecordingPrefix matches names emitted by CreateSegment for a camera.
+func (m *Manager) CameraRecordingPrefix(cameraID string) string {
+	return recordingDiskName(cameraID) + "_"
+}
+
 // EnsureCameraDir creates the directory for a camera if it doesn't exist.
 func (m *Manager) EnsureCameraDir(cameraID string) error {
-	dir := filepath.Join(m.rootDir, cameraID)
+	dir := filepath.Join(m.rootDir, recordingDiskName(cameraID))
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("storage: failed to create camera dir %q: %w", dir, err)
 	}
@@ -59,14 +103,14 @@ func (m *Manager) CreateSegment(cameraID string, format string) (tempPath string
 		return "", "", err
 	}
 
-	cameraDir := filepath.Join(m.rootDir, cameraID)
+	cameraDir := filepath.Join(m.rootDir, recordingDiskName(cameraID))
 	now := time.Now().Format("20060102_150405")
-	uuid := fmt.Sprintf("%d", time.Now().UnixNano())
+	segmentID := uuid.NewString()
 
 	switch strings.ToLower(format) {
 	case "h264", "h265", "aac", "g711", "opus":
-		tempPath = filepath.Join(cameraDir, uuid+".tmp")
-		finalPath = filepath.Join(cameraDir, fmt.Sprintf("%s_%s_%s.mp4", cameraID, now, uuid))
+		tempPath = filepath.Join(cameraDir, segmentID+".tmp")
+		finalPath = filepath.Join(cameraDir, fmt.Sprintf("%s_%s_%s.mp4", recordingDiskName(cameraID), now, segmentID))
 		f, err := os.Create(tempPath)
 		if err != nil {
 			return "", "", fmt.Errorf("storage: failed to create temp file: %w", err)
@@ -74,8 +118,8 @@ func (m *Manager) CreateSegment(cameraID string, format string) (tempPath string
 		f.Close()
 
 	case "mjpeg":
-		tempPath = filepath.Join(cameraDir, uuid+".tmp")
-		finalPath = filepath.Join(cameraDir, fmt.Sprintf("%s_%s_%s", cameraID, now, uuid))
+		tempPath = filepath.Join(cameraDir, segmentID+".tmp")
+		finalPath = filepath.Join(cameraDir, fmt.Sprintf("%s_%s_%s", recordingDiskName(cameraID), now, segmentID))
 
 		if err := os.MkdirAll(tempPath, 0755); err != nil {
 			return "", "", fmt.Errorf("storage: failed to create temp dir: %w", err)
@@ -97,16 +141,22 @@ func (m *Manager) CloseSegment(tempPath, finalPath string) error {
 	}
 
 	if info.IsDir() {
-		// Sync the directory for MJPEG
-		dirFd, err := os.Open(tempPath)
-		if err != nil {
-			return fmt.Errorf("storage: cannot open temp dir for sync: %w", err)
+		// Windows does not support Sync on directory handles opened by os.Open.
+		// The individual JPEG writes are closed before the directory rename.
+		// On Unix, retain the directory fsync for crash durability.
+		if runtime.GOOS != "windows" {
+			dirFd, err := os.Open(tempPath)
+			if err != nil {
+				return fmt.Errorf("storage: cannot open temp dir for sync: %w", err)
+			}
+			if err := dirFd.Sync(); err != nil {
+				dirFd.Close()
+				return fmt.Errorf("storage: failed to sync temp dir: %w", err)
+			}
+			if err := dirFd.Close(); err != nil {
+				return fmt.Errorf("storage: failed to close temp dir: %w", err)
+			}
 		}
-		if err := dirFd.Sync(); err != nil {
-			dirFd.Close()
-			return fmt.Errorf("storage: failed to sync temp dir: %w", err)
-		}
-		dirFd.Close()
 
 		// Atomic rename of directory
 		if err := os.Rename(tempPath, finalPath); err != nil {
@@ -173,7 +223,7 @@ func (m *Manager) WriteFrame(tempPath string, data []byte) (int, error) {
 
 // ListFiles lists all recording files (non-.tmp) for a camera.
 func (m *Manager) ListFiles(cameraID string) ([]string, error) {
-	cameraDir := filepath.Join(m.rootDir, cameraID)
+	cameraDir := filepath.Join(m.rootDir, recordingDiskName(cameraID))
 
 	entries, err := os.ReadDir(cameraDir)
 	if err != nil {
@@ -194,7 +244,7 @@ func (m *Manager) ListFiles(cameraID string) ([]string, error) {
 
 // ListCameraDirEntries returns all entries in a camera's storage directory.
 func (m *Manager) ListCameraDirEntries(cameraID string) ([]os.DirEntry, error) {
-	cameraDir := filepath.Join(m.rootDir, cameraID)
+	cameraDir := filepath.Join(m.rootDir, recordingDiskName(cameraID))
 	entries, err := os.ReadDir(cameraDir)
 	if err != nil {
 		return nil, fmt.Errorf("storage: cannot read camera dir %q: %w", cameraID, err)
@@ -221,7 +271,7 @@ func (m *Manager) DeleteFile(path string) error {
 
 // DeleteCameraDir removes the entire directory for a camera.
 func (m *Manager) DeleteCameraDir(cameraID string) error {
-	dir := filepath.Join(m.rootDir, cameraID)
+	dir := filepath.Join(m.rootDir, recordingDiskName(cameraID))
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("storage: failed to remove camera dir %q: %w", dir, err)
 	}
@@ -298,7 +348,8 @@ func (m *Manager) ReconcileOrphanedFiles(ctx context.Context, db *DB, cameraIDs 
 			continue
 		}
 		dirName := entry.Name()
-		if skippedDirs[dirName] || !cameraIDs[dirName] {
+		originalID, validID := originalRecordingID(dirName)
+		if skippedDirs[dirName] || !validID || !cameraIDs[originalID] {
 			continue
 		}
 
@@ -373,7 +424,7 @@ func (m *Manager) ReconcileOrphanedFiles(ctx context.Context, db *DB, cameraIDs 
 
 			orphans = append(orphans, model.Recording{
 				ID:         nanoStr,
-				CameraID:   dirName,
+				CameraID:   originalID,
 				FilePath:   filepath.Join(m.rootDir, dirName, name),
 				Format:     format,
 				StartedAt:  startedAt,

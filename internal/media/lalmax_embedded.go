@@ -27,15 +27,16 @@ import (
 )
 
 type EmbeddedLalmaxConfig struct {
-	HTTPAddr    string
-	PublicURL   string
-	ConfigPath  string
-	RTMPPort    int
-	RTSPPort    int
-	HTTPPort    int
-	RTMPEnabled bool
-	SRTPort     int
-	SRTEnabled  bool
+	HTTPAddr          string
+	PublicURL         string
+	ConfigPath        string
+	InternalAuthToken string // 仅供 NVR 内部访问 lalmax 控制 API
+	RTMPPort          int
+	RTSPPort          int
+	HTTPPort          int
+	RTMPEnabled       bool
+	SRTPort           int
+	SRTEnabled        bool
 	// lal (TS HLS) settings
 	HLSEnabled            bool
 	LalFragmentDurationMs int
@@ -51,6 +52,7 @@ type EmbeddedLalmaxConfig struct {
 	HLSIdleTimeoutMs      int
 	// RTSP server auth
 	RTSPAuthEnable bool
+	RTSPDisableNativeAuth bool // explicit opt-out; do not overwrite legacy JSON auth by default
 	RTSPAuthMethod int
 	RTSPUsername   string
 	RTSPPassword   string
@@ -70,6 +72,15 @@ type EmbeddedLalmax struct {
 	httpEngine       *LalmaxHTTP
 	svrOpts          []lalmaxserver.LalMaxServerOption
 	jt1078Authorizer jt1078.StreamAuthorizer
+	// Protected by lifecycleMu; retained and rebound when a new LalMaxServer
+	// replaces the old instance during an embedded media restart.
+	hookPlugins map[string]*embeddedHookPlugin
+}
+
+type embeddedHookPlugin struct {
+	plugin lalmaxserver.HookPlugin
+	options lalmaxserver.HookPluginOptions
+	cancel func()
 }
 
 func applyEmbeddedPortDefaults(cfg *EmbeddedLalmaxConfig) {
@@ -143,11 +154,12 @@ func NewEmbeddedLalmax(cfg EmbeddedLalmaxConfig, svrOpts ...lalmaxserver.LalMaxS
 	}
 	applyEmbeddedPortDefaults(&cfg)
 	httpEngine, err := NewLalmaxHTTP(LalmaxHTTPConfig{
-		BaseURL:   cfg.HTTPAddr,
-		PublicURL: firstNonEmpty(cfg.PublicURL, cfg.HTTPAddr),
-		RTMPPort:  cfg.RTMPPort,
-		RTSPPort:  cfg.RTSPPort,
-		HTTPPort:  cfg.HTTPPort,
+		BaseURL:           cfg.HTTPAddr,
+		PublicURL:         firstNonEmpty(cfg.PublicURL, cfg.HTTPAddr),
+		InternalAuthToken: cfg.InternalAuthToken,
+		RTMPPort:          cfg.RTMPPort,
+		RTSPPort:          cfg.RTSPPort,
+		HTTPPort:          cfg.HTTPPort,
 	})
 	if err != nil {
 		return nil, err
@@ -194,13 +206,65 @@ func lalLogHook() nazalog.HookBackendOutFn {
 // RegisterHookPlugin registers a hook plugin with the embedded lalmax server.
 // Must be called after NewEmbeddedLalmax and before Start.
 func (e *EmbeddedLalmax) RegisterHookPlugin(plugin lalmaxserver.HookPlugin, options lalmaxserver.HookPluginOptions) (func(), error) {
+	if plugin == nil || plugin.Name() == "" {
+		return nil, fmt.Errorf("embedded hook plugin requires a name")
+	}
+	e.lifecycleMu.Lock()
+	defer e.lifecycleMu.Unlock()
 	e.mu.Lock()
 	server := e.server
 	e.mu.Unlock()
 	if server == nil {
 		return nil, fmt.Errorf("embedded lalmax server is nil")
 	}
-	return server.RegisterHookPlugin(plugin, options)
+	if e.hookPlugins == nil {
+		e.hookPlugins = make(map[string]*embeddedHookPlugin)
+	}
+	name := plugin.Name()
+	if _, exists := e.hookPlugins[name]; exists {
+		return nil, fmt.Errorf("embedded hook plugin already registered: %s", name)
+	}
+	cancel, err := server.RegisterHookPlugin(plugin, options)
+	if err != nil {
+		return nil, err
+	}
+	reg := &embeddedHookPlugin{plugin: plugin, options: options, cancel: cancel}
+	e.hookPlugins[name] = reg
+	return func() {
+		e.lifecycleMu.Lock()
+		defer e.lifecycleMu.Unlock()
+		if e.hookPlugins[name] != reg {
+			return
+		}
+		delete(e.hookPlugins, name)
+		if reg.cancel != nil {
+			reg.cancel()
+		}
+	}, nil
+}
+
+// unregisterHookBindings shuts down the old server's plugin workers. The
+// descriptors remain so the next embedded server can re-register them.
+func (e *EmbeddedLalmax) unregisterHookBindings() {
+	for _, reg := range e.hookPlugins {
+		if reg.cancel != nil {
+			reg.cancel()
+			reg.cancel = nil
+		}
+	}
+}
+
+// rebindHookPlugins is called with lifecycleMu held before the replacement
+// server starts handling traffic. All NVR hook consumers use this registry.
+func (e *EmbeddedLalmax) rebindHookPlugins(server *lalmaxserver.LalMaxServer) error {
+	for name, reg := range e.hookPlugins {
+		cancel, err := server.RegisterHookPlugin(reg.plugin, reg.options)
+		if err != nil {
+			return fmt.Errorf("rebind embedded hook %s: %w", name, err)
+		}
+		reg.cancel = cancel
+	}
+	return nil
 }
 
 // Server returns the underlying lalmax server. Must be called after NewEmbeddedLalmax.
@@ -365,6 +429,7 @@ func (e *EmbeddedLalmax) Shutdown(ctx context.Context) error {
 	if err := server.Shutdown(ctx); err != nil {
 		return err
 	}
+	e.unregisterHookBindings()
 	e.clearServer(server)
 	return nil
 }
@@ -387,6 +452,7 @@ func (e *EmbeddedLalmax) Restart(ctx context.Context, rtmpPort, srtPort int, rtm
 	// in-flight viewers and times out while holding the engine lock.
 	if old != nil {
 		old.Close()
+		e.unregisterHookBindings()
 		time.Sleep(200 * time.Millisecond)
 	}
 
@@ -397,7 +463,7 @@ func (e *EmbeddedLalmax) Restart(ctx context.Context, rtmpPort, srtPort int, rtm
 	if cfgPath != "" {
 		if _, err := os.Stat(cfgPath); err == nil {
 			// File exists 闁?patch only rtmp/srt fields
-			if err := patchLalmaxConfig(cfgPath, rtmpEnabled, srtEnabled, rtmpAddr, srtAddr, e.cfg.HTTPTSGOPNum); err != nil {
+			if err := patchLalmaxConfig(cfgPath, rtmpEnabled, srtEnabled, rtmpAddr, srtAddr, e.cfg.HTTPTSGOPNum, e.cfg.RTSPDisableNativeAuth); err != nil {
 				return fmt.Errorf("patch lalmax config: %w", err)
 			}
 		} else {
@@ -430,8 +496,18 @@ func (e *EmbeddedLalmax) Restart(ctx context.Context, rtmpPort, srtPort int, rtm
 	e.server = svr
 	e.mu.Unlock()
 
+	if err := e.rebindHookPlugins(svr); err != nil {
+		e.unregisterHookBindings()
+		e.clearServer(svr)
+		return err
+	}
 	e.applyRuntimeHLSSettings(svr, e.cfg)
 	if err := svr.Start(ctx); err != nil {
+		// Start may have opened some listeners or workers before failing.
+		// Release them and invalidate hook bindings before returning.
+		svr.Close()
+		e.unregisterHookBindings()
+		e.clearServer(svr)
 		return fmt.Errorf("start server: %w", err)
 	}
 
@@ -559,6 +635,7 @@ func loadEmbeddedLalmaxConfig(cfg EmbeddedLalmaxConfig) (*lalmaxconfig.Config, e
 				fmt.Sprintf(":%d", rtmpPort),
 				fmt.Sprintf(":%d", srtPort),
 				cfg.HTTPTSGOPNum,
+				cfg.RTSPDisableNativeAuth,
 			); err != nil {
 				return nil, fmt.Errorf("sync lalmax protocol config: %w", err)
 			}
@@ -629,7 +706,7 @@ func httptsGopNum(n int) int {
 // patchLalmaxConfig reads the existing lalmax config JSON file, patches only
 // the RTMP/SRT enable and addr fields in the lal/lalmax sections, and writes
 // it back. This preserves all user customizations.
-func patchLalmaxConfig(path string, rtmpEnabled, srtEnabled bool, rtmpAddr, srtAddr string, gopNum int) error {
+func patchLalmaxConfig(path string, rtmpEnabled, srtEnabled bool, rtmpAddr, srtAddr string, gopNum int, rtspDisableNativeAuth bool) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read lalmax config: %w", err)
@@ -668,6 +745,11 @@ func patchLalmaxConfig(path string, rtmpEnabled, srtEnabled bool, rtmpAddr, srtA
 		}
 	}
 	rtsp["addr"] = fmt.Sprintf(":%d", config.DefaultLalRTSPPort)
+	// Preserve existing native RTSP auth unless the operator explicitly opts
+	// out. A missing YAML setting must not silently disable a protected server.
+	if rtspDisableNativeAuth {
+		rtsp["auth_enable"] = false
+	}
 	patchedRTSP, err := json.Marshal(rtsp)
 	if err != nil {
 		return fmt.Errorf("marshal rtsp config: %w", err)
@@ -1160,6 +1242,7 @@ func (e *EmbeddedLalmax) shutdownAndClear(server *lalmaxserver.LalMaxServer) {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	_ = server.Shutdown(shutdownCtx)
 	cancel()
+	e.unregisterHookBindings()
 	e.clearServer(server)
 }
 

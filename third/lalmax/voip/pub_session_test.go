@@ -78,7 +78,9 @@ func TestFailedSessionReturnsPreallocatedPorts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: audio})
+	// Bind the same IPv4 address that NewPubSession uses. An unspecified
+	// address can resolve to IPv6 on Windows and not occupy 127.0.0.1.
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: audio})
 	if err != nil {
 		t.Fatal(err)
 	}

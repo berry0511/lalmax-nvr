@@ -374,6 +374,18 @@ func TestOutboundRTPSourceUsesNegotiatedMediaAddress(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer terminal.Close()
+	// Windows may expose an IPv4 adapter (for example 198.18.0.1) that
+	// accepts a local bind but cannot route packets to loopback.
+	// Verify the network path before asserting SIP media-source filtering.
+	probe, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = terminal.WriteToUDP([]byte{0}, probe.LocalAddr().(*net.UDPAddr))
+	probe.Close()
+	if err != nil {
+		t.Skipf("non-loopback interface %s cannot send to loopback on this host: %v", mediaIP, err)
+	}
 	result, err := s.Dial("1001", "rtp", browserTalkOffer)
 	if err != nil {
 		t.Fatal(err)
@@ -398,7 +410,7 @@ func TestOutboundRTPSourceUsesNegotiatedMediaAddress(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("RTP from negotiated media address 127.0.0.2 was rejected: %+v", s.Status().Calls)
+	t.Fatalf("RTP from negotiated media address %s was rejected: %+v", mediaIP, s.Status().Calls)
 }
 
 func TestOutboundSecureMediaAndCodecs(t *testing.T) {

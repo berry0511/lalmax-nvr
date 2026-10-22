@@ -239,3 +239,32 @@ func TestSegmentCompletedStruct(t *testing.T) {
 		t.Fatalf("expected FileSize 1024000, got %d", data.FileSize)
 	}
 }
+
+func TestUnsubscribeKeepsOtherSubscribers(t *testing.T) {
+	t.Parallel()
+	bus := NewEventBus(4)
+	one := make(chan Event, 4)
+	two := make(chan Event, 4)
+	if err := bus.Subscribe("multi", one, 4); err != nil { t.Fatal(err) }
+	if err := bus.Subscribe("multi", two, 4); err != nil { t.Fatal(err) }
+	bus.Unsubscribe("multi", one)
+	bus.Publish(context.Background(), "multi", "still-present")
+	if len(one) != 0 { t.Fatalf("removed listener received events: %d", len(one)) }
+	if len(two) != 1 { t.Fatalf("other listener lost events: %d", len(two)) }
+	if got := (<-two).Data; got != "still-present" { t.Fatalf("got %v", got) }
+	bus.Unsubscribe("multi", one)
+	bus.Unsubscribe("multi", two)
+	bus.Publish(context.Background(), "multi", "nobody")
+}
+
+func TestSubscribeValidatesBuffersAndDuplicates(t *testing.T) {
+	t.Parallel()
+	bus := NewEventBus(4)
+	if err := bus.Subscribe("topic", nil, 4); err != ErrInvalidSubscriber { t.Fatalf("nil channel: %v", err) }
+	if err := bus.Subscribe("topic", make(chan Event), 4); err != ErrInvalidSubscriber { t.Fatalf("unbuffered channel: %v", err) }
+	one := make(chan Event, 1)
+	if err := bus.Subscribe("topic", one, 1); err != nil { t.Fatal(err) }
+	if err := bus.Subscribe("topic", one, 1); err != ErrDuplicateSubscriber { t.Fatalf("duplicate: %v", err) }
+	bus.Unsubscribe("topic", one)
+	if err := bus.Subscribe("topic", one, 1); err != nil { t.Fatalf("resubscribe: %v", err) }
+}

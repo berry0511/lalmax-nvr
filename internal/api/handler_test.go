@@ -35,8 +35,12 @@ func setupTestDB(t *testing.T) (*storage.DB, *storage.Manager) {
 	}
 	ctx := context.Background()
 	if err := db.Init(ctx); err != nil {
+		_ = db.Close()
 		t.Fatalf("failed to init db: %v", err)
 	}
+	// Register after t.TempDir so the SQLite handle closes before Windows
+	// attempts to remove test.db during temporary directory cleanup.
+	t.Cleanup(func() { _ = db.Close() })
 	store, err := storage.NewManager(filepath.Join(dir, "storage"))
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
@@ -123,7 +127,7 @@ func TestHealth(t *testing.T) {
 	defer db.Close()
 	h := TestHandler(db, store)
 
-	rr := doRequest(t, h.Routes(), "GET", "/api/health", nil, "", "")
+	rr := doRequest(t, h.Routes(), "GET", "/api/health/details", nil, "", "")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rr.Code)
 	}
@@ -1846,7 +1850,7 @@ func TestHealthEnhanced(t *testing.T) {
 	defer db.Close()
 	h := TestHandler(db, store)
 
-	rr := doRequest(t, h.Routes(), "GET", "/api/health", nil, "", "")
+	rr := doRequest(t, h.Routes(), "GET", "/api/health/details", nil, "", "")
 	require.Equal(t, http.StatusOK, rr.Code)
 
 	var body HealthResponse
@@ -1865,7 +1869,7 @@ func TestHealthReturnsOkWhenAllChecksPass(t *testing.T) {
 	defer db.Close()
 	h := TestHandler(db, store)
 
-	rr := doRequest(t, h.Routes(), "GET", "/api/health", nil, "", "")
+	rr := doRequest(t, h.Routes(), "GET", "/api/health/details", nil, "", "")
 	require.Equal(t, http.StatusOK, rr.Code)
 
 	var body HealthResponse
@@ -1880,7 +1884,7 @@ func TestHealthWithNilDB(t *testing.T) {
 	t.Parallel()
 	h := TestHandler(nil, nil)
 
-	rr := doRequest(t, h.Routes(), "GET", "/api/health", nil, "", "")
+	rr := doRequest(t, h.Routes(), "GET", "/api/health/details", nil, "", "")
 	require.Equal(t, http.StatusOK, rr.Code)
 
 	var body HealthResponse

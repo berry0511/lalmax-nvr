@@ -4,7 +4,11 @@
 param(
     [Parameter(Position = 0)]
     [ValidateSet('build', 'run', 'start', 'stop', 'restart', 'status', 'logs', 'test', 'help')]
-    [string]$Command = 'help'
+    [string]$Command = 'help',
+    [ValidateSet('windows', 'linux', 'darwin')]
+    [string]$BuildOS = '',
+    [ValidateSet('amd64', 'arm64', 'arm', '386')]
+    [string]$BuildArch = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -16,7 +20,9 @@ function Show-NvrHelp {
 lalmax-nvr scripts (Windows)
 
 Usage:
-  .\scripts\windows\nvr.ps1 build      build bin/lalmax-nvr.exe
+  .\scripts\windows\nvr.ps1 build      build native bin/lalmax-nvr.exe
+  .\scripts\windows\nvr.ps1 build -BuildOS linux -BuildArch amd64
+                                   build Linux bin/lalmax-nvr
   .\scripts\windows\nvr.ps1 run        run in foreground
   .\scripts\windows\nvr.ps1 start      start in background
   .\scripts\windows\nvr.ps1 stop       stop background process
@@ -27,7 +33,8 @@ Usage:
 
 Command Prompt:
   scripts\windows\start.bat
-  scripts\windows\build.bat
+  scripts\windows\build.bat          native Windows amd64
+  scripts\windows\build-linux.bat    cross-compile Linux amd64 (PowerShell only)
   ...
 
 Environment overrides:
@@ -38,88 +45,122 @@ Environment overrides:
 }
 
 function Invoke-NvrBuild {
-    $Version = if ($env:VERSION) { $env:VERSION } else { 'dev' }
-    $Commit = $env:COMMIT
-    $Date = if ($env:DATE) { $env:DATE } else { (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
-
-    if (-not $env:NODE_OPTIONS) {
-        $env:NODE_OPTIONS = '--no-deprecation'
+    # Build the frontend, all Go modules, then the deployable embedded binary.
+    if (-not (Get-Command go -ErrorAction SilentlyContinue)) { throw 'Go is required' }
+    if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+        throw 'npm is required; refusing to embed stale frontend assets'
     }
+    if (-not (Test-Path -LiteralPath (Join-Path $RootDir 'web/package-lock.json'))) {
+        throw 'web/package-lock.json is missing'
+    }
+    $Version = if ($env:VERSION) { $env:VERSION } else { 'dev' }
+    $HostOs = (go env GOHOSTOS).Trim()
+    $HostArch = (go env GOHOSTARCH).Trim()
+    # Build target comes from script arguments, NOT inherited shell GOOS/GOARCH.
+    $TargetOs = if ($BuildOS) { $BuildOS } else { $HostOs }
+    $TargetArch = if ($BuildArch) { $BuildArch } else { $HostArch }
+    $BuildJobs = if ($env:GO_BUILD_JOBS) { [int]$env:GO_BUILD_JOBS } else { 1 }
+    if ($BuildJobs -lt 1) { throw 'GO_BUILD_JOBS must be >= 1' }
+
+    $OutputBase = $BinPath
+    if ($OutputBase.EndsWith('.exe', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $OutputBase = $OutputBase.Substring(0, $OutputBase.Length - 4)
+    }
+    # Keep the original deployment filenames; .exe is only for Windows PE.
+    # Windows and Linux results coexist: lalmax-nvr.exe and lalmax-nvr.
+    $OutputBin = $OutputBase
+    if ($TargetOs -eq 'windows') { $OutputBin += '.exe' }
+    $OutputDir = Split-Path -Parent $OutputBin
+    if ($OutputDir -and -not (Test-Path -LiteralPath $OutputDir)) {
+        New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
+    }
+
+    if (-not $env:NODE_OPTIONS) { $env:NODE_OPTIONS = '--no-deprecation' }
     elseif ($env:NODE_OPTIONS -notmatch 'no-deprecation') {
         $env:NODE_OPTIONS = "$($env:NODE_OPTIONS) --no-deprecation"
     }
 
-    $TargetOs = if ($env:GOOS) { $env:GOOS } else { (go env GOOS).Trim() }
-    $TargetArch = if ($env:GOARCH) { $env:GOARCH } else { (go env GOARCH).Trim() }
+    # Save process environment so a direct nvr.ps1 invocation also leaves
+    # GOOS/GOARCH/CGO_ENABLED exactly as they were before the build.
+    $PreviousGOOS = [Environment]::GetEnvironmentVariable('GOOS', 'Process')
+    $PreviousGOARCH = [Environment]::GetEnvironmentVariable('GOARCH', 'Process')
+    $PreviousCGO = [Environment]::GetEnvironmentVariable('CGO_ENABLED', 'Process')
 
-    if (-not $Commit -and (Get-Command git -ErrorAction SilentlyContinue)) {
-        try {
-            git -C $RootDir rev-parse --is-inside-work-tree 2>$null | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-                $Commit = (git -C $RootDir rev-parse --short HEAD).Trim()
-            }
-        }
-        catch {
-            # Ignore git lookup failures.
-        }
-    }
-    if (-not $Commit) {
-        $Commit = 'none'
-    }
-
-    $HostOs = (go env GOOS).Trim()
-    $HostArch = (go env GOARCH).Trim()
-    if ($TargetOs -ne $HostOs -or $TargetArch -ne $HostArch) {
-        $OutputBin = "$BinPath-$TargetArch"
-        if ($TargetArch -eq 'arm' -and $env:GOARM) {
-            $OutputBin = "$BinPath-armv$($env:GOARM)"
-        }
-    }
-    else {
-        $OutputBin = $BinPath
-    }
-
-    Write-Host "building $AppName"
+    Write-Host "building complete $AppName source tree"
+    Write-Host "  host:   $HostOs/$HostArch"
     Write-Host "  target: $TargetOs/$TargetArch"
     Write-Host "  output: $OutputBin"
-    Write-Host "  cgo:    $CgoEnabled"
+    Write-Host "  cgo:    0 (temporary)"
 
     Push-Location $RootDir
     try {
-        $webPackage = Join-Path $RootDir 'web/package.json'
-        if ((Test-Path -LiteralPath $webPackage) -and (Get-Command npm -ErrorAction SilentlyContinue)) {
-            $nodeModules = Join-Path $RootDir 'web/node_modules'
-            if (-not (Test-Path -LiteralPath $nodeModules)) {
-                Write-Host 'installing frontend dependencies'
-                npm --prefix web install
-                if ($LASTEXITCODE -ne 0) { throw 'npm install failed' }
-            }
-            Write-Host 'building frontend'
-            npm --prefix web run build
-            if ($LASTEXITCODE -ne 0) { throw 'npm run build failed' }
+        Write-Host '[1/5] synchronize frontend dependencies (npm ci)'
+        npm --prefix web ci --prefer-offline --no-audit --no-fund
+        if ($LASTEXITCODE -ne 0) { throw 'npm ci failed' }
 
-            $assetsDir = Join-Path $RootDir 'internal/ui/static/assets'
-            if (Test-Path -LiteralPath $assetsDir) {
-                Remove-Item -LiteralPath $assetsDir -Recurse -Force
-            }
-            Copy-Item -Path (Join-Path $RootDir 'web/dist/*') -Destination (Join-Path $RootDir 'internal/ui/static/') -Recurse -Force
+        Write-Host '[2/5] build current frontend'
+        npm --prefix web run build
+        if ($LASTEXITCODE -ne 0) { throw 'npm run build failed' }
+        $distDir = Join-Path $RootDir 'web/dist'
+        if (-not (Test-Path -LiteralPath (Join-Path $distDir 'index.html')) -or
+            -not (Test-Path -LiteralPath (Join-Path $distDir 'assets'))) {
+            throw 'frontend output dist/index.html or dist/assets is missing'
         }
 
-        $env:CGO_ENABLED = $CgoEnabled
+        Write-Host '[3/5] refresh embedded frontend assets'
+        $staticDir = Join-Path $RootDir 'internal/ui/static'
+        New-Item -ItemType Directory -Path $staticDir -Force | Out-Null
+        $oldAssets = Join-Path $staticDir 'assets'
+        if (Test-Path -LiteralPath $oldAssets) {
+            Remove-Item -LiteralPath $oldAssets -Recurse -Force
+        }
+        Copy-Item -Path (Join-Path $distDir '*') -Destination $staticDir -Recurse -Force
+        if (-not (Test-Path -LiteralPath (Join-Path $staticDir 'index.html')) -or
+            -not (Test-Path -LiteralPath (Join-Path $staticDir 'assets'))) {
+            throw 'copying frontend assets into Go embed failed'
+        }
+
+        # Temporary build-only target environment, restored in finally.
         $env:GOOS = $TargetOs
         $env:GOARCH = $TargetArch
+        $env:CGO_ENABLED = '0'
 
-        go build `
-            -ldflags "-s -w -X main.appVersion=$Version" `
-            -o $OutputBin `
-            ./cmd/lalmax-nvr
-        if ($LASTEXITCODE -ne 0) { throw 'go build failed' }
+        Write-Host '[4/5] compile every Go module'
+        foreach ($module in @('.', 'third/lal', 'third/lalmax')) {
+            Push-Location (Join-Path $RootDir $module)
+            try {
+                Write-Host "  module: $module"
+                go build -p $BuildJobs ./...
+                if ($LASTEXITCODE -ne 0) { throw "Go compilation failed in $module" }
+            }
+            finally {
+                Pop-Location
+            }
+        }
 
-        $builtBin = Get-ActualBinPath $OutputBin
-        & $builtBin -version
-        if ($LASTEXITCODE -ne 0) { throw 'binary -version failed' }
+        Write-Host '[5/5] build final NVR binary'
+        $tempBin = "$OutputBin.build-tmp"
+        if (Test-Path -LiteralPath $tempBin) { Remove-Item -LiteralPath $tempBin -Force }
+        try {
+            go build -p $BuildJobs -ldflags "-s -w -X main.appVersion=$Version" -o $tempBin ./cmd/lalmax-nvr
+            if ($LASTEXITCODE -ne 0) { throw 'final NVR build failed' }
+            if (-not (Test-Path -LiteralPath $tempBin)) { throw 'final binary is missing' }
+            go version -m $tempBin
+            if ($LASTEXITCODE -ne 0) { throw 'Go binary metadata check failed' }
+            Move-Item -LiteralPath $tempBin -Destination $OutputBin -Force
+        }
+        finally {
+            if (Test-Path -LiteralPath $tempBin) {
+                Remove-Item -LiteralPath $tempBin -Force
+            }
+        }
+        Write-Host "BUILD PASS: $OutputBin"
+        # Deliberately do not execute cross-compiled binaries on Windows.
     }
     finally {
+        [Environment]::SetEnvironmentVariable('GOOS', $PreviousGOOS, 'Process')
+        [Environment]::SetEnvironmentVariable('GOARCH', $PreviousGOARCH, 'Process')
+        [Environment]::SetEnvironmentVariable('CGO_ENABLED', $PreviousCGO, 'Process')
         Pop-Location
     }
 }

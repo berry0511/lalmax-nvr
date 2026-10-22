@@ -68,22 +68,26 @@ func (w *Watcher) CheckExternalChange() bool {
 // Reload re-reads the config from disk, updates the in-memory config,
 // and notifies all subscribers. Use this when an external change is detected.
 func (w *Watcher) Reload() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
+	// Load without holding the watcher lock: file IO must not block Config()
+	// or subscriber registration.
 	cfg, err := Load(w.path)
 	if err != nil {
 		return fmt.Errorf("reload config: %w", err)
 	}
-	w.cfg = cfg
+
+	w.mu.Lock()
 	if err := w.statFileLocked(); err != nil {
+		w.mu.Unlock()
 		return err
 	}
+	w.cfg = cfg
+	subscribers := append([]func(*Config){}, w.subs...)
+	w.mu.Unlock()
 
 	watchLogger.Info("config reloaded from disk", "path", w.path)
-
-	// Notify subscribers (hold lock during notification to ensure consistency)
-	for _, fn := range w.subs {
+	// Callbacks may call Config(), Subscribe() or Save(). Never run them
+	// under w.mu; otherwise a reentrant callback deadlocks the watcher.
+	for _, fn := range subscribers {
 		fn(cfg)
 	}
 	return nil

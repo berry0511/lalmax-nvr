@@ -21,6 +21,8 @@ func setupONVIFCamera(t *testing.T) (*storage.DB, *storage.Manager) {
 	dbPath := filepath.Join(dir, "test.db")
 	db, err := storage.New(dbPath)
 	require.NoError(t, err)
+	// Close the SQLite handle before t.TempDir removes its files on Windows.
+	t.Cleanup(func() { _ = db.Close() })
 	ctx := context.Background()
 	require.NoError(t, db.Init(ctx))
 	store, err := storage.NewManager(filepath.Join(dir, "storage"))

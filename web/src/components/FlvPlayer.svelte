@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, getContext } from 'svelte';
+  import { selectFlvStreamURL } from '$lib/flv-playback';
   import { t } from '$lib/i18n';
   import { AlertCircle, RefreshCw, ImageIcon, Volume2, VolumeX } from 'lucide-svelte';
   import { getAuthHeader } from '$lib/api';
@@ -193,7 +194,7 @@ let videoEventAc: AbortController | null = null;
     const fallbackUrl = protocol === 'ws-flv'
       ? `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/live/${cameraId}.flv`
       : `/api/cameras/${cameraId}/stream.flv`;
-    const baseUrl = streamUrl || fallbackUrl;
+    const baseUrl = selectFlvStreamURL(streamUrl, fallbackUrl);
     const isWebSocket = baseUrl.startsWith('ws://') || baseUrl.startsWith('wss://');
     if (!isWebSocket || !authHeader) return baseUrl;
 

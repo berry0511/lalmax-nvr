@@ -1,6 +1,7 @@
 package gb28181
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 )
@@ -43,18 +44,18 @@ func (g *GB28181API) handleDeviceInfoResponse(deviceID string, body []byte) {
 		"gb_version", version,
 	)
 
-	// 更新设备信息
-	if dev, ok := g.store.Load(deviceID); ok {
+	// A late response cannot enroll a removed device. Protect both the in-memory
+	// update and persistence with the same device lock used by offline deletion.
+	err := g.store.withExistingDevice(deviceID, func(dev *Device) error {
 		dev.Manufacturer = msg.Manufacturer
 		dev.Model = msg.Model
 		dev.Firmware = msg.Firmware
 		if dev.GBVersion == GBVersionUnknown || dev.GBVersion == "" {
 			dev.GBVersion = version
 		}
-	}
-
-	// Persist device info to database
-	if err := g.store.SaveDeviceInfo(deviceID, msg.Manufacturer, msg.Model, msg.Firmware); err != nil {
+		return g.store.SaveDeviceInfo(deviceID, msg.Manufacturer, msg.Model, msg.Firmware)
+	})
+	if err != nil && !errors.Is(err, ErrDeviceNotExist) {
 		slog.Error("failed to save device info to DB", "device_id", deviceID, "error", err)
 	}
 }

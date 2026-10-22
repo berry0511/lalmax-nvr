@@ -76,6 +76,29 @@ sequenceDiagram
 
 `media_ip` 必须是设备能路由到的地址（不要填 `127.0.0.1`）。`media_port: 0` 为多端口随机分配；大于 0 为单端口模式。
 
+### 直接 WHEP 地址按需点播（可选）
+
+NVR Web 页面通过 `/api/gb28181/play` 发送 INVITE。直接访问 LALMax WHEP 地址时不会调用该 API。可以显式开启：
+
+```yaml
+gb28181:
+  enabled: true
+  # 其余 SIP ID、密码、media_ip 等配置保持不变
+  whep_on_demand_enabled: true
+```
+
+启用后，已注册通道的播放地址不变，例如：
+
+```text
+http://<server>:12090/webrtc/whep?streamid=32010000001327000001:34020000001320000001&app_name=live
+```
+
+WHEP POST 发现流不存在后，触发 `on_stream_not_found`，NVR 校验已注册且在线的 GB28181 设备与通道，随后通过 `EnsurePlay` 发送 SIP INVITE，最多等待 12 秒。
+已存在的流直接播放；同一路启动请求去重，重试间隔 15 秒，并发启动最多 4 路。
+
+**默认关闭**：公网用户可能通过已知通道 ID 触发 INVITE。启用时建议限制 WHEP 入口访问来源，或配置播放 Token。本功能不能启动外部 RTMP 发送端，也不会自动向国标设备发送 BYE；媒体会话释放沿用 NVR 原有机制。
+
+
 ### 录像回放与下载
 
 回放同样是 INVITE，SDP 标明 `Playback` 和时间范围；设备仍 **推** 历史 PS/RTP。暂停/倍速/seek 走 SIP INFO。下载走另一路 INVITE（Download）。

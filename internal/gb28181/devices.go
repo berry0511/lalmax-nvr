@@ -20,10 +20,11 @@ type Device struct {
 	registerWithKeepaliveMutex sync.Mutex
 	playMutex                  sync.Mutex
 
-	IsOnline bool
-	Address  string
-	Password string
-	region   string
+	IsOnline  bool
+	Address   string
+	Transport string
+	Password  string
+	region    string
 
 	conn   sip.Connection
 	source string
@@ -132,9 +133,12 @@ func (c *Channel) init(domain string) {
 
 // DeviceStore manages GB28181 devices with both memory cache and database persistence.
 type DeviceStore struct {
-	devices sync.Map
-	db      storage.GB28181DeviceStoreRepository
-	hub     *WSHub
+	// lifecycleMu serializes map membership with REGISTER/keepalive state transitions.
+	// Always acquire lifecycleMu before a Device mutex.
+	lifecycleMu sync.Mutex
+	devices     sync.Map
+	db          storage.GB28181DeviceStoreRepository
+	hub         *WSHub
 }
 
 func NewDeviceStore(db storage.GB28181DeviceStoreRepository, hub *WSHub) *DeviceStore {
@@ -189,18 +193,22 @@ func (s *DeviceStore) LoadFromDB() error {
 }
 
 func (s *DeviceStore) LoadOrStore(deviceID string, value *Device) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	if value.GBVersion == "" {
 		value.GBVersion = GBVersionUnknown
 	}
 	existing, loaded := s.devices.LoadOrStore(deviceID, value)
 	if loaded {
 		dev := existing.(*Device)
+		dev.registerWithKeepaliveMutex.Lock()
 		if value.source != "" {
 			dev.source = value.source
 		}
 		if dev.GBVersion == "" || dev.GBVersion == GBVersionUnknown {
 			dev.GBVersion = value.GBVersion
 		}
+		dev.registerWithKeepaliveMutex.Unlock()
 	}
 }
 
@@ -213,7 +221,9 @@ func (s *DeviceStore) Load(deviceID string) (*Device, bool) {
 }
 
 func (s *DeviceStore) Store(deviceID string, value *Device) {
+	s.lifecycleMu.Lock()
 	s.devices.Store(deviceID, value)
+	s.lifecycleMu.Unlock()
 }
 
 func (s *DeviceStore) GetChannel(deviceID, channelID string) (*Channel, bool) {
@@ -225,6 +235,8 @@ func (s *DeviceStore) GetChannel(deviceID, channelID string) (*Channel, bool) {
 }
 
 func (s *DeviceStore) Change(deviceID string, changeFn func(*Device)) error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	v, ok := s.devices.Load(deviceID)
 	if !ok {
 		return ErrDeviceNotExist
@@ -232,8 +244,88 @@ func (s *DeviceStore) Change(deviceID string, changeFn func(*Device)) error {
 	dev := v.(*Device)
 	dev.registerWithKeepaliveMutex.Lock()
 	defer dev.registerWithKeepaliveMutex.Unlock()
+	current, ok := s.devices.Load(deviceID)
+	if !ok || current != dev {
+		return ErrDeviceNotExist
+	}
 	changeFn(dev)
 	return nil
+}
+
+// withExistingDevice protects an existing device and its persistent writes
+// against deletion. The callback must not call store membership operations.
+// Only REGISTER may recreate a device that has already been removed.
+func (s *DeviceStore) withExistingDevice(deviceID string, changeFn func(*Device) error) error {
+	s.lifecycleMu.Lock()
+	value, ok := s.devices.Load(deviceID)
+	if !ok {
+		s.lifecycleMu.Unlock()
+		return ErrDeviceNotExist
+	}
+	dev := value.(*Device)
+	dev.registerWithKeepaliveMutex.Lock()
+	current, ok := s.devices.Load(deviceID)
+	if !ok || current != dev {
+		dev.registerWithKeepaliveMutex.Unlock()
+		s.lifecycleMu.Unlock()
+		return ErrDeviceNotExist
+	}
+	// Keep the per-device lock while persisting. Release the global membership
+	// lock now so unrelated devices can continue registering and heartbeating.
+	s.lifecycleMu.Unlock()
+	defer dev.registerWithKeepaliveMutex.Unlock()
+
+	return changeFn(dev)
+}
+
+// ChangeAndSaveExistingDevice atomically updates and persists a known device.
+// It never enrolls a missing device: a heartbeat racing with deletion must not
+// recreate the deleted DB row through the status UPSERT.
+func (s *DeviceStore) ChangeAndSaveExistingDevice(deviceID string, changeFn func(*Device) error) (wasOnline bool, dev *Device, err error) {
+	err = s.withExistingDevice(deviceID, func(current *Device) error {
+		dev = current
+		wasOnline = dev.IsOnline
+		if err := changeFn(dev); err != nil {
+			return err
+		}
+		return s.SaveDevice(deviceID, dev)
+	})
+	return wasOnline, dev, err
+}
+
+// ChangeAndSaveDevice atomically applies a REGISTER transition and persists it
+// while the device remains a member of the store. If deletion wins first, the
+// registration recreates the entry instead of updating a detached pointer.
+func (s *DeviceStore) ChangeAndSaveDevice(deviceID string, initial *Device, changeFn func(*Device)) (bool, error) {
+	if initial == nil {
+		initial = &Device{DeviceID: deviceID}
+	}
+	if initial.DeviceID == "" {
+		initial.DeviceID = deviceID
+	}
+	if initial.GBVersion == "" {
+		initial.GBVersion = GBVersionUnknown
+	}
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	value, ok := s.devices.Load(deviceID)
+	if !ok {
+		s.devices.Store(deviceID, initial)
+		value = initial
+	}
+	dev := value.(*Device)
+	dev.registerWithKeepaliveMutex.Lock()
+	defer dev.registerWithKeepaliveMutex.Unlock()
+	current, ok := s.devices.Load(deviceID)
+	if !ok || current != dev {
+		return false, ErrDeviceNotExist
+	}
+	wasOnline := dev.IsOnline
+	changeFn(dev)
+	if err := s.SaveDevice(deviceID, dev); err != nil {
+		return wasOnline, err
+	}
+	return wasOnline, nil
 }
 
 func (s *DeviceStore) RangeDevices(fn func(key string, value *Device) bool) {
@@ -400,11 +492,52 @@ func (s *DeviceStore) SaveDeviceInfo(deviceID, manufacturer, model, firmware str
 	return s.db.UpsertGB28181Device(ctx, dbDev)
 }
 
-// DeleteDevice removes a device from memory and database.
+// DeleteOfflineDevice removes only a registered offline SIP device and its
+// catalog channels. Camera records, recordings and history are not touched.
+// The per-device registration lock prevents removing an online device while
+// a concurrent REGISTER / keepalive status update is being applied.
+func (s *DeviceStore) DeleteOfflineDevice(deviceID string) error {
+	// Serialize deletion with REGISTER's lookup, state transition and DB upsert.
+	// Lock order is lifecycleMu -> registerWithKeepaliveMutex everywhere.
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	value, ok := s.devices.Load(deviceID)
+	if !ok {
+		return ErrDeviceNotExist
+	}
+	dev := value.(*Device)
+	dev.registerWithKeepaliveMutex.Lock()
+	defer dev.registerWithKeepaliveMutex.Unlock()
+	current, ok := s.devices.Load(deviceID)
+	if !ok || current != dev {
+		return ErrDeviceNotExist
+	}
+	if dev.IsOnline {
+		return ErrDeviceOnline
+	}
+	hasActive := false
+	dev.Channels.Range(func(_, value any) bool {
+		ch := value.(*Channel)
+		if globalStreams.isPlaying(deviceID, ch.ChannelID) {
+			hasActive = true
+			return false
+		}
+		return true
+	})
+	if hasActive {
+		return ErrDeviceHasActiveStream
+	}
+	if err := s.db.DeleteGB28181Device(context.Background(), deviceID); err != nil {
+		return err
+	}
+	s.devices.CompareAndDelete(deviceID, dev)
+	return nil
+}
+
+// DeleteDevice retains its public name but enforces the same offline-only
+// policy, so no caller can accidentally delete a live SIP registration.
 func (s *DeviceStore) DeleteDevice(deviceID string) error {
-	s.devices.Delete(deviceID)
-	ctx := context.Background()
-	return s.db.DeleteGB28181Device(ctx, deviceID)
+	return s.DeleteOfflineDevice(deviceID)
 }
 
 func filterUnknowDevices(deviceID string) error {

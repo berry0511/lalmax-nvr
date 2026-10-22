@@ -1,6 +1,7 @@
 package gb28181
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -38,10 +39,15 @@ type WSHub struct {
 	register   chan *Client
 	unregister chan *Client
 	mu         sync.RWMutex
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
 func NewWSHub() *WSHub {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &WSHub{
+		ctx: ctx,
+		cancel: cancel,
 		clients:    make(map[*Client]bool),
 		broadcast:  make(chan Event, 256),
 		register:   make(chan *Client),
@@ -49,9 +55,22 @@ func NewWSHub() *WSHub {
 	}
 }
 
+func (h *WSHub) Stop() { h.cancel() }
+
 func (h *WSHub) Run() {
+	defer func() {
+		h.mu.Lock()
+		for client := range h.clients {
+			delete(h.clients, client)
+			close(client.send)
+			client.conn.Close()
+		}
+		h.mu.Unlock()
+	}()
 	for {
 		select {
+		case <-h.ctx.Done():
+			return
 		case client := <-h.register:
 			h.mu.Lock()
 			h.clients[client] = true
@@ -72,7 +91,7 @@ func (h *WSHub) Run() {
 				continue
 			}
 
-			h.mu.RLock()
+			h.mu.Lock()
 			for client := range h.clients {
 				select {
 				case client.send <- data:
@@ -81,14 +100,20 @@ func (h *WSHub) Run() {
 					delete(h.clients, client)
 				}
 			}
-			h.mu.RUnlock()
+			h.mu.Unlock()
 		}
 	}
 }
 
 func (h *WSHub) Broadcast(event Event) {
 	event.Timestamp = time.Now().UnixMilli()
-	h.broadcast <- event
+	select {
+	case <-h.ctx.Done():
+		return
+	case h.broadcast <- event:
+	default:
+		slog.Warn("GB28181 websocket event queue full: broadcast dropped", "event", event.Type)
+	}
 }
 
 var upgrader = websocket.Upgrader{
@@ -110,7 +135,12 @@ func (h *WSHub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		send: make(chan []byte, 256),
 	}
 
-	h.register <- client
+	select {
+	case <-h.ctx.Done():
+		conn.Close()
+		return
+	case h.register <- client:
+	}
 
 	go client.writePump()
 	go client.readPump()
@@ -118,7 +148,10 @@ func (h *WSHub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 func (c *Client) readPump() {
 	defer func() {
-		c.hub.unregister <- c
+		select {
+		case <-c.hub.ctx.Done():
+		case c.hub.unregister <- c:
+		}
 		c.conn.Close()
 	}()
 
