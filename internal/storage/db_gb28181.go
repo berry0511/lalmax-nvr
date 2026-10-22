@@ -357,8 +357,21 @@ func (d *DB) UpdateGB28181DeviceOnlineStatus(ctx context.Context, deviceID strin
 
 // DeleteGB28181Device removes a GB28181 device and its channels.
 func (d *DB) DeleteGB28181Device(ctx context.Context, deviceID string) error {
-	_, err := d.execContext(ctx, "DELETE FROM gb28181_devices WHERE device_id = ?;", deviceID)
-	return err
+	tx, err := d.beginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// SQLite connections do not necessarily enable foreign-key enforcement.
+	// Delete the catalog explicitly and commit both removals atomically.
+	if _, err := tx.ExecContext(ctx, "DELETE FROM gb28181_channels WHERE device_id = ?;", deviceID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM gb28181_devices WHERE device_id = ?;", deviceID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ListGB28181Channels returns all channels for a device.

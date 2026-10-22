@@ -252,18 +252,15 @@ func (s *DeviceStore) Change(deviceID string, changeFn func(*Device)) error {
 	return nil
 }
 
-// ChangeAndSaveDevice atomically applies a REGISTER transition and persists it
-// while the device remains a member of the store. If deletion wins first, the
-// registration recreates the entry instead of updating a detached pointer.
-// ChangeAndSaveExistingDevice atomically updates and persists a known device.
-// It never enrolls a missing device: a heartbeat racing with deletion must not
-// recreate the deleted DB row through the status UPSERT.
-func (s *DeviceStore) ChangeAndSaveExistingDevice(deviceID string, changeFn func(*Device) error) (bool, *Device, error) {
+// withExistingDevice protects an existing device and its persistent writes
+// against deletion. The callback must not call store membership operations.
+// Only REGISTER may recreate a device that has already been removed.
+func (s *DeviceStore) withExistingDevice(deviceID string, changeFn func(*Device) error) error {
 	s.lifecycleMu.Lock()
 	value, ok := s.devices.Load(deviceID)
 	if !ok {
 		s.lifecycleMu.Unlock()
-		return false, nil, ErrDeviceNotExist
+		return ErrDeviceNotExist
 	}
 	dev := value.(*Device)
 	dev.registerWithKeepaliveMutex.Lock()
@@ -271,23 +268,34 @@ func (s *DeviceStore) ChangeAndSaveExistingDevice(deviceID string, changeFn func
 	if !ok || current != dev {
 		dev.registerWithKeepaliveMutex.Unlock()
 		s.lifecycleMu.Unlock()
-		return false, nil, ErrDeviceNotExist
+		return ErrDeviceNotExist
 	}
 	// Keep the per-device lock while persisting. Release the global membership
 	// lock now so unrelated devices can continue registering and heartbeating.
 	s.lifecycleMu.Unlock()
 	defer dev.registerWithKeepaliveMutex.Unlock()
 
-	wasOnline := dev.IsOnline
-	if err := changeFn(dev); err != nil {
-		return wasOnline, dev, err
-	}
-	if err := s.SaveDevice(deviceID, dev); err != nil {
-		return wasOnline, dev, err
-	}
-	return wasOnline, dev, nil
+	return changeFn(dev)
 }
 
+// ChangeAndSaveExistingDevice atomically updates and persists a known device.
+// It never enrolls a missing device: a heartbeat racing with deletion must not
+// recreate the deleted DB row through the status UPSERT.
+func (s *DeviceStore) ChangeAndSaveExistingDevice(deviceID string, changeFn func(*Device) error) (wasOnline bool, dev *Device, err error) {
+	err = s.withExistingDevice(deviceID, func(current *Device) error {
+		dev = current
+		wasOnline = dev.IsOnline
+		if err := changeFn(dev); err != nil {
+			return err
+		}
+		return s.SaveDevice(deviceID, dev)
+	})
+	return wasOnline, dev, err
+}
+
+// ChangeAndSaveDevice atomically applies a REGISTER transition and persists it
+// while the device remains a member of the store. If deletion wins first, the
+// registration recreates the entry instead of updating a detached pointer.
 func (s *DeviceStore) ChangeAndSaveDevice(deviceID string, initial *Device, changeFn func(*Device)) (bool, error) {
 	if initial == nil {
 		initial = &Device{DeviceID: deviceID}

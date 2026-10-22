@@ -62,10 +62,15 @@ func (catalogDecoder2022) Decode(deviceID string, body []byte, domain string, de
 }
 
 func (g *GB28181API) handleCatalogResponse(deviceID string, body []byte) {
-	dev, ok := g.store.Load(deviceID)
-	if !ok {
-		return
-	}
+	// Keep membership stable through all device/channel writes. A reply that
+	// loses the race with deletion must not UPSERT the removed registration.
+	_ = g.store.withExistingDevice(deviceID, func(dev *Device) error {
+		g.applyCatalogResponse(deviceID, body, dev)
+		return nil
+	})
+}
+
+func (g *GB28181API) applyCatalogResponse(deviceID string, body []byte, dev *Device) {
 	domain := dev.region
 	if domain == "" {
 		domain = g.cfg.GetDomain()
