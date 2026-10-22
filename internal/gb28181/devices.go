@@ -133,9 +133,12 @@ func (c *Channel) init(domain string) {
 
 // DeviceStore manages GB28181 devices with both memory cache and database persistence.
 type DeviceStore struct {
-	devices sync.Map
-	db      storage.GB28181DeviceStoreRepository
-	hub     *WSHub
+	// lifecycleMu serializes map membership with REGISTER/keepalive state transitions.
+	// Always acquire lifecycleMu before a Device mutex.
+	lifecycleMu sync.Mutex
+	devices     sync.Map
+	db          storage.GB28181DeviceStoreRepository
+	hub         *WSHub
 }
 
 func NewDeviceStore(db storage.GB28181DeviceStoreRepository, hub *WSHub) *DeviceStore {
@@ -190,18 +193,22 @@ func (s *DeviceStore) LoadFromDB() error {
 }
 
 func (s *DeviceStore) LoadOrStore(deviceID string, value *Device) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	if value.GBVersion == "" {
 		value.GBVersion = GBVersionUnknown
 	}
 	existing, loaded := s.devices.LoadOrStore(deviceID, value)
 	if loaded {
 		dev := existing.(*Device)
+		dev.registerWithKeepaliveMutex.Lock()
 		if value.source != "" {
 			dev.source = value.source
 		}
 		if dev.GBVersion == "" || dev.GBVersion == GBVersionUnknown {
 			dev.GBVersion = value.GBVersion
 		}
+		dev.registerWithKeepaliveMutex.Unlock()
 	}
 }
 
@@ -214,7 +221,9 @@ func (s *DeviceStore) Load(deviceID string) (*Device, bool) {
 }
 
 func (s *DeviceStore) Store(deviceID string, value *Device) {
+	s.lifecycleMu.Lock()
 	s.devices.Store(deviceID, value)
+	s.lifecycleMu.Unlock()
 }
 
 func (s *DeviceStore) GetChannel(deviceID, channelID string) (*Channel, bool) {
@@ -226,6 +235,8 @@ func (s *DeviceStore) GetChannel(deviceID, channelID string) (*Channel, bool) {
 }
 
 func (s *DeviceStore) Change(deviceID string, changeFn func(*Device)) error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	v, ok := s.devices.Load(deviceID)
 	if !ok {
 		return ErrDeviceNotExist
@@ -233,8 +244,47 @@ func (s *DeviceStore) Change(deviceID string, changeFn func(*Device)) error {
 	dev := v.(*Device)
 	dev.registerWithKeepaliveMutex.Lock()
 	defer dev.registerWithKeepaliveMutex.Unlock()
+	current, ok := s.devices.Load(deviceID)
+	if !ok || current != dev {
+		return ErrDeviceNotExist
+	}
 	changeFn(dev)
 	return nil
+}
+
+// ChangeAndSaveDevice atomically applies a REGISTER transition and persists it
+// while the device remains a member of the store. If deletion wins first, the
+// registration recreates the entry instead of updating a detached pointer.
+func (s *DeviceStore) ChangeAndSaveDevice(deviceID string, initial *Device, changeFn func(*Device)) (bool, error) {
+	if initial == nil {
+		initial = &Device{DeviceID: deviceID}
+	}
+	if initial.DeviceID == "" {
+		initial.DeviceID = deviceID
+	}
+	if initial.GBVersion == "" {
+		initial.GBVersion = GBVersionUnknown
+	}
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	value, ok := s.devices.Load(deviceID)
+	if !ok {
+		s.devices.Store(deviceID, initial)
+		value = initial
+	}
+	dev := value.(*Device)
+	dev.registerWithKeepaliveMutex.Lock()
+	defer dev.registerWithKeepaliveMutex.Unlock()
+	current, ok := s.devices.Load(deviceID)
+	if !ok || current != dev {
+		return false, ErrDeviceNotExist
+	}
+	wasOnline := dev.IsOnline
+	changeFn(dev)
+	if err := s.SaveDevice(deviceID, dev); err != nil {
+		return wasOnline, err
+	}
+	return wasOnline, nil
 }
 
 func (s *DeviceStore) RangeDevices(fn func(key string, value *Device) bool) {
@@ -406,11 +456,24 @@ func (s *DeviceStore) SaveDeviceInfo(deviceID, manufacturer, model, firmware str
 // The per-device registration lock prevents removing an online device while
 // a concurrent REGISTER / keepalive status update is being applied.
 func (s *DeviceStore) DeleteOfflineDevice(deviceID string) error {
-	dev, ok := s.Load(deviceID)
-	if !ok { return ErrDeviceNotExist }
+	// Serialize deletion with REGISTER's lookup, state transition and DB upsert.
+	// Lock order is lifecycleMu -> registerWithKeepaliveMutex everywhere.
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	value, ok := s.devices.Load(deviceID)
+	if !ok {
+		return ErrDeviceNotExist
+	}
+	dev := value.(*Device)
 	dev.registerWithKeepaliveMutex.Lock()
 	defer dev.registerWithKeepaliveMutex.Unlock()
-	if dev.IsOnline { return ErrDeviceOnline }
+	current, ok := s.devices.Load(deviceID)
+	if !ok || current != dev {
+		return ErrDeviceNotExist
+	}
+	if dev.IsOnline {
+		return ErrDeviceOnline
+	}
 	hasActive := false
 	dev.Channels.Range(func(_, value any) bool {
 		ch := value.(*Channel)
@@ -420,7 +483,9 @@ func (s *DeviceStore) DeleteOfflineDevice(deviceID string) error {
 		}
 		return true
 	})
-	if hasActive { return ErrDeviceHasActiveStream }
+	if hasActive {
+		return ErrDeviceHasActiveStream
+	}
 	if err := s.db.DeleteGB28181Device(context.Background(), deviceID); err != nil {
 		return err
 	}

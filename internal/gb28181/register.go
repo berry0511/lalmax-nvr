@@ -108,22 +108,19 @@ func (g *GB28181API) login(req *sip.Request, deviceID string) {
 	slog.Info("device online", "device_id", deviceID)
 	address := req.Source()
 	transport := strings.ToUpper(req.Transport())
-	wasOnline := false
-	if dev, ok := g.store.Load(deviceID); ok {
-		wasOnline = dev.IsOnline
-	}
-	g.store.Change(deviceID, func(d *Device) {
+	wasOnline, err := g.store.ChangeAndSaveDevice(deviceID, &Device{
+		DeviceID:  deviceID,
+		source:    address,
+		GBVersion: g.configuredGBVersion(),
+	}, func(d *Device) {
 		d.IsOnline = true
 		d.LastRegisterAt = time.Now()
 		d.LastKeepaliveAt = time.Now()
 		d.Address = address
 		d.Transport = transport
 	})
-	// Persist to database (upsert ensures device exists even on first registration)
-	if dev, ok := g.store.Load(deviceID); ok {
-		if err := g.store.SaveDevice(deviceID, dev); err != nil {
-			slog.Error("failed to save device registration in DB", "device_id", deviceID, "error", err)
-		}
+	if err != nil {
+		slog.Error("failed to atomically save device registration in DB", "device_id", deviceID, "error", err)
 	}
 	if !wasOnline {
 		g.store.recordOperation(deviceID, true, address)
