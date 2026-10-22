@@ -52,23 +52,25 @@ func (g *GB28181API) restoreHistoricalTCPRoute(deviceID, source, transport strin
 	if !strings.EqualFold(transport, "TCP") || filterUnknowDevices(deviceID) != nil {
 		return
 	}
-	dev, ok := g.store.Load(deviceID)
-	if !ok || dev == nil || !dev.LastRegisterAt.After(time.Time{}) || dev.Transport != "" {
-		return
-	}
-	oldHost, _, oldErr := net.SplitHostPort(dev.Address)
 	newHost, _, newErr := net.SplitHostPort(source)
-	if oldErr != nil || newErr != nil || net.ParseIP(oldHost) == nil || oldHost != newHost {
+	if newErr != nil || net.ParseIP(newHost) == nil {
 		return
 	}
-	// Rebind only a known, previously registered device. The 20-digit ID and
-	// source IP are compatibility constraints, not cryptographic proof.
+	// Validate and update while the current map member is locked; never mutate
+	// a stale Device pointer obtained before a concurrent offline deletion.
+	changed := false
 	if err := g.store.Change(deviceID, func(d *Device) {
-		if d.Transport == "" && d.LastRegisterAt.After(time.Time{}) {
-			d.Transport = "TCP"
-			d.Address = source
+		if !d.LastRegisterAt.After(time.Time{}) || d.Transport != "" {
+			return
 		}
-	}); err != nil {
+		oldHost, _, oldErr := net.SplitHostPort(d.Address)
+		if oldErr != nil || net.ParseIP(oldHost) == nil || oldHost != newHost {
+			return
+		}
+		d.Transport = "TCP"
+		d.Address = source
+		changed = true
+	}); err != nil || !changed {
 		return
 	}
 	slog.Warn("[SIP] historical TCP route restored from matching source IP (compatibility trust)",
@@ -76,44 +78,43 @@ func (g *GB28181API) restoreHistoricalTCPRoute(deviceID, source, transport strin
 }
 
 func (g *GB28181API) handleKeepalive(deviceID, source, status string) {
-	// Never allow an unauthenticated keepalive to enroll a new device.
-	dev, known := g.store.Load(deviceID)
-	if !known || dev == nil {
-		return
-	}
-	// Limit MESSAGE/NOTIFY heartbeats to the previously registered source IP.
-	// NAT source port changes are tolerated, not arbitrary source IP changes.
-	if !dev.LastRegisterAt.IsZero() && dev.Address != "" {
-		oldHost, _, oldErr := net.SplitHostPort(dev.Address)
-		newHost, _, newErr := net.SplitHostPort(source)
-		if oldErr != nil || newErr != nil || oldHost != newHost {
-			return
-		}
-	}
-	wasOnline := dev.IsOnline
+	// Never allow an unauthenticated keepalive to enroll a new device. Validate
+	// the registered source and persist the state transition while holding the
+	// same device lock used by deletion. If deletion wins, this returns not-found
+	// and cannot UPSERT the removed row back into the database.
 	isOnline := status == "OK" || status == "ON"
-
-	g.store.Change(deviceID, func(d *Device) {
+	wasOnline, dev, err := g.store.ChangeAndSaveExistingDevice(deviceID, func(d *Device) error {
+		if !d.LastRegisterAt.IsZero() && d.Address != "" {
+			oldHost, _, oldErr := net.SplitHostPort(d.Address)
+			newHost, _, newErr := net.SplitHostPort(source)
+			if oldErr != nil || newErr != nil || oldHost != newHost {
+				return ErrDeviceSourceMismatch
+			}
+		}
 		d.LastKeepaliveAt = time.Now()
 		d.IsOnline = isOnline
 		// The historical route recovery above may update Address only when
 		// source IP matched the stored authenticated-registration address.
-		// Otherwise keep existing routed address if transport is already known.
 		if d.Address == "" {
 			d.Address = source
 		}
+		return nil
 	})
-
-	if err := g.store.UpdateDeviceStatus(deviceID, isOnline, dev.Address); err != nil {
-		slog.Error("failed to update device status in DB", "device_id", deviceID, "error", err)
+	if err != nil {
+		if err != ErrDeviceNotExist && err != ErrDeviceSourceMismatch {
+			slog.Error("[SIP] failed to persist keepalive", "device_id", deviceID, "error", err)
+		}
+		return
 	}
 	if wasOnline != isOnline {
 		g.store.recordOperation(deviceID, isOnline, source)
 	}
-
 	slog.Debug("[SIP] Keepalive processed", "device_id", deviceID, "status", status, "source", source)
 
-	if dev == nil {
+	// Avoid starting catalog queries for a device that was removed immediately
+	// after the heartbeat transaction completed.
+	current, exists := g.store.Load(deviceID)
+	if !exists || current != dev {
 		return
 	}
 	hasChannels := false
