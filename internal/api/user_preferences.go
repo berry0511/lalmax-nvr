@@ -2,6 +2,7 @@ package api
 
 import (
  "encoding/json"
+ "context"
  "io"
  "net/http"
  "strings"
@@ -10,6 +11,11 @@ import (
  "github.com/lalmax-pro/lalmax-nvr/internal/middleware"
  "github.com/lalmax-pro/lalmax-nvr/internal/model"
 )
+
+type accountPreferenceStore interface {
+ GetUserPreference(context.Context, string, string) (string, bool, error)
+ SetUserPreference(context.Context, string, string, string) error
+}
 
 func (h *Handler) userPreference(w http.ResponseWriter, r *http.Request) {
  user, ok := r.Context().Value(middleware.UserContextKey).(*model.User)
@@ -23,9 +29,11 @@ func (h *Handler) userPreference(w http.ResponseWriter, r *http.Request) {
   http.Error(w, "unsupported preference namespace", http.StatusBadRequest)
   return
  }
+ store, ok := h.db.(accountPreferenceStore)
+ if !ok { http.Error(w, "user preferences unavailable", http.StatusServiceUnavailable); return }
  switch r.Method {
  case http.MethodGet:
-  value, found, err := h.db.GetUserPreference(r.Context(), user.Username, namespace)
+  value, found, err := store.GetUserPreference(r.Context(), user.Username, namespace)
   if err != nil { http.Error(w, "failed to read preferences", http.StatusInternalServerError); return }
   w.Header().Set("Content-Type", "application/json")
   if !found { _, _ = io.WriteString(w, "null"); return }
@@ -52,7 +60,7 @@ func (h *Handler) userPreference(w http.ResponseWriter, r *http.Request) {
    id, ok := slot.(string)
    if !ok || len(id) > 256 { http.Error(w, "invalid slot", http.StatusBadRequest); return }
   }
-  if err := h.db.SetUserPreference(r.Context(), user.Username, namespace, string(data)); err != nil {
+  if err := store.SetUserPreference(r.Context(), user.Username, namespace, string(data)); err != nil {
    http.Error(w, "failed to save preferences", http.StatusInternalServerError)
    return
   }
