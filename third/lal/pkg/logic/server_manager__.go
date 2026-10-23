@@ -532,6 +532,12 @@ func (sm *ServerManager) OnNewRtmpSubSession(session *rtmp.ServerSession) error 
 	info.HasOutSession = group.HasOutSession()
 
 	sm.nhOnSubStart(info)
+	// lal can keep an RTMP subscriber connected before a publisher appears.
+	// Emit the event AFTER successful subscriber authentication and admission.
+	// The NVR hook checks whether this is a known GB28181 channel.
+	if !info.HasInSession && sm.option.OnStreamNotFound != nil {
+		sm.option.OnStreamNotFound(session.AppName(), session.StreamName(), "rtmp")
+	}
 	return nil
 }
 
@@ -697,6 +703,11 @@ func (sm *ServerManager) OnNewRtspSubSessionDescribe(session *rtsp.SubSession) (
 	info.HasOutSession = group.HasOutSession()
 
 	sm.nhOnSubStart(info)
+	// A DESCRIBE with no SDP stays pending in lal until a publisher feeds SDP.
+	// Notify only after RTSP authentication, not on ANNOUNCE (publish).
+	if len(sdp) == 0 && sm.option.OnStreamNotFound != nil {
+		sm.option.OnStreamNotFound(session.AppName(), session.StreamName(), "rtsp")
+	}
 	return
 }
 

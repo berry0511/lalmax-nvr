@@ -768,11 +768,11 @@ func NewApp(cfg *config.Config, configPath string) (*App, error) {
 			Filter: lalmaxserver.NewHookEventFilter("", "", "", []string{lalmaxserver.HookEventStreamNotFound}),
 		})
 		if hookErr != nil {
-			slog.Warn("failed to register GB28181 WHEP on-demand hook", "error", hookErr)
+			slog.Warn("failed to register GB28181 on-demand hook", "error", hookErr)
 		} else {
 			a.gbWHEPHook = hook
 			if cfg.GB28181.WHEPOnDemandEnabled {
-				slog.Warn("GB28181 WHEP on-demand enabled: remote WHEP requests may trigger SIP INVITE; restrict public access")
+				slog.Warn("GB28181 on-demand enabled: WHEP/RTSP/RTMP playback may trigger SIP INVITE; restrict media access")
 			}
 		}
 	}
