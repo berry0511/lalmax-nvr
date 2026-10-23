@@ -1252,6 +1252,20 @@
   onMount(() => {
     if (initialAdd) openAddForm();
     loadDevices();
+    // Restored tabs bypass click handlers: fetch their data on page reload too.
+    if (activeTab === 'gb28181') {
+      if (gb28181SubTab === 'alarms') void loadAlarms();
+      if (gb28181SubTab === 'platforms') void loadPlatforms();
+      if (gb28181SubTab === 'platform_events') {
+        void loadPlatformEvents();
+        void loadPlatformStatuses();
+      }
+      if (gb28181SubTab === 'records') {
+        const range = getDefaultTimeRange();
+        recordStartTime = range.start;
+        recordEndTime = range.end;
+      }
+    }
     loadHealth();
     loadArchives();
     
