@@ -48,11 +48,11 @@
   // Device type tabs
   type DeviceType = 'onvif' | 'gb28181' | 'xiaomi' | 'push' | 'archives';
   const allowedTabs: DeviceType[] = ['onvif', 'gb28181', 'xiaomi', 'push', 'archives'];
-  let activeTab = $state<DeviceType>(allowedTabs.includes(initialTab as DeviceType) ? initialTab as DeviceType : 'onvif');
+  let activeTab = $state<DeviceType>('onvif');
 
   // ONVIF sub-tabs
   type ONVIFSubTab = 'devices' | 'recordings';
-  let onvifSubTab = $state<ONVIFSubTab>(initialSubTab === 'recordings' ? 'recordings' : 'devices');
+  let onvifSubTab = $state<ONVIFSubTab>('devices');
 
   // GB28181 state
   let gb28181Devices = $state<GB28181Device[]>([]);
@@ -64,7 +64,13 @@
   // GB28181 sub-tabs
   type GB28181SubTab = 'devices' | 'records' | 'alarms' | 'platforms' | 'platform_events';
   const gbAllowedSubTabs: GB28181SubTab[] = ['devices', 'records', 'alarms', 'platforms', 'platform_events'];
-  let gb28181SubTab = $state<GB28181SubTab>(gbAllowedSubTabs.includes(initialSubTab as GB28181SubTab) ? initialSubTab as GB28181SubTab : 'devices');
+  let gb28181SubTab = $state<GB28181SubTab>('devices');
+
+  $effect(() => {
+    activeTab = allowedTabs.includes(initialTab as DeviceType) ? initialTab as DeviceType : 'onvif';
+    onvifSubTab = initialSubTab === 'recordings' ? 'recordings' : 'devices';
+    gb28181SubTab = gbAllowedSubTabs.includes(initialSubTab as GB28181SubTab) ? initialSubTab as GB28181SubTab : 'devices';
+  });
 
   // GB28181 platforms state
   let platforms = $state<GB28181Platform[]>([]);
