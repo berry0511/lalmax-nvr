@@ -180,7 +180,10 @@
   }
 
   function goBack() {
-    window.location.hash = '#/devices';
+    const query = new URLSearchParams(window.location.hash.split('?')[1] || '');
+    const from = query.get('from');
+    const validSources = ['onvif', 'gb28181', 'xiaomi', 'push', 'archives'];
+    window.location.hash = validSources.includes(from || '') ? `#/devices?tab=${from}` : '#/devices';
   }
 
   function toggleFullscreen() {
