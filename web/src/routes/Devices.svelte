@@ -43,15 +43,16 @@
   import ONVIFRecordingQuery from '$lib/components/ONVIFRecordingQuery.svelte';
   import Pagination from '../components/Pagination.svelte';
 
-  let { initialAdd = false }: { initialAdd?: boolean } = $props();
+  let { initialAdd = false, initialTab = '', initialSubTab = '' }: { initialAdd?: boolean; initialTab?: string; initialSubTab?: string } = $props();
 
   // Device type tabs
   type DeviceType = 'onvif' | 'gb28181' | 'xiaomi' | 'push' | 'archives';
-  let activeTab = $state<DeviceType>('onvif');
+  const allowedTabs: DeviceType[] = ['onvif', 'gb28181', 'xiaomi', 'push', 'archives'];
+  let activeTab = $state<DeviceType>(allowedTabs.includes(initialTab as DeviceType) ? initialTab as DeviceType : 'onvif');
 
   // ONVIF sub-tabs
   type ONVIFSubTab = 'devices' | 'recordings';
-  let onvifSubTab = $state<ONVIFSubTab>('devices');
+  let onvifSubTab = $state<ONVIFSubTab>(initialSubTab === 'recordings' ? 'recordings' : 'devices');
 
   // GB28181 state
   let gb28181Devices = $state<GB28181Device[]>([]);
@@ -62,7 +63,8 @@
 
   // GB28181 sub-tabs
   type GB28181SubTab = 'devices' | 'records' | 'alarms' | 'platforms' | 'platform_events';
-  let gb28181SubTab = $state<GB28181SubTab>('devices');
+  const gbAllowedSubTabs: GB28181SubTab[] = ['devices', 'records', 'alarms', 'platforms', 'platform_events'];
+  let gb28181SubTab = $state<GB28181SubTab>(gbAllowedSubTabs.includes(initialSubTab as GB28181SubTab) ? initialSubTab as GB28181SubTab : 'devices');
 
   // GB28181 platforms state
   let platforms = $state<GB28181Platform[]>([]);
@@ -674,6 +676,7 @@
 
   function handleGB28181SubTabChange(tab: GB28181SubTab) {
     gb28181SubTab = tab;
+    syncDeviceRoute();
     if (tab === 'records' && gb28181Devices.length > 0) {
       const range = getDefaultTimeRange();
       recordStartTime = range.start;
@@ -799,6 +802,15 @@
 
   function handleONVIFSubTabChange(tab: ONVIFSubTab) {
     onvifSubTab = tab;
+    syncDeviceRoute();
+  }
+
+  function syncDeviceRoute() {
+    const subtab = activeTab === 'gb28181' ? gb28181SubTab : activeTab === 'onvif' ? onvifSubTab : '';
+    const params = new URLSearchParams({ tab: activeTab });
+    if (subtab && subtab !== 'devices') params.set('subtab', subtab);
+    const nextHash = `#/devices?${params.toString()}`;
+    if (window.location.hash !== nextHash) window.history.replaceState(window.history.state, '', nextHash);
   }
 
   function handleTabChange(tab: DeviceType) {
@@ -811,6 +823,7 @@
     if (tab === 'gb28181') {
       gb28181SubTab = 'devices';
     }
+    syncDeviceRoute();
   }
 
   function handleDiscoveryClick() {
@@ -1654,7 +1667,7 @@
                               <!-- Live view -->
                               {#if isChannelPlaying || (channelCamera && channelCamera.status === 'recording')}
                                 <a 
-                                  href="#/live/{channelCamera?.id || `${device.device_id}:${channel.channel_id}`}" 
+                                  href="#/live/{channelCamera?.id || `${device.device_id}:${channel.channel_id}`}?from=gb28181" 
                                   class="btn btn-ghost px-2 py-1 text-sm"
                                   title="实时预览"
                                 >
@@ -2319,7 +2332,7 @@
                 </div>
 
                 <div class="flex items-center gap-2">
-                  <a href="#/live/{camera.id}" class="btn btn-ghost px-2 py-1 text-sm" title="实时预览">
+                  <a href="#/live/{camera.id}?from={activeTab}" class="btn btn-ghost px-2 py-1 text-sm" title="实时预览">
                     <Eye size={14} />
                   </a>
                   <button
