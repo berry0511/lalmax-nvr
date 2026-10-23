@@ -368,6 +368,10 @@ func (h *Handler) Routes() http.Handler {
 		} else {
 			r.Use(h.authMW)
 		}
+		// Account-level UI preferences are private to the authenticated user.
+		r.Get("/api/users/me/preferences/{namespace}", h.userPreference)
+		r.Put("/api/users/me/preferences/{namespace}", h.userPreference)
+
 		r.Post("/api/auth/logout", h.handleLogout)
 		r.Get("/api/health/details", h.handleHealthDetails)
 		r.Route("/api/recordings", func(r chi.Router) {
