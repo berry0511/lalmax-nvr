@@ -502,6 +502,9 @@ func (d *DB) Init(ctx context.Context) error {
 	if err := d.CreateUserTable(ctx); err != nil {
 		return err
 	}
+	if err := d.InitUserPreferences(ctx); err != nil {
+		return err
+	}
 	_, _ = d.execContext(ctx, "UPDATE schema_meta SET value='20' WHERE key='schema_version'")
 
 	// Migration v20 → v21: platform events for cascade history
