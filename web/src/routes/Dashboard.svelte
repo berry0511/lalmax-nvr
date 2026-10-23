@@ -319,7 +319,7 @@
   setContext('reconnect-coordinator', reconnectCoordinator);
 
   function normalizeLayout(value: unknown): GridLayout {
-    if (value === 1 || value === 4 || value === 9 || value === 16) return value;
+    if (value === 1 || value === 4 || value === 6 || value === 9 || value === 16) return value;
     return 4;
   }
 
@@ -364,11 +364,46 @@
     return { layout: 4, slots: normalizeSlots(4, []) };
   }
 
+  type SavedLayout = { layout: GridLayout; slots: (string | null)[] };
+
+  async function loadAccountLayout(): Promise<SavedLayout> {
+    const local = loadSavedLayout();
+    try {
+      const remote = await apiRequest<{layout: number; slots: unknown[]} | null>('/users/me/preferences/dashboard');
+      if (remote !== null) {
+        const layout = normalizeLayout(remote.layout);
+        return { layout, slots: normalizeSlots(layout, remote.slots) };
+      }
+      // One-time import for existing installations. Do not upload defaults as preferences.
+      if (localStorage.getItem(STORAGE_KEY) || loadLegacyCameraIds().length > 0) {
+        await apiRequest('/users/me/preferences/dashboard', {
+          method: 'PUT',
+          body: JSON.stringify(local),
+        });
+      }
+    } catch (e) {
+      console.warn('Account dashboard layout unavailable; using local fallback:', e);
+      showToast('大屏云端配置不可用，暂时使用本机配置', 'warning');
+    }
+    return local;
+  }
+
+  async function persistAccountLayout(value: SavedLayout): Promise<void> {
+    // Keep a local fallback, but cloud persistence is the canonical source.
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(value));
+    try {
+      await apiRequest('/users/me/preferences/dashboard', {
+        method: 'PUT',
+        body: JSON.stringify(value),
+      });
+    } catch (e) {
+      console.error('Failed to save dashboard layout to account:', e);
+      showToast('大屏配置未同步到服务器，请检查连接后重新保存', 'error');
+    }
+  }
+
   function saveLayout() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      layout: gridLayout,
-      slots: slotAssignments,
-    }));
+    void persistAccountLayout({ layout: gridLayout, slots: [...slotAssignments] });
   }
 
   function resizeSlots(slots: (string | null)[], layout: GridLayout): (string | null)[] {
@@ -766,7 +801,7 @@
     let streams: StreamInfo[] = [];
     let cameraErr = '';
     let streamErr = '';
-    const saved = loadSavedLayout();
+    const saved = await loadAccountLayout();
     const camerasPromise = getDashboardCameras();
     // Protocol URL discovery is non-critical and can be slow for large walls.
     // It must not hold up first render or the camera-scoped WebRTC proxy.
