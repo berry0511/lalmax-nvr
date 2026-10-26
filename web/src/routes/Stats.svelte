@@ -59,10 +59,10 @@
   type EgressRow = { stream: string; name: string; protocol: string; remote: string; session: string; kbps: number | null };
   let egressRows = $state<EgressRow[]>([]);
   let egressLoading = $state(false);
+  let egressTimer: ReturnType<typeof setInterval> | undefined;
   let egressError = $state('');
   let egressFetchedAt = $state('');
   let egressScanComplete = $state(true);
-  let egressTimer: ReturnType<typeof setInterval> | undefined;
   let egressKnownKbps = $derived(egressRows.reduce((sum, row) => sum + (row.kbps ?? 0), 0));
   let egressUnknown = $derived(egressRows.filter(row => row.kbps === null).length);
   let egressByProtocol = $derived.by(() => {
@@ -558,6 +558,10 @@
       if (activeTab === 'system')     { loadNetworkInterfaces(); loadMergeData(); }
     }, 30000);
 
+    egressTimer = window.setInterval(() => {
+      if (activeTab === 'traffic' && !document.hidden) void loadEgress();
+    }, 5000);
+
     apiRefreshInterval = window.setInterval(() => {
       if (activeTab === 'api' && !document.hidden && !apiLoading) loadAPIObservability();
     }, 5000);
@@ -580,6 +584,7 @@
     return () => {
       clearInterval(refreshInterval);
       clearInterval(apiRefreshInterval);
+      if (egressTimer) clearInterval(egressTimer);
       apiAbortController?.abort();
       themeObserver?.disconnect();
     };
