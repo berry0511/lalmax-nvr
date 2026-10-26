@@ -18,6 +18,7 @@
   import TalkButton from '../components/TalkButton.svelte';
   import XiaomiTalkButton from '../components/XiaomiTalkButton.svelte';
   import { t } from '$lib/i18n';
+  import { loadGBChannelNames, gbDisplayName } from '$lib/gb-channel-names';
   import { showToast } from '$lib/toast';
   import { loadZones, saveZones, type AiZone } from '$lib/ai-zones';
 
@@ -31,14 +32,8 @@
     catalogChannelName = '';
     if (!isGB28181Camera(cam)) return;
     try {
-      const response = await listGB28181Devices();
-      const match = response.devices.flatMap(device => (device.channels || []).map(channel => ({device, channel})))
-        .find(({device, channel}) =>
-          cam.id === `${device.device_id}_${channel.channel_id}` ||
-          cam.id === `${device.device_id}:${channel.channel_id}` ||
-          cameraId === `${device.device_id}:${channel.channel_id}` ||
-          cameraStreamID(cam) === `${device.device_id}:${channel.channel_id}`);
-      if (match?.channel.name?.trim()) catalogChannelName = match.channel.name.trim();
+      const names = await loadGBChannelNames();
+      catalogChannelName = gbDisplayName(names, [cam.stream_id, cameraStreamID(cam), cam.id, cameraId], '');
     } catch (err) {
       console.warn('GB28181 catalog name lookup failed; using camera name:', err);
     }
