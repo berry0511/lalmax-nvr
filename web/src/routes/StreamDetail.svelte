@@ -4,6 +4,7 @@
   import type { StreamHistorySession, StreamInfo, StreamMetricSample, StreamMetricsPeriod } from '$lib/api';
   import { loadChart, createStreamMetricChart, updateStreamMetricChart } from '$lib/charts';
   import { t } from '$lib/i18n';
+  import { loadGBChannelNames, gbDisplayName, type ChannelNames } from '$lib/gb-channel-names';
   import { showToast } from '$lib/toast';
   import { copyTextWithFallback } from '$lib/clipboard';
   import {
@@ -79,7 +80,8 @@
   let nameInputEl: HTMLInputElement | undefined = $state();
   let savingName = $state(false);
 
-  let displayName = $derived(stream ? (stream.name || stream.camera_name || stream.stream_id) : '');
+  let gbNames = $state<ChannelNames>(new Map());
+  let displayName = $derived(stream ? gbDisplayName(gbNames, [stream.stream_id, stream.camera_id], stream.name || stream.camera_name || stream.stream_id) : '');
 
   // Lazy-loaded players
   let WasmPlayerComponent = $state<any>(null);
@@ -585,6 +587,7 @@
   });
 
   onMount(() => {
+    void loadGBChannelNames().then(names => { gbNames = names; }).catch(() => {});
     if (!streamId) {
       error = t('streams.streamIdRequired');
       loading = false;
