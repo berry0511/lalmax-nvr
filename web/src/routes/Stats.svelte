@@ -1,12 +1,12 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import {
-    getStats, listCameras, healthDetails, getSystemStats, getMergeStatus, getMergePending,
+    getStats, listCameras, listStreams, healthDetails, getSystemStats, getMergeStatus, getMergePending,
     getLocalNetworkInterfaces, getStatsTrends,
     getSystemMetricsHistory, getHourlyStats, getCameraUptimeStats, getAPIObservability, getRecentTraces, getTrace,
   } from '$lib/api';
   import type {
-    StorageStats, Camera, HealthResponse, SystemStats, MergeStatus, MergePending,
+    StorageStats, Camera, StreamInfo, HealthResponse, SystemStats, MergeStatus, MergePending,
     NetworkInterface, SystemMetricSample, HourlyStats, CameraUptimeStat, APIObservabilityResponse,
     TraceListResponse, TraceDetailResponse,
   } from '$lib/api';
@@ -15,7 +15,7 @@
 
   import {
     HardDrive, BarChart3, Video, CameraIcon, Cpu, MemoryStick, Wifi,
-    ChevronDown, ChevronUp, GitMerge, Activity, Clock, Server, Gauge, ExternalLink, X,
+    ChevronDown, ChevronUp, GitMerge, Activity, Clock, Server, Gauge, ExternalLink, X, Network,
   } from 'lucide-svelte';
   import {
     loadChart, createTrendChart, createCameraChart, aggregateCameraTotals, BAR_COLORS,
@@ -25,7 +25,7 @@
 
   // ── Tabs ──────────────────────────────────────────────────────────────────
 
-  type StatsTab = 'overview' | 'resources' | 'api' | 'recordings' | 'cameras' | 'system';
+  type StatsTab = 'overview' | 'resources' | 'api' | 'recordings' | 'cameras' | 'system' | 'traffic';
   let activeTab = $state<StatsTab>('overview');
 
   const tabs: { id: StatsTab; labelKey: string; icon: any }[] = [
@@ -35,6 +35,7 @@
     { id: 'recordings', labelKey: 'stats.tabRecordings', icon: Video },
     { id: 'cameras',    labelKey: 'stats.tabCameras',    icon: CameraIcon },
     { id: 'system',     labelKey: 'stats.tabSystem',     icon: Server },
+    { id: 'traffic', labelKey: '流量出口', icon: Network },
   ];
 
   // ── Shared state ──────────────────────────────────────────────────────────
@@ -52,6 +53,62 @@
   let memoryPercent = $state<string | null>(null);
   let netRateUp = $state<string | null>(null);
   let netRateDown = $state<string | null>(null);
+
+  // Media egress telemetry: reports ONLY subscriber sessions that supply a
+  // send bitrate. It must not be presented as an OS NIC or wire-byte total.
+  type EgressRow = { stream: string; name: string; protocol: string; remote: string; session: string; kbps: number | null };
+  let egressRows = $state<EgressRow[]>([]);
+  let egressLoading = $state(false);
+  let egressError = $state('');
+  let egressFetchedAt = $state('');
+  let egressScanComplete = $state(true);
+  let egressTimer: ReturnType<typeof setInterval> | undefined;
+  let egressKnownKbps = $derived(egressRows.reduce((sum, row) => sum + (row.kbps ?? 0), 0));
+  let egressUnknown = $derived(egressRows.filter(row => row.kbps === null).length);
+  let egressByProtocol = $derived.by(() => {
+    const totals = new Map<string, { kbps: number; count: number; unknown: number }>();
+    for (const row of egressRows) {
+      const key = row.protocol || 'unknown';
+      const item = totals.get(key) || {kbps: 0, count: 0, unknown: 0};
+      item.count++;
+      if (row.kbps === null) item.unknown++;
+      else item.kbps += row.kbps;
+      totals.set(key, item);
+    }
+    return [...totals.entries()].map(([protocol, stats]) => ({ protocol, ...stats })).sort((a, b) => b.kbps - a.kbps);
+  });
+  function formatMbps(kbps: number): string { return (kbps / 1000).toFixed(2) + ' Mbps'; }
+  async function loadEgress() {
+    if (egressLoading) return;
+    egressLoading = true;
+    egressError = '';
+    try {
+      const streams: StreamInfo[] = [];
+      const limit = 200;
+      let offset = 0;
+      let complete = true;
+      for (let page = 0; page < 50; page++) {
+        const res = await listStreams({ limit, offset });
+        streams.push(...res.streams);
+        offset += res.streams.length;
+        if (!res.streams.length || offset >= res.total) break;
+        if (page === 49) complete = false;
+      }
+      egressScanComplete = complete;
+      egressRows = streams.flatMap(stream => (stream.subscribers || []).map(sub => ({
+        stream: stream.stream_id,
+        name: stream.name || stream.camera_name || stream.stream_id,
+        protocol: sub.protocol || 'unknown',
+        remote: sub.remote || '未提供',
+        session: sub.session_id,
+        kbps: typeof sub.write_bitrate_kbits === 'number' && Number.isFinite(sub.write_bitrate_kbits)
+          ? Math.max(0, sub.write_bitrate_kbits) : null,
+      }))).sort((a,b) => (b.kbps ?? -1) - (a.kbps ?? -1));
+      egressFetchedAt = new Date().toLocaleTimeString();
+    } catch (e) {
+      egressError = e instanceof Error ? e.message : String(e);
+    } finally { egressLoading = false; }
+  }
 
   // Auto-refresh
   let refreshInterval: number;
@@ -442,6 +499,7 @@
       if (tab === 'recordings') { loadHourlyStats(); loadTrends(); }
       if (tab === 'cameras')    loadStabilityData();
       if (tab === 'system')     { loadNetworkInterfaces(); loadMergeData(); }
+      if (tab === 'traffic')    void loadEgress();
     }, 30);
   }
 
@@ -570,6 +628,43 @@
         </button>
       {/each}
     </div>
+
+    {#if activeTab === 'traffic'}
+      <section class="card p-5 mb-6 space-y-4" aria-label="NVR 媒体出口监控">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 class="text-lg font-semibold th-text-primary">媒体流量出口</h3>
+            <p class="text-sm th-text-secondary">统计活跃订阅会话上报的发送码率；不包含无法归属的 UDP、操作系统其他服务或协议开销。</p>
+          </div>
+          <button class="btn btn-secondary btn-sm" onclick={() => void loadEgress()} disabled={egressLoading}>刷新</button>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div class="rounded-lg p-4 th-bg-tertiary"><p class="text-sm th-text-secondary">已知媒体出口合计</p><strong class="text-2xl">{formatMbps(egressKnownKbps)}</strong></div>
+          <div class="rounded-lg p-4 th-bg-tertiary"><p class="text-sm th-text-secondary">活跃订阅会话</p><strong class="text-2xl">{egressRows.length}</strong></div>
+          <div class="rounded-lg p-4 th-bg-tertiary"><p class="text-sm th-text-secondary">未报告发送码率</p><strong class="text-2xl">{egressUnknown}</strong></div>
+        </div>
+        {#if egressUnknown > 0 || !egressScanComplete}
+          <p class="text-sm th-text-secondary">注意：部分会话缺少发送码率或列表未完整扫描，合计值不是 NVR 实际总出口。</p>
+        {/if}
+        {#if egressError}<p class="th-color-danger" role="alert">加载失败：{egressError}</p>{/if}
+        <p class="text-xs th-text-secondary">最近更新：{egressFetchedAt || '尚未采集'}（按当前会话快照统计）</p>
+        <h4 class="font-semibold th-text-primary">按协议统计</h4>
+        <div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr><th class="text-left p-2">协议</th><th class="text-right p-2">会话数</th><th class="text-right p-2">已知出口</th><th class="text-right p-2">未知会话</th></tr></thead><tbody>
+          {#each egressByProtocol as group (group.protocol)}
+            <tr class="border-t th-border"><td class="p-2">{group.protocol}</td><td class="p-2 text-right">{group.count}</td><td class="p-2 text-right">{formatMbps(group.kbps)}</td><td class="p-2 text-right">{group.unknown}</td></tr>
+          {/each}
+        </tbody></table></div>
+        <h4 class="font-semibold th-text-primary">按流与客户端</h4>
+        <div class="overflow-x-auto max-h-[520px] overflow-y-auto">
+          <table class="w-full text-sm"><thead class="sticky top-0 th-bg-secondary"><tr><th class="p-2 text-left">流名称 / ID</th><th class="p-2 text-left">协议</th><th class="p-2 text-left">客户端</th><th class="p-2 text-right">发送码率</th></tr></thead><tbody>
+            {#each egressRows as item (item.stream + ':' + item.session)}
+              <tr class="border-t th-border"><td class="p-2"><div>{item.name}</div><div class="text-xs th-text-secondary">{item.stream}</div></td><td class="p-2">{item.protocol}</td><td class="p-2">{item.remote}</td><td class="p-2 text-right">{item.kbps === null ? '未提供' : formatMbps(item.kbps)}</td></tr>
+            {/each}
+          </tbody></table>
+          {#if !egressRows.length && !egressLoading}<p class="p-4 th-text-secondary">当前没有检测到订阅会话</p>{/if}
+        </div>
+      </section>
+    {/if}
 
     <!-- Loading state (initial) -->
     {#if loading && !stats}
