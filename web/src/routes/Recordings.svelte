@@ -6,6 +6,7 @@
   import { formatDuration, formatFileSize } from '$lib/format';
   import { showToast } from '$lib/toast';
   import { t } from '$lib/i18n';
+  import { loadGBChannelNames, gbDisplayName, type ChannelNames } from '$lib/gb-channel-names';
   import { wallMsToHour, wallMsToMediaOffset, vodClips, dayStartFromISO } from '$lib/playback';
   import { Trash2, Download, ChevronLeft, ChevronRight, Calendar, AlertCircle, Play, Search, Video, Lock, Unlock } from 'lucide-svelte';
   import Timeline from '$lib/components/Timeline.svelte';
@@ -16,6 +17,8 @@
   let { initialCameraId = '' }: { initialCameraId?: string } = $props();
 
   let cameras = $state<Camera[]>([]);
+  let gbNames = $state<ChannelNames>(new Map());
+  const sourceName = (camera: Camera) => gbDisplayName(gbNames, [camera.stream_id, camera.id], camera.name || camera.id);
   let recordingSources = $state<RecordingSource[]>([]);
   let selectedCameraId = $state(untrack(() => initialCameraId));
   let selectedDate = $state(formatDateForInput(new Date()));
@@ -61,7 +64,7 @@
     cameras.filter(c => {
       if (!cameraQuery.trim()) return true;
       const q = cameraQuery.trim().toLowerCase();
-      return c.name.toLowerCase().includes(q) || c.id.toLowerCase().includes(q);
+      return sourceName(c).toLowerCase().includes(q) || c.id.toLowerCase().includes(q);
     })
   );
   let visibleStreamSources = $derived(
@@ -124,6 +127,7 @@
   }
 
   async function loadRecordingSources() {
+    const catalogPromise = loadGBChannelNames().catch(() => new Map<string,string>());
     const [cameraResult, sourceResult] = await Promise.allSettled([
       listCameras(undefined, true),
       listRecordingSources(true),
@@ -132,6 +136,7 @@
     if (cameraResult.status === 'fulfilled') cameras = cameraResult.value;
     else console.error('Failed to load cameras:', cameraResult.reason);
 
+    gbNames = await catalogPromise;
     if (sourceResult.status === 'fulfilled') recordingSources = sourceResult.value;
     else console.error('Failed to load recording sources:', sourceResult.reason);
 
@@ -541,7 +546,7 @@
                   onclick={() => selectCamera(camera.id)}
                 >
                   <span class="status-dot {cameraStatusDot(camera)}"></span>
-                  <span class="device-name">{camera.name}</span>
+                  <span class="device-name">{sourceName(camera)}</span>
                 </button>
               {/each}
             {/if}
@@ -549,7 +554,7 @@
           {#each visibleCameras.filter(c => !Object.values(groupCameraIds).flat().includes(c.id)) as camera (camera.id)}
             <button class="device-item" class:active={selectedCameraId === camera.id} onclick={() => selectCamera(camera.id)}>
               <span class="status-dot {cameraStatusDot(camera)}"></span>
-              <span class="device-name">{camera.name}</span>
+              <span class="device-name">{sourceName(camera)}</span>
             </button>
           {/each}
           {:else if visibleCameras.length > 0}
@@ -560,7 +565,7 @@
               onclick={() => selectCamera(camera.id)}
             >
               <span class="status-dot {cameraStatusDot(camera)}"></span>
-              <span class="device-name">{camera.name}</span>
+              <span class="device-name">{sourceName(camera)}</span>
               {#if camera.archived}
                 <span class="badge badge-warning text-xs">{t('recordings.page.archived')}</span>
               {/if}
