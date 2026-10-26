@@ -3,6 +3,7 @@
   import { createStream, deleteStream, listStreams, subscribeNvrEvents, updateStream } from '$lib/api';
   import type { StreamInfo } from '$lib/api';
   import { t } from '$lib/i18n';
+  import { loadGBChannelNames, gbDisplayName, type ChannelNames } from '$lib/gb-channel-names';
   import { showToast } from '$lib/toast';
   import { copyTextWithFallback } from '$lib/clipboard';
   import StreamCard from '$lib/components/StreamCard.svelte';
@@ -29,6 +30,8 @@
   let searchApplied = $state('');
   let searchTimer: number | undefined;
 
+  let gbNames = $state<ChannelNames>(new Map());
+  const displayStreamName = (stream: StreamInfo) => gbDisplayName(gbNames, [stream.stream_id, stream.camera_id], stream.name || stream.camera_name || stream.stream_id);
   let managedStreams = $state<StreamInfo[]>([]);
   let externalStreams = $state<StreamInfo[]>([]);
   let managedTotal = $state(0);
@@ -224,6 +227,7 @@
       openCreateDialog();
       createMode = initialCreateMode;
     }
+    void loadGBChannelNames().then(names => { gbNames = names; }).catch(() => {});
     void loadStreams();
     stopEvents = subscribeNvrEvents({}, () => { void loadStreams({ silent: true }); }, { debounceMs: 500 });
     refreshTimer = window.setInterval(() => {
@@ -258,6 +262,7 @@
     {#each items as stream (stream.stream_id)}
       <StreamCard
         {stream}
+        displayTitle={displayStreamName(stream)}
         {managed}
         onsaveName={handleSaveName}
         ondelete={managed ? undefined : handleDelete}
