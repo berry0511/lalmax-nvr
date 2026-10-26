@@ -5,19 +5,20 @@
 
   interface Props {
     stream: StreamInfo;
+    displayTitle?: string;
     managed?: boolean;
     onsaveName?: (stream: StreamInfo, name: string) => void;
     ondelete?: (stream: StreamInfo) => void;
     deleting?: boolean;
   }
 
-  let { stream, managed = false, onsaveName, ondelete, deleting = false }: Props = $props();
+  let { stream, displayTitle, managed = false, onsaveName, ondelete, deleting = false }: Props = $props();
 
   let editingName = $state(false);
   let nameInput = $state('');
   let nameInputEl: HTMLInputElement | undefined = $state();
 
-  let title = $derived(stream.name || (managed ? (stream.camera_name || stream.stream_id) : stream.stream_id));
+  let title = $derived(displayTitle || stream.name || (managed ? (stream.camera_name || stream.stream_id) : stream.stream_id));
 
   $effect(() => {
     if (editingName && nameInputEl) {
