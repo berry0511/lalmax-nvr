@@ -11,6 +11,7 @@
     TraceListResponse, TraceDetailResponse,
   } from '$lib/api';
   import { t } from '$lib/i18n';
+  import { loadGBChannelNames, gbDisplayName, type ChannelNames } from '$lib/gb-channel-names';
   import { formatFileSize, formatDate } from '$lib/format';
 
   import {
@@ -58,6 +59,7 @@
   // send bitrate. It must not be presented as an OS NIC or wire-byte total.
   type EgressRow = { stream: string; name: string; protocol: string; remote: string; session: string; kbps: number | null };
   let egressRows = $state<EgressRow[]>([]);
+  let gbNames = $state<ChannelNames>(new Map());
   let egressLoading = $state(false);
   let egressTimer: ReturnType<typeof setInterval> | undefined;
   let egressError = $state('');
@@ -83,6 +85,7 @@
     egressLoading = true;
     egressError = '';
     try {
+      const catalogPromise = loadGBChannelNames().catch(() => new Map<string,string>());
       const streams: StreamInfo[] = [];
       const limit = 200;
       let offset = 0;
@@ -95,9 +98,10 @@
         if (page === 49) complete = false;
       }
       egressScanComplete = complete;
+      gbNames = await catalogPromise;
       egressRows = streams.flatMap(stream => (stream.subscribers || []).map(sub => ({
         stream: stream.stream_id,
-        name: stream.name || stream.camera_name || stream.stream_id,
+        name: gbDisplayName(gbNames, [stream.stream_id, stream.camera_id], stream.name || stream.camera_name || stream.stream_id),
         protocol: sub.protocol || 'unknown',
         remote: sub.remote || '未提供',
         session: sub.session_id,
