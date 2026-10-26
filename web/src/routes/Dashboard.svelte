@@ -16,6 +16,7 @@
   } from '$lib/api';  import type { NvrEvent } from '$lib/api';
   import type { Camera, ProtocolInfo, StreamInfo } from '$lib/api';
   import { t } from '$lib/i18n';
+  import { loadGBChannelNames, gbDisplayName, type ChannelNames } from '$lib/gb-channel-names';
   import { showToast } from '$lib/toast';
   import { Loader2, AlertCircle, Video, VideoOff, X, Settings, ImageOff, CircleCheck, CirclePause, WifiOff, LayoutGrid, Plus, Search, Play } from 'lucide-svelte';
   import PtzControl from '../components/PtzControl.svelte';
@@ -27,6 +28,10 @@
   import { formatDate } from '$lib/format';
   import { createSnapshotManager } from '$lib/snapshot';
   import { createReconnectCoordinator } from '$lib/reconnect-coordinator.svelte';
+
+  let gbNames = $state<ChannelNames>(new Map());
+  function cameraTitle(camera: Camera): string { return gbDisplayName(gbNames, [camera.stream_id, camera.id], camera.name || camera.id); }
+  function streamTitle(stream: StreamInfo): string { return gbDisplayName(gbNames, [stream.stream_id, stream.camera_id], stream.name || stream.camera_name || stream.stream_id); }
 
   type GridLayout = 1 | 4 | 6 | 9 | 16;
   const LAYOUT_OPTIONS: GridLayout[] = [1, 4, 6, 9, 16];
@@ -100,7 +105,7 @@
       seen.add(stream.stream_id);
       items.push({
         id: stream.stream_id,
-        name: stream.name || stream.camera_name || stream.stream_id,
+        name: streamTitle(stream),
         kind: 'stream',
         stream,
       });
@@ -802,6 +807,7 @@
     let cameraErr = '';
     let streamErr = '';
     const saved = await loadAccountLayout();
+    void loadGBChannelNames().then(names => { gbNames = names; }).catch(e => console.warn('GB28181 name sync failed:', e));
     const camerasPromise = getDashboardCameras();
     // Protocol URL discovery is non-critical and can be slow for large walls.
     // It must not hold up first render or the camera-scoped WebRTC proxy.
@@ -1134,7 +1140,7 @@
               style="min-height: {getCellMinHeight(gridLayout)};"
               role="button"
               tabindex="0"
-              aria-label="{camera.name || camera.id} — {status.text}"
+              aria-label="{cameraTitle(camera)} — {status.text}"
               onclick={() => handleCellClick(camera)}
               onkeydown={(e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleCellClick(camera); } }}
               ondblclick={() => handleCellDblClick(camera)}
@@ -1159,7 +1165,7 @@
                 <!-- Snapshot image -->
                 <img
                   src={snapshotUrls[camera.id]}
-                  alt={camera.name || camera.id}
+                  alt={cameraTitle(camera)}
                   class="w-full h-full object-contain"
                 />
                 <!-- Transient error overlay (keeps last good image visible) -->
@@ -1186,14 +1192,14 @@
                     <StatusIcon size={10} />
                     {status.text}
                   </span>
-                  <span class="text-white text-sm font-medium truncate">{camera.name || camera.id}</span>
+                  <span class="text-white text-sm font-medium truncate">{cameraTitle(camera)}</span>
                 </div>
               </div>
 
             {:else if mode === 'hls'}
               <VideoPlayer
                 cameraId={camera.id}
-                cameraName={camera.name || camera.id}
+                cameraName={cameraTitle(camera)}
                 streamUrl={getStreamUrl(camera.id)}
                 cameraProtocol={camera.protocol}
                 protocol={defaultProtocol}
@@ -1206,7 +1212,7 @@
                    SIP EnsurePlay runs in parallel and never gates the player. -->
               <WebRTCPlayer
                 cameraId={camera.id}
-                cameraName={camera.name || camera.id}
+                cameraName={cameraTitle(camera)}
                 expanded={expandedCameraId === camera.id}
                 {tabVisible}
               />
@@ -1227,7 +1233,7 @@
             {:else if mode === 'flv' || mode === 'ws-flv'}
               <FlvPlayer
                 cameraId={camera.id}
-                cameraName={camera.name || camera.id}
+                cameraName={cameraTitle(camera)}
                 streamUrl={getCameraPlayURL(camera.id, mode, mode === 'flv' ? streamMediaURL(streamIdFor(camera.id), 'flv') : '')}
                 protocol={mode === 'ws-flv' ? 'ws-flv' : 'flv'}
                 expanded={expandedCameraId === camera.id}
@@ -1238,7 +1244,7 @@
                 {@const WasmPlayer = WasmPlayerComponent}
                 <WasmPlayer
                   cameraId={camera.id}
-                  cameraName={camera.name || camera.id}
+                  cameraName={cameraTitle(camera)}
                     wsPath={getCameraPlayURL(camera.id, 'wasm', streamMediaURL(streamIdFor(camera.id), 'ws'))}
                   expanded={expandedCameraId === camera.id}
                   tabVisible={tabVisible}
@@ -1265,7 +1271,7 @@
                 {@const FMP4Player = FMP4PlayerComponent}
                 <FMP4Player
                   cameraId={camera.id}
-                  cameraName={camera.name || camera.id}
+                  cameraName={cameraTitle(camera)}
                   streamUrl={getCameraPlayURL(camera.id, 'fmp4', streamMediaURL(streamIdFor(camera.id), 'fmp4'))}
                   expanded={expandedCameraId === camera.id}
                   tabVisible={tabVisible}
@@ -1303,7 +1309,7 @@
                     <CirclePause size={10} />
                     {t('live.notSupported')}
                   </span>
-                  <span class="text-white text-sm font-medium truncate">{camera.name || camera.id}</span>
+                  <span class="text-white text-sm font-medium truncate">{cameraTitle(camera)}</span>
                 </div>
               </div>
             {/if}
