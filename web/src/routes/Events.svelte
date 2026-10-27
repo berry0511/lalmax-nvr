@@ -4,6 +4,7 @@
   import type { Camera, EventsResponse, NvrEvent, AlarmRule } from '$lib/api';
   import { formatDate } from '$lib/format';
   import { t } from '$lib/i18n';
+  import { loadGBChannelNames, gbDisplayName, type ChannelNames } from '$lib/gb-channel-names';
   import { Activity, AlertCircle, Check, ExternalLink, RefreshCw } from 'lucide-svelte';
   import Pagination from '../components/Pagination.svelte';
 
@@ -11,6 +12,8 @@
 
   let events = $state<NvrEvent[]>([]);
   let cameras = $state<Camera[]>([]);
+  let gbNames = $state<ChannelNames>(new Map());
+  const cameraLabel = (camera: Camera) => gbDisplayName(gbNames, [camera.stream_id, camera.id], camera.name || camera.id);
   let total = $state(0);
   let loading = $state(true);
   let error = $state('');
@@ -43,7 +46,7 @@
 
   function getCameraName(cameraId: string): string {
     const camera = cameras.find((c) => c.id === cameraId);
-    return camera?.name || cameraId || t('streams.unknown');
+    return camera ? cameraLabel(camera) : cameraId || t('streams.unknown');
   }
 
   function sourceLabel(source: string): string {
@@ -202,6 +205,7 @@
   }
 
   onMount(() => {
+    void loadGBChannelNames().then(names => { gbNames = names; }).catch(() => {});
     loadCameras();
     loadRules();
   });
@@ -227,7 +231,7 @@
           <select id="event-camera-filter" class="input" bind:value={cameraFilter}>
             <option value="">{t('health.filter.all')}</option>
             {#each cameras as camera}
-              <option value={camera.id}>{camera.name}</option>
+              <option value={camera.id}>{cameraLabel(camera)}</option>
             {/each}
           </select>
         </div>
@@ -258,7 +262,7 @@
         <select id="event-rule-camera" class="input" style="max-width:12rem" bind:value={ruleCamera}>
           <option value="">{t('events.rules.allCameras')}</option>
           {#each cameras as camera}
-            <option value={camera.id}>{camera.name}</option>
+            <option value={camera.id}>{cameraLabel(camera)}</option>
           {/each}
         </select>
         <select class="input" style="max-width:8rem" bind:value={ruleSource}>
