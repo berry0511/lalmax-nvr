@@ -22,7 +22,7 @@
   let { initialCreateMode }: { initialCreateMode?: 'push' | 'pull' } = $props();
 
   const PAGE_SIZE = 12;
-  const streamIDPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+  const streamIDPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}(?:\/[A-Za-z0-9][A-Za-z0-9_-]{0,63})*$/;
 
   let loading = $state(true);
   let error = $state('');
