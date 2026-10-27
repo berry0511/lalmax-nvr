@@ -220,6 +220,8 @@
     // A drag doesn't emit a click consistently (especially across children).
     // Seek once when released; don't accidentally treat shift-pan as a seek.
     if (seekAfterDrag) snapSeekAtHour(hourFromClientX(e.clientX));
+    // A completed drag must not suppress the next legitimate click.
+    window.setTimeout(() => { dragMoved = false; }, 0);
   }
 
   function hourFromClientX(clientX: number): number {
@@ -262,12 +264,13 @@
 
   function handleTimelineClick(e: MouseEvent) {
     if (dragMoved) return;
-    if ((e.target as HTMLElement).closest('button')) return;
     const hour = hourFromClientX(e.clientX);
     if (e.altKey && onMark) {
+      e.preventDefault();
       onMark(hour, e.shiftKey ? 'out' : 'in');
       return;
     }
+    if ((e.target as HTMLElement).closest('button')) return;
     snapSeekAtHour(hour);
   }
 
@@ -362,6 +365,11 @@
         style={getBlockStyle(recording)}
         onclick={(e) => {
           e.stopPropagation();
+          if (e.altKey && onMark) {
+            e.preventDefault();
+            onMark(hourFromClientX(e.clientX), e.shiftKey ? 'out' : 'in');
+            return;
+          }
           if (onSeek) {
             const start = new Date(recording.started_at).getTime();
             const dayStart = new Date(recording.started_at);
