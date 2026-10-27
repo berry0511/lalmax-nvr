@@ -85,6 +85,9 @@ jobs:
     if: needs.plan.outputs.build == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4.2.2
 
@@ -132,13 +135,14 @@ jobs:
         run: go tool cover -func=coverage.out
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5.5.2
+        uses: codecov/codecov-action@v7.1.1
         with:
+          use_oidc: true
           files: coverage.out
           disable_search: true
-          fail_ci_if_error: false
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+          flags: go
+          name: go-unit
+          fail_ci_if_error: true
 
       - name: Check coverage threshold
         run: |
