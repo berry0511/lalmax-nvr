@@ -27,7 +27,13 @@
   // ── Tabs ──────────────────────────────────────────────────────────────────
 
   type StatsTab = 'overview' | 'resources' | 'api' | 'recordings' | 'cameras' | 'system' | 'traffic';
+  let { initialTab = 'overview' }: { initialTab?: string } = $props();
+  const validTabs: StatsTab[] = ['overview', 'resources', 'api', 'recordings', 'cameras', 'system', 'traffic'];
   let activeTab = $state<StatsTab>('overview');
+  $effect(() => {
+    const next = validTabs.includes(initialTab as StatsTab) ? initialTab as StatsTab : 'overview';
+    if (activeTab !== next) switchTab(next);
+  });
 
   const tabs: { id: StatsTab; labelKey: string; icon: any }[] = [
     { id: 'overview',   labelKey: 'stats.tabOverview',   icon: BarChart3 },
@@ -495,6 +501,8 @@
     }
 
     activeTab = tab;
+    const nextHash = tab === 'overview' ? '#/stats' : `#/stats?tab=${tab}`;
+    if (window.location.hash !== nextHash) window.history.replaceState(window.history.state, '', nextHash);
 
     // Lazy-load data for the newly activated tab
     window.setTimeout(() => {
@@ -547,6 +555,10 @@
     loadHealth();
     loadSystemStats();
     window.setTimeout(() => loadSystemStats(), 2000);
+
+    // Restore the selected tab on a full browser refresh, too.
+    const initial = validTabs.includes(initialTab as StatsTab) ? initialTab as StatsTab : 'overview';
+    if (initial !== 'overview') switchTab(initial);
 
     // Load initial tab data
     // (overview needs nothing extra; resources is lazily loaded on tab switch)
