@@ -1332,7 +1332,7 @@
                       <tr class="transition-all duration-200 hover:th-bg-hover">
                         <td class="font-medium th-text-primary">
                           <span class="inline-block w-2 h-2 rounded-full mr-2 {camera.enabled ? 'bg-[var(--color-success)]' : 'bg-[var(--color-danger)]'}"></span>
-                          {camera.name}
+                          {gbDisplayName(gbNames, [camera.stream_id, camera.id], camera.name || camera.id)}
                         </td>
                         <td class="th-text-muted font-mono text-sm">{camera.id}</td>
                         <td><span class="badge badge-neutral">{camera.protocol}</span></td>
