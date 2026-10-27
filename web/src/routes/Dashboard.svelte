@@ -94,7 +94,7 @@
     }
     const items: WallSource[] = cameras.map((cam) => ({
       id: cam.id,
-      name: cam.name || cam.id,
+      name: cameraTitle(cam),
       kind: 'camera',
       camera: cam,
     }));
@@ -1373,7 +1373,7 @@
             </div>
           {:else if stream}
             {@const mode = videoMode()}
-            {@const title = stream.name || stream.stream_id}
+            {@const title = streamTitle(stream)}
             {@const mediaURL = streamPageURL(stream, mode)}
             <!-- svelte-ignore a11y_click_events_have_key_events -->
             <!-- svelte-ignore a11y_no_static_element_interactions -->
