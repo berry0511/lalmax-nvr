@@ -7,7 +7,7 @@
   import { showToast } from '$lib/toast';
   import { t } from '$lib/i18n';
   import { loadGBChannelNames, gbDisplayName, type ChannelNames } from '$lib/gb-channel-names';
-  import { wallMsToHour, wallMsToMediaOffset, vodClips, dayStartFromISO } from '$lib/playback';
+  import { wallMsToHour, wallMsToMediaOffset, mediaOffsetToWallMs, vodClips, dayStartFromISO } from '$lib/playback';
   import { Trash2, Download, ChevronLeft, ChevronRight, Calendar, AlertCircle, Play, Search, Video, Lock, Unlock } from 'lucide-svelte';
   import Timeline from '$lib/components/Timeline.svelte';
   import InlinePlayer from '$lib/components/InlinePlayer.svelte';
@@ -276,18 +276,9 @@
   }
 
   function handleVodTime(mediaMs: number) {
-    const mapped = wallMsToMediaOffset(vodClips(recordings), mediaOffsetToApproxWall(mediaMs));
-    if (mapped) playheadHour = wallMsToHour(new Date(mapped.clip.started_at).getTime() + mapped.offsetSec * 1000, dayStartFromISO(selectedDate));
-  }
-
-  function mediaOffsetToApproxWall(mediaMs: number): number {
-    let acc = 0;
-    for (const clip of vodClips(recordings)) {
-      const dur = Math.max(0, (clip.duration || 0) * 1000);
-      if (mediaMs <= acc + dur) return new Date(clip.started_at).getTime() + (mediaMs - acc);
-      acc += dur;
-    }
-    return dayStartFromISO(selectedDate).getTime();
+    const clips = vodClips(recordings);
+    if (!clips.length || !Number.isFinite(mediaMs)) return;
+    playheadHour = wallMsToHour(mediaOffsetToWallMs(clips, mediaMs), dayStartFromISO(selectedDate));
   }
 
   function handleInlineTime(offsetSec: number) {
