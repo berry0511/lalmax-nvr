@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import {
     getStats, listCameras, listStreams, healthDetails, getSystemStats, getMergeStatus, getMergePending,
     getLocalNetworkInterfaces, getStatsTrends,
@@ -32,7 +32,7 @@
   let activeTab = $state<StatsTab>('overview');
   $effect(() => {
     const next = validTabs.includes(initialTab as StatsTab) ? initialTab as StatsTab : 'overview';
-    if (activeTab !== next) switchTab(next);
+    untrack(() => { if (activeTab !== next) switchTab(next); });
   });
 
   const tabs: { id: StatsTab; labelKey: string; icon: any }[] = [
@@ -555,10 +555,6 @@
     loadHealth();
     loadSystemStats();
     window.setTimeout(() => loadSystemStats(), 2000);
-
-    // Restore the selected tab on a full browser refresh, too.
-    const initial = validTabs.includes(initialTab as StatsTab) ? initialTab as StatsTab : 'overview';
-    if (initial !== 'overview') switchTab(initial);
 
     // Load initial tab data
     // (overview needs nothing extra; resources is lazily loaded on tab switch)
