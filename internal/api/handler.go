@@ -190,6 +190,7 @@ type Handler struct {
 	sysMetrics *sysMetricsHistory
 	// streamMetrics holds per-stream ring buffers of periodic live metric samples.
 	streamMetrics *streamMetricsHistory
+	trafficHistory *trafficHistory
 	// apiObserver records low-cardinality API telemetry for OTel and the local dashboard.
 	apiObserver       *observability.HTTPObserver
 	autoDiscoverApply func(config.AutoDiscoverConfig)
@@ -270,6 +271,7 @@ func NewHandler(db storage.APIRepository, store *storage.Manager, authMW func(ht
 		cloudProxy:       cloudProxy,
 		sysMetrics:       newSysMetricsHistory(),
 		streamMetrics:    newStreamMetricsHistory(),
+		trafficHistory:    &trafficHistory{},
 		apiObserver:      observability.NewHTTPObserver(observability.NewAggregator()),
 		onvifDiscover:    onvif.Discover,
 		onvifProbeDevice: onvif.ProbeDevice,
@@ -492,6 +494,7 @@ func (h *Handler) Routes() http.Handler {
 		r.With(middleware.RequireOperatePermission()).Put("/api/recording-plans/{id}", h.handleUpdateRecordingPlan)
 		r.With(middleware.RequireOperatePermission()).Delete("/api/recording-plans/{id}", h.handleDeleteRecordingPlan)
 		r.Get("/api/streams", h.handleListStreams)
+		r.Get("/api/metrics/traffic/history", h.handleTrafficHistory)
 		r.With(middleware.RequireOperatePermission()).Post("/api/streams", h.handleCreateStream)
 		r.Get("/api/streams/{stream_id}", h.handleGetStream)
 		r.With(middleware.RequireOperatePermission()).Put("/api/streams/{stream_id}", h.handleUpdateStream)
