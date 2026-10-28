@@ -104,7 +104,7 @@ func (s *Service) Start(ctx context.Context, id string, generation uint64) (Runt
 	if err = s.allow(p); err != nil {
 		return Runtime{}, err
 	}
-	_, alreadyActive := s.manager.Status(id)
+	previous, alreadyActive := s.manager.Status(id)
 	runtime, err := s.manager.Acquire(j, p)
 	if err == nil && j.StoppedByUser {
 		if err = s.repo.SetTranscodeJobStopped(ctx, id, generation, false); err != nil {
@@ -114,6 +114,13 @@ func (s *Service) Start(ctx context.Context, id string, generation uint64) (Runt
 				cancel()
 			}
 			return Runtime{}, err
+		}
+	}
+	if err == nil && (!alreadyActive || previous.State != Running) {
+		if retry, exists := s.retry[id]; exists && !retry.healthySince.IsZero() {
+			retry.healthySince = time.Time{}
+			retry.healthyVariantID = ""
+			s.retry[id] = retry
 		}
 	}
 	return runtime, err
@@ -151,11 +158,15 @@ func (s *Service) Delete(ctx context.Context, id string, generation uint64) erro
 }
 
 type retryState struct {
-	generation uint64
-	attempts   int
-	next       time.Time
-	errorCode  string
+	generation       uint64
+	attempts         int
+	next             time.Time
+	errorCode        string
+	healthySince     time.Time
+	healthyVariantID string
 }
+
+const recoveryHealthyResetInterval = 30 * time.Second
 
 // Run periodically reconciles persisted enabled always jobs. Previously enabled
 // jobs revalidate expired capabilities before recovery; new enablement still
@@ -195,17 +206,49 @@ func (s *Service) ReconcileAlways(ctx context.Context) map[string]error {
 		return results
 	}
 	for _, j := range jobs {
+		// A slow probe can exhaust the round's context. Jobs not actually
+		// examined must not be assigned a failure or a backoff.
+		if ctx.Err() != nil {
+			break
+		}
 		if !j.Enabled || j.RunPolicy != Always || j.StoppedByUser {
 			continue
 		}
 		if s.manager != nil {
-			if runtime, ok := s.manager.Status(j.ID); ok && (runtime.State == Running || runtime.State == Starting) {
-				continue
+			if runtime, ok := s.manager.Status(j.ID); ok {
+				if runtime.State == Running {
+					// Reset only after sustained health, so a flapping output
+					// cannot repeatedly bypass exponential backoff.
+					if retry, exists := s.retry[j.ID]; exists {
+						if retry.generation != j.Generation {
+							delete(s.retry, j.ID)
+						} else if retry.healthySince.IsZero() || retry.healthyVariantID != runtime.VariantID {
+							retry.healthySince = time.Now()
+							retry.healthyVariantID = runtime.VariantID
+							s.retry[j.ID] = retry
+						} else if time.Since(retry.healthySince) >= recoveryHealthyResetInterval {
+							delete(s.retry, j.ID)
+						}
+					}
+					continue
+				}
+				if runtime.State == Starting {
+					if retry, exists := s.retry[j.ID]; exists && !retry.healthySince.IsZero() {
+						retry.healthySince = time.Time{}
+						retry.healthyVariantID = ""
+						s.retry[j.ID] = retry
+					}
+					continue
+				}
 			}
 		}
 		retry := s.retry[j.ID]
 		if retry.generation != j.Generation {
 			retry = retryState{generation: j.Generation}
+		} else if !retry.healthySince.IsZero() {
+			retry.healthySince = time.Time{}
+			retry.healthyVariantID = ""
+			s.retry[j.ID] = retry
 		}
 		if time.Now().Before(retry.next) {
 			continue
@@ -219,11 +262,29 @@ func (s *Service) ReconcileAlways(ctx context.Context) map[string]error {
 					// Always jobs may recover after restart or probe expiry. The
 					// probe is bounded by the reconciliation context and never
 					// accepts arbitrary user commands or URLs.
-					_, probeErr := s.probes.Probe(ctx, s.config.Tools(), p)
-					if probeErr == nil {
-						err = s.allow(p)
+					// The subprocess can take tens of seconds. Do not hold the
+					// mutation lock while it runs; stops and deletes must remain
+					// responsive. Revalidate persisted intent before starting.
+					probeErr := func() error {
+						s.mu.Unlock()
+						defer s.mu.Lock()
+						_, err := s.probes.Probe(ctx, s.config.Tools(), p)
+						return err
+					}()
+					if ctx.Err() != nil {
+						err = ctx.Err()
 					} else {
-						err = probeErr
+						current, currentErr := s.job(ctx, j.ID, j.Generation)
+						if currentErr != nil || !current.Enabled || current.RunPolicy != Always || current.StoppedByUser {
+							continue
+						}
+						j = current
+						p, err = s.profile(ctx, current)
+						if err == nil && probeErr != nil {
+							err = probeErr
+						} else if err == nil {
+							err = s.allow(p)
+						}
 					}
 				}
 			}

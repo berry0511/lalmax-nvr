@@ -17,6 +17,7 @@ type Process interface {
 
 type commandProcess struct {
 	cmd      *exec.Cmd
+	owner    *processOwner
 	done     chan struct{}
 	err      error
 	stopOnce sync.Once
@@ -36,14 +37,16 @@ func startCommand(ctx context.Context, path string, args []string) (Process, err
 	// available; exec errors are converted to public domain errors below.
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
-	if err := cmd.Start(); err != nil {
+	owner, err := startOwnedProcess(cmd)
+	if err != nil {
 		return nil, &Error{Code: "process_start_failed", Message: "could not start media backend; check executable and permissions"}
 	}
-	p := &commandProcess{cmd: cmd, done: make(chan struct{})}
+	p := &commandProcess{cmd: cmd, owner: owner, done: make(chan struct{})}
 	go func() {
 		if err := cmd.Wait(); err != nil {
 			p.err = &Error{Code: "process_failed", Message: "media backend exited unsuccessfully"}
 		}
+		owner.close()
 		close(p.done)
 	}()
 	go func() {
@@ -64,12 +67,12 @@ func (p *commandProcess) Stop(ctx context.Context) error {
 		return nil
 	default:
 	}
-	p.stopOnce.Do(func() { _ = interruptProcess(p.cmd) })
+	p.stopOnce.Do(func() { _ = p.owner.interrupt() })
 	select {
 	case <-p.done:
 		return nil
 	case <-ctx.Done():
-		_ = killProcess(p.cmd)
+		_ = p.owner.kill()
 		// WaitDelay bounds inherited pipe cleanup; the process reaper still owns Wait.
 		return ctx.Err()
 	}
