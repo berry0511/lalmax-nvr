@@ -184,6 +184,20 @@ func (p *scriptedPuller) StopHLSPull(_ context.Context, streamID string) error {
 	return err
 }
 
+func (p *scriptedPuller) startCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.starts
+}
+
+func (p *scriptedPuller) stoppedIDs() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]string, len(p.stopped))
+	copy(out, p.stopped)
+	return out
+}
+
 func (p *scriptedPuller) StopAllHLSPulls() {}
 
 func (p *scriptedPuller) PullingStreamIDs() []string {
@@ -295,13 +309,13 @@ func TestEmbyConfigBrowseAndPublish(t *testing.T) {
 	require.Error(t, service.SetPublish(ctx, added.ID, true, false))
 	puller.startErr = nil
 	require.NoError(t, service.SetPublish(ctx, added.ID, true, false))
-	require.Equal(t, 2, puller.starts)
+	require.Equal(t, 2, puller.startCount())
 	require.NoError(t, service.SetPublish(ctx, added.ID, true, false))
-	require.Equal(t, 2, puller.starts)
+	require.Equal(t, 2, puller.startCount())
 	require.NoError(t, service.SetPublish(ctx, added.ID, true, true))
-	require.GreaterOrEqual(t, puller.starts, 2)
+	require.GreaterOrEqual(t, puller.startCount(), 2)
 	require.NoError(t, service.SetPublish(ctx, added.ID, false, false))
-	require.Contains(t, puller.stopped, added.StreamID)
+	require.Contains(t, puller.stoppedIDs(), added.StreamID)
 
 	playlist, headers, err := service.playlist(ctx, "movie-1")
 	require.NoError(t, err)
@@ -324,9 +338,9 @@ func TestEmbyRecoveryStopAndHelpers(t *testing.T) {
 	service := NewService(repo, puller)
 
 	require.NoError(t, service.Recover(context.Background()))
-	require.Equal(t, 1, puller.starts)
+	require.Equal(t, 1, puller.startCount())
 	service.Stop()
-	require.Contains(t, puller.stopped, "emby_film")
+	require.Contains(t, puller.stoppedIDs(), "emby_film")
 
 	repo.listErr = errors.New("list")
 	require.Error(t, service.Recover(context.Background()))
@@ -343,8 +357,7 @@ func TestEmbyRecoveryStopAndHelpers(t *testing.T) {
 	service.timers[item.StreamID] = time.AfterFunc(time.Hour, func() {})
 	service.mu.Unlock()
 	service.finishAfterDuration(item, true, 3)
-	time.Sleep(30 * time.Millisecond)
-	require.GreaterOrEqual(t, puller.starts, 2)
+	require.Eventually(t, func() bool { return puller.startCount() >= 2 }, time.Second, 5*time.Millisecond)
 
 	repo.serverErr = errors.New("db")
 	_, err := service.Config(context.Background())
