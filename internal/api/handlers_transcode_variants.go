@@ -23,15 +23,6 @@ func (h *Handler) handleTranscodePlayURL(w http.ResponseWriter, r *http.Request)
 	if !h.requireTranscodeService(w) {
 		return
 	}
-	if h.transcodePlayback == nil {
-		writeError(w, 503, "derived playback unavailable")
-		return
-	}
-	source, id, err := h.transcodeService.PlaybackTarget(r.Context(), chi.URLParam(r, "stream_id"), chi.URLParam(r, "job_id"))
-	if err != nil {
-		transcodeAPIError(w, err)
-		return
-	}
 	protocol := r.URL.Query().Get("protocol")
 	if protocol == "" {
 		protocol = "rtsp"
@@ -41,12 +32,12 @@ func (h *Handler) handleTranscodePlayURL(w http.ResponseWriter, r *http.Request)
 		writeError(w, 400, "only RTSP derived playback is currently available")
 		return
 	}
-	play, err := h.transcodePlayback.DerivedPlayURL(r.Context(), source, id, protocol)
-	if err != nil || play == nil {
-		writeError(w, 503, "derived playback unavailable")
+	playback, err := h.resolveDerivedPlayback(r.Context(), chi.URLParam(r, "stream_id"), chi.URLParam(r, "job_id"), protocol)
+	if err != nil {
+		writeDerivedPlaybackError(w, err, "derived playback unavailable")
 		return
 	}
-	writeJSON(w, 200, play)
+	writeJSON(w, 200, playback.URL)
 }
 
 func (h *Handler) handleTranscodeVariants(w http.ResponseWriter, r *http.Request) {
