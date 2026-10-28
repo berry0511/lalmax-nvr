@@ -165,3 +165,65 @@ func TestWindowsProbeCancellationKillsDescendants(t *testing.T) {
 		t.Fatalf("probe descendant did not exit: status=%d err=%v", status, err)
 	}
 }
+
+func TestWindowsOwnerCrashHelper(t *testing.T) {
+	if os.Getenv("NVR_JOB_OWNER_CRASH") != "1" {
+		return
+	}
+	if _, err := startCommand(context.Background(), os.Args[0], []string{"-test.run=^TestWindowsJobHelper$"}); err != nil {
+		os.Exit(6)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(os.Getenv("NVR_JOB_PARENT_RELEASE")); err == nil {
+			os.Exit(42)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	os.Exit(7)
+}
+
+func TestWindowsJobClosesWhenOwnerCrashes(t *testing.T) {
+	dir := t.TempDir()
+	pidFile, releaseFile := filepath.Join(dir, "child.pid"), filepath.Join(dir, "release")
+	t.Setenv("NVR_JOB_OWNER_CRASH", "1")
+	t.Setenv("NVR_JOB_HELPER", "parent")
+	t.Setenv("NVR_JOB_CHILD_PID", pidFile)
+	t.Setenv("NVR_JOB_CHILD_READY", filepath.Join(dir, "child.ready"))
+	t.Setenv("NVR_JOB_PARENT_RELEASE", releaseFile)
+	t.Setenv("NVR_JOB_PARENT_EXIT", "0")
+	wrapper := exec.Command(os.Args[0], "-test.run=^TestWindowsOwnerCrashHelper$")
+	if err := wrapper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = wrapper.Process.Kill(); _ = wrapper.Wait() })
+	deadline := time.Now().Add(10 * time.Second)
+	var pid int
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(pidFile); err == nil {
+			pid, _ = strconv.Atoi(string(data))
+			if pid != 0 {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if pid == 0 {
+		t.Fatal("managed descendant did not start")
+	}
+	handle, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(handle)
+	if err := os.WriteFile(releaseFile, []byte("crash"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := wrapper.Wait(); err == nil {
+		t.Fatal("owner was expected to exit abruptly")
+	}
+	status, err := windows.WaitForSingleObject(handle, 3000)
+	if err != nil || status != windows.WAIT_OBJECT_0 {
+		t.Fatalf("descendant survived owner exit: status=%d err=%v", status, err)
+	}
+}

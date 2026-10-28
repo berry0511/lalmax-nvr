@@ -276,3 +276,90 @@ func TestAlwaysTimedOutProbeDoesNotBackoffUnexaminedJob(t *testing.T) {
 		t.Fatal("healthy job was starved by timed-out probe")
 	}
 }
+
+func TestAlwaysProbeDoesNotStartRecreatedJobFromOldGeneration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	p := testProfile(t)
+	j := managerJob(t, "recreated", p)
+	repo := &multiRecoveryRepository{profiles: []Profile{p}, jobs: []Job{j}}
+	runner := &successfulBlockingProbe{entered: make(chan struct{}), release: make(chan struct{})}
+	var release sync.Once
+	defer release.Do(func() { close(runner.release) })
+	executor := &fakeExecutor{}
+	manager := NewManager(ctx, executor, 1)
+	defer manager.Close(context.Background())
+	probes := NewProbeService(runner)
+	service := NewService(repo, manager, probes, Config{Enabled: true})
+	done := make(chan struct{})
+	go func() { defer close(done); service.ReconcileAlways(ctx) }()
+	select {
+	case <-runner.entered:
+	case <-ctx.Done():
+		t.Fatal("probe did not start")
+	}
+	repo.mu.Lock()
+	repo.jobs[0].Generation++ // same ID now denotes a new persisted generation
+	repo.mu.Unlock()
+	release.Do(func() { close(runner.release) })
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("reconciliation did not finish")
+	}
+	if report, ok := probes.Result(p.ID); !ok || !report.CanEnable {
+		t.Fatal("test did not complete a successful probe")
+	}
+	if executor.starts.Load() != 0 {
+		t.Fatal("stale generation was started after probe")
+	}
+}
+
+func TestSharedRestartBeginsNewHealthyInterval(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	p := testProfile(t)
+	j, peer := managerJob(t, "owner", p), managerJob(t, "peer", p)
+	executor := &fakeExecutor{}
+	executor.ready.Store(true)
+	manager := NewManager(ctx, executor, 1)
+	defer manager.Close(context.Background())
+	first, err := manager.Acquire(j, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = manager.Acquire(peer, p); err != nil {
+		t.Fatal(err)
+	}
+	manager.mu.Lock()
+	old := manager.work[first.Key]
+	manager.mu.Unlock()
+	service := NewService(&recoveryRepository{profile: p, job: j}, manager, NewProbeService(nil), Config{Enabled: true})
+	service.retry[j.ID] = retryState{generation: j.Generation, attempts: 5, healthySince: time.Now().Add(-time.Minute), healthyVariantID: first.VariantID}
+	old.cancel()
+	select {
+	case <-old.done:
+	case <-ctx.Done():
+		t.Fatal("old work did not stop")
+	}
+	if _, err = manager.Acquire(peer, p); err != nil {
+		t.Fatal(err)
+	}
+	var restarted Runtime
+	for {
+		restarted, _ = manager.Status(j.ID)
+		if restarted.State == Running && restarted.VariantID != first.VariantID {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("shared work did not recover")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	service.ReconcileAlways(ctx)
+	retry, ok := service.retry[j.ID]
+	if !ok || retry.attempts != 5 || retry.healthyVariantID != restarted.VariantID || time.Since(retry.healthySince) >= recoveryHealthyResetInterval {
+		t.Fatalf("new physical work inherited old healthy interval: %+v", retry)
+	}
+}

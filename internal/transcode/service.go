@@ -119,6 +119,7 @@ func (s *Service) Start(ctx context.Context, id string, generation uint64) (Runt
 	if err == nil && (!alreadyActive || previous.State != Running) {
 		if retry, exists := s.retry[id]; exists && !retry.healthySince.IsZero() {
 			retry.healthySince = time.Time{}
+			retry.healthyVariantID = ""
 			s.retry[id] = retry
 		}
 	}
@@ -157,11 +158,12 @@ func (s *Service) Delete(ctx context.Context, id string, generation uint64) erro
 }
 
 type retryState struct {
-	generation   uint64
-	attempts     int
-	next         time.Time
-	errorCode    string
-	healthySince time.Time
+	generation       uint64
+	attempts         int
+	next             time.Time
+	errorCode        string
+	healthySince     time.Time
+	healthyVariantID string
 }
 
 const recoveryHealthyResetInterval = 30 * time.Second
@@ -220,8 +222,9 @@ func (s *Service) ReconcileAlways(ctx context.Context) map[string]error {
 					if retry, exists := s.retry[j.ID]; exists {
 						if retry.generation != j.Generation {
 							delete(s.retry, j.ID)
-						} else if retry.healthySince.IsZero() {
+						} else if retry.healthySince.IsZero() || retry.healthyVariantID != runtime.VariantID {
 							retry.healthySince = time.Now()
+							retry.healthyVariantID = runtime.VariantID
 							s.retry[j.ID] = retry
 						} else if time.Since(retry.healthySince) >= recoveryHealthyResetInterval {
 							delete(s.retry, j.ID)
@@ -232,6 +235,7 @@ func (s *Service) ReconcileAlways(ctx context.Context) map[string]error {
 				if runtime.State == Starting {
 					if retry, exists := s.retry[j.ID]; exists && !retry.healthySince.IsZero() {
 						retry.healthySince = time.Time{}
+						retry.healthyVariantID = ""
 						s.retry[j.ID] = retry
 					}
 					continue
@@ -243,6 +247,7 @@ func (s *Service) ReconcileAlways(ctx context.Context) map[string]error {
 			retry = retryState{generation: j.Generation}
 		} else if !retry.healthySince.IsZero() {
 			retry.healthySince = time.Time{}
+			retry.healthyVariantID = ""
 			s.retry[j.ID] = retry
 		}
 		if time.Now().Before(retry.next) {
