@@ -3,7 +3,7 @@
   import {
     getStats, listCameras, listStreams, healthDetails, getSystemStats, getMergeStatus, getMergePending,
     getLocalNetworkInterfaces, getStatsTrends,
-    getSystemMetricsHistory, getHourlyStats, getCameraUptimeStats, getAPIObservability, getRecentTraces, getTrace,
+    apiRequest, getSystemMetricsHistory, getHourlyStats, getCameraUptimeStats, getAPIObservability, getRecentTraces, getTrace,
   } from '$lib/api';
   import type {
     StorageStats, Camera, StreamInfo, HealthResponse, SystemStats, MergeStatus, MergePending,
@@ -130,6 +130,62 @@
     } catch (e) {
       egressError = e instanceof Error ? e.message : String(e);
     } finally { egressLoading = false; }
+  }
+
+  type TrafficPoint = { ts: number; in_kbps: number; out_kbps: number; publishers: number; subscribers: number; unknown_in: number; unknown_out: number };
+  let trafficPeriod = $state<'5m' | '15m' | '30m' | '1h' | '6h' | '24h'>('6h');
+  let trafficSamples = $state<TrafficPoint[]>([]);
+  let trafficHistoryError = $state('');
+  let trafficChart: any = null;
+  let trafficChartCanvas: HTMLCanvasElement;
+  let trafficHistoryRequest = 0;
+
+  function destroyTrafficChart() {
+    trafficChart?.destroy();
+    trafficChart = null;
+  }
+
+  async function loadTrafficHistory() {
+    const request = ++trafficHistoryRequest;
+    try {
+      const samples = await apiRequest<TrafficPoint[]>('/metrics/traffic/history?period=' + trafficPeriod);
+      if (request !== trafficHistoryRequest) return;
+      trafficSamples = samples ?? [];
+      trafficHistoryError = '';
+      if (!ChartJs) ChartJs = await loadChart();
+      window.setTimeout(() => { if (request === trafficHistoryRequest && activeTab === 'traffic') buildTrafficChart(); }, 30);
+    } catch (e) {
+      if (request === trafficHistoryRequest) trafficHistoryError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  function buildTrafficChart() {
+    if (!trafficChartCanvas || !ChartJs) return;
+    const labels = trafficSamples.map(p => new Date(p.ts * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}));
+    const values = [
+      trafficSamples.map(p => p.in_kbps / 1000),
+      trafficSamples.map(p => p.out_kbps / 1000),
+    ];
+    if (trafficChart) {
+      trafficChart.data.labels = labels;
+      trafficChart.data.datasets[0].data = values[0];
+      trafficChart.data.datasets[1].data = values[1];
+      trafficChart.update('none');
+      return;
+    }
+    trafficChart = new ChartJs(trafficChartCanvas, {
+      type: 'line',
+      data: { labels, datasets: [
+        {label:'入口 Mbps', data:values[0], borderColor:'#38bdf8', backgroundColor:'rgba(56,189,248,0.08)', fill:true, tension:0.15, pointRadius:0},
+        {label:'出口 Mbps', data:values[1], borderColor:'#8b5cf6', backgroundColor:'rgba(139,92,246,0.08)', fill:true, tension:0.15, pointRadius:0},
+      ]},
+      options: {
+        animation:false, responsive:true, maintainAspectRatio:false,
+        interaction:{mode:'index', intersect:false},
+        scales: {y:{beginAtZero:true,title:{display:true,text:'Mbps'}},x:{ticks:{maxTicksLimit:9}}},
+        plugins:{legend:{position:'top'}},
+      },
+    });
   }
 
   // Auto-refresh
@@ -505,6 +561,7 @@
   function switchTab(tab: StatsTab) {
     // Destroy charts of the leaving tab so canvas IDs don't conflict on re-mount
     if (activeTab === 'resources')  destroySysCharts();
+    if (activeTab === 'traffic') destroyTrafficChart();
     if (activeTab === 'api') destroyAPICharts();
     if (activeTab === 'recordings') {
       if (trendChart)  { trendChart.destroy();  trendChart  = null; }
@@ -523,11 +580,16 @@
       if (tab === 'recordings') { loadHourlyStats(); loadTrends(); }
       if (tab === 'cameras')    loadStabilityData();
       if (tab === 'system')     { loadNetworkInterfaces(); loadMergeData(); }
-      if (tab === 'traffic')    void loadEgress();
+      if (tab === 'traffic')    { void loadEgress(); void loadTrafficHistory(); }
     }, 30);
   }
 
   // ── Reactive: reload when period selectors change ─────────────────────────
+
+  $effect(() => {
+    const _p = trafficPeriod;
+    if (activeTab === 'traffic') void loadTrafficHistory();
+  });
 
   $effect(() => {
     const _p = sysHistoryPeriod;
@@ -583,7 +645,7 @@
     }, 30000);
 
     egressTimer = window.setInterval(() => {
-      if (activeTab === 'traffic' && !document.hidden) void loadEgress();
+      if (activeTab === 'traffic' && !document.hidden) { void loadEgress(); void loadTrafficHistory(); }
     }, 5000);
 
     apiRefreshInterval = window.setInterval(() => {
@@ -591,6 +653,7 @@
     }, 5000);
 
     themeObserver = new MutationObserver(() => {
+      if (activeTab === 'traffic' && trafficSamples.length > 0) { destroyTrafficChart(); window.setTimeout(() => buildTrafficChart(), 50); }
       if (activeTab === 'resources' && sysHistorySamples.length > 0) {
         window.setTimeout(() => buildSysCharts(), 50);
       }
@@ -660,6 +723,17 @@
 
     {#if activeTab === 'traffic'}
       <section class="card p-5 mb-6 space-y-4" aria-label="NVR 媒体出入口监控">
+        <h4 class="font-semibold th-text-primary">媒体出入口历史（最近 24 小时内）</h4>
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="text-sm th-text-secondary">时间范围：</span>
+          {#each (['5m','15m','30m','1h','6h','24h'] as const) as p}
+            <button class="px-3 py-1.5 rounded-md text-sm font-medium transition-colors {trafficPeriod === p ? 'bg-[var(--color-primary)] text-white' : 'card border th-border th-text-secondary hover:th-text-primary'}" onclick={() => { trafficPeriod = p; }}>{p === '5m' ? '5分钟' : p === '15m' ? '15分钟' : p === '30m' ? '30分钟' : p === '1h' ? '1小时' : p === '6h' ? '6小时' : '24小时'}</button>
+          {/each}
+        </div>
+        {#if trafficHistoryError}<p class="th-color-danger">历史读取失败：{trafficHistoryError}</p>{/if}
+        {#if trafficSamples.length === 0}<p class="text-sm th-text-secondary">历史采样尚未积累，服务启动后每 5 秒采集一次。</p>{/if}
+        <div class="h-[290px]"><canvas bind:this={trafficChartCanvas} aria-label="入口和出口历史码率趋势图"></canvas></div>
+        <p class="text-xs th-text-secondary">仅统计媒体会话报告的已知码率；不是网卡总流量。未上报码率的会话不计入合计；历史在服务内存保留 24 小时，NVR 重启后重新积累。</p>
         <div class="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h3 class="text-lg font-semibold th-text-primary">媒体流量出入口</h3>
