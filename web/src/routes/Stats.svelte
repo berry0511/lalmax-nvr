@@ -137,12 +137,16 @@
   let trafficSamples = $state<TrafficPoint[]>([]);
   let trafficHistoryError = $state('');
   let trafficChart: any = null;
+  let trafficSessionsChart: any = null;
   let trafficChartCanvas: HTMLCanvasElement;
+  let trafficSessionsCanvas: HTMLCanvasElement;
   let trafficHistoryRequest = 0;
 
   function destroyTrafficChart() {
     trafficChart?.destroy();
     trafficChart = null;
+    trafficSessionsChart?.destroy();
+    trafficSessionsChart = null;
   }
 
   async function loadTrafficHistory() {
@@ -171,6 +175,24 @@
       trafficChart.data.datasets[0].data = values[0];
       trafficChart.data.datasets[1].data = values[1];
       trafficChart.update('none');
+    if (trafficSessionsChart) {
+      trafficSessionsChart.data.labels = labels;
+      trafficSessionsChart.data.datasets[0].data = trafficSamples.map(p => p.publishers);
+      trafficSessionsChart.data.datasets[1].data = trafficSamples.map(p => p.subscribers);
+      trafficSessionsChart.update('none');
+    } else if (trafficSessionsCanvas) {
+      trafficSessionsChart = new ChartJs(trafficSessionsCanvas, {
+        type:'line',
+        data:{labels,datasets:[
+          {label:'推流会话', data:trafficSamples.map(p => p.publishers),borderColor:'#10b981',tension:0.15,pointRadius:0},
+          {label:'播放会话', data:trafficSamples.map(p => p.subscribers),borderColor:'#f59e0b',tension:0.15,pointRadius:0},
+        ]},
+        options:{animation:false,responsive:true,maintainAspectRatio:false,
+          interaction:{mode:'index',intersect:false},
+          scales:{y:{beginAtZero:true,title:{display:true,text:'会话数'}},x:{ticks:{maxTicksLimit:9}}},
+          plugins:{legend:{position:'top'}}},
+      });
+    }
       return;
     }
     trafficChart = new ChartJs(trafficChartCanvas, {
@@ -186,6 +208,24 @@
         plugins:{legend:{position:'top'}},
       },
     });
+    if (trafficSessionsChart) {
+      trafficSessionsChart.data.labels = labels;
+      trafficSessionsChart.data.datasets[0].data = trafficSamples.map(p => p.publishers);
+      trafficSessionsChart.data.datasets[1].data = trafficSamples.map(p => p.subscribers);
+      trafficSessionsChart.update('none');
+    } else if (trafficSessionsCanvas) {
+      trafficSessionsChart = new ChartJs(trafficSessionsCanvas, {
+        type:'line',
+        data:{labels,datasets:[
+          {label:'推流会话', data:trafficSamples.map(p => p.publishers),borderColor:'#10b981',tension:0.15,pointRadius:0},
+          {label:'播放会话', data:trafficSamples.map(p => p.subscribers),borderColor:'#f59e0b',tension:0.15,pointRadius:0},
+        ]},
+        options:{animation:false,responsive:true,maintainAspectRatio:false,
+          interaction:{mode:'index',intersect:false},
+          scales:{y:{beginAtZero:true,title:{display:true,text:'会话数'}},x:{ticks:{maxTicksLimit:9}}},
+          plugins:{legend:{position:'top'}}},
+      });
+    }
   }
 
   // Auto-refresh
@@ -732,7 +772,10 @@
         </div>
         {#if trafficHistoryError}<p class="th-color-danger">历史读取失败：{trafficHistoryError}</p>{/if}
         {#if trafficSamples.length === 0}<p class="text-sm th-text-secondary">历史采样尚未积累，服务启动后每 5 秒采集一次。</p>{/if}
-        <div class="h-[290px]"><canvas bind:this={trafficChartCanvas} aria-label="入口和出口历史码率趋势图"></canvas></div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div class="rounded-lg border th-border p-3"><h5 class="text-sm font-medium mb-2">入口 / 出口码率</h5><div class="h-[270px]"><canvas bind:this={trafficChartCanvas} aria-label="入口和出口历史码率趋势图"></canvas></div></div>
+          <div class="rounded-lg border th-border p-3"><h5 class="text-sm font-medium mb-2">推流 / 播放会话数</h5><div class="h-[270px]"><canvas bind:this={trafficSessionsCanvas} aria-label="发布者和订阅者历史会话数趋势图"></canvas></div></div>
+        </div>
         <p class="text-xs th-text-secondary">仅统计媒体会话报告的已知码率；不是网卡总流量。未上报码率的会话不计入合计；历史在服务内存保留 24 小时，NVR 重启后重新积累。</p>
         <div class="flex flex-wrap items-center justify-between gap-3">
           <div>
