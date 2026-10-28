@@ -13,21 +13,12 @@ func (h *Handler) handleTranscodeFLV(w http.ResponseWriter, r *http.Request) {
 	if !h.requireTranscodeService(w) {
 		return
 	}
-	if h.transcodePlayback == nil {
-		writeError(w, 503, "derived preview unavailable")
-		return
-	}
-	source, id, err := h.transcodeService.PlaybackTarget(r.Context(), chi.URLParam(r, "stream_id"), chi.URLParam(r, "job_id"))
+	playback, err := h.resolveDerivedPlayback(r.Context(), chi.URLParam(r, "stream_id"), chi.URLParam(r, "job_id"), "flv")
 	if err != nil {
-		transcodeAPIError(w, err)
+		writeDerivedPlaybackError(w, err, "derived preview unavailable")
 		return
 	}
-	play, err := h.transcodePlayback.DerivedPlayURL(r.Context(), source, id, "flv")
-	if err != nil || play == nil {
-		writeError(w, 503, "derived preview unavailable")
-		return
-	}
-	upstream, err := url.Parse(play.URL)
+	upstream, err := url.Parse(playback.URL.URL)
 	if err != nil || upstream.Host == "" || (upstream.Scheme != "http" && upstream.Scheme != "https") {
 		writeError(w, 503, "invalid preview endpoint")
 		return

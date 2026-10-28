@@ -128,3 +128,10 @@ HA 快照已改为使用所选派生输出并隔离缓存；已测试输出不�
 - 针对共享任务，健康计时按物理输出身份区分，旧进程退出后不能把旧健康时长算到新进程；新增 race 回归。Windows 宿主进程异常退出后的 Job Object 清理测试已在最新 Windows CI 实测通过。
 - 最新提交 `f3274de` 在 Linux ARM64 隔离容器再次执行三次合成发布源中断与恢复；每次派生 RTSP 实际解码、物理输出身份更新且只有一个转码进程。随后连续解码 61.0 秒，停止后转码进程为零。运行环境基于默认 Docker 镜像叠加当前提交构建的 ARM64 二进制；不是重新构建完整 Dockerfile。此为有限时长测试，不能代替长期稳定性验收；未使用实体设备或保存画面。
 - 最新提交本地执行 `NVR_TRANSCODE_MEDIA_TEST=1 go test -race -count=1 ./internal/transcode ./internal/media` 与 `go vet ./internal/transcode ./internal/media ./internal/api` 通过；PR 全部必需 CI 检查通过，包含跨平台构建、主测试及 Windows 转码专项测试。
+
+### P1 派生播放目标共用解析（2026-10-28，后续 PR）
+
+- NVR 管理员 RTSP 地址、同源 FLV 预览和 HA 派生发布现共用同一解析流程：校验源与 Job 绑定、获取带临时凭据的物理输出 URL，并确认输出在线。
+- 选定输出离线时返回错误，不启动任务、不回退原流；NVR 播放入口仍限制管理员，HA 仍使用已有集成授权，未扩大普通用户权限。
+- `go test ./internal/api -run 'TestResolveDerivedPlayback|TestHomeAssistantSelectedVariant' -count=1` 通过；`go test -race -count=1 ./internal/api ./internal/media ./internal/transcode` 全包通过；`go vet ./internal/api ./internal/media ./internal/transcode` 通过。
+- 该改动统一当前 NVR/HA 已接入的播放解析路径，不等于逐源 ACL 或所有消费者完成；逐源授权仍是 P1 未完成项。
