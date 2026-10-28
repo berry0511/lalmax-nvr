@@ -204,6 +204,11 @@ func (s *Service) ReconcileAlways(ctx context.Context) map[string]error {
 		return results
 	}
 	for _, j := range jobs {
+		// A slow probe can exhaust the round's context. Jobs not actually
+		// examined must not be assigned a failure or a backoff.
+		if ctx.Err() != nil {
+			break
+		}
 		if !j.Enabled || j.RunPolicy != Always || j.StoppedByUser {
 			continue
 		}
@@ -252,11 +257,29 @@ func (s *Service) ReconcileAlways(ctx context.Context) map[string]error {
 					// Always jobs may recover after restart or probe expiry. The
 					// probe is bounded by the reconciliation context and never
 					// accepts arbitrary user commands or URLs.
-					_, probeErr := s.probes.Probe(ctx, s.config.Tools(), p)
-					if probeErr == nil {
-						err = s.allow(p)
+					// The subprocess can take tens of seconds. Do not hold the
+					// mutation lock while it runs; stops and deletes must remain
+					// responsive. Revalidate persisted intent before starting.
+					probeErr := func() error {
+						s.mu.Unlock()
+						defer s.mu.Lock()
+						_, err := s.probes.Probe(ctx, s.config.Tools(), p)
+						return err
+					}()
+					if ctx.Err() != nil {
+						err = ctx.Err()
 					} else {
-						err = probeErr
+						current, currentErr := s.job(ctx, j.ID, j.Generation)
+						if currentErr != nil || !current.Enabled || current.RunPolicy != Always || current.StoppedByUser {
+							continue
+						}
+						j = current
+						p, err = s.profile(ctx, current)
+						if err == nil && probeErr != nil {
+							err = probeErr
+						} else if err == nil {
+							err = s.allow(p)
+						}
 					}
 				}
 			}
