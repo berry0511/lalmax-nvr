@@ -199,8 +199,17 @@ func (s *Service) ReconcileAlways(ctx context.Context) map[string]error {
 			continue
 		}
 		if s.manager != nil {
-			if runtime, ok := s.manager.Status(j.ID); ok && (runtime.State == Running || runtime.State == Starting) {
-				continue
+			if runtime, ok := s.manager.Status(j.ID); ok {
+				if runtime.State == Running {
+					// A healthy run ends the previous failure streak. Subsequent
+					// outages should start with the initial backoff, not inherit
+					// the maximum delay accumulated before recovery.
+					delete(s.retry, j.ID)
+					continue
+				}
+				if runtime.State == Starting {
+					continue
+				}
 			}
 		}
 		retry := s.retry[j.ID]

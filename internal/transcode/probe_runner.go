@@ -39,13 +39,34 @@ type CommandProbeRunner struct{}
 func (CommandProbeRunner) Run(ctx context.Context, path string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, path, args...)
+	if ctx.Err() != nil {
+		return nil, &Error{Code: "probe_failed", Message: "media capability check failed or timed out"}
+	}
+	cmd := exec.Command(path, args...)
 	configureProcess(cmd)
+	cmd.Cancel = nil // Process-tree cancellation is managed by the owner below.
 	cmd.WaitDelay = time.Second
 	output := &boundedOutput{limit: 256 * 1024}
 	cmd.Stdout = output
 	cmd.Stderr = output
-	if err := cmd.Run(); err != nil {
+	owner, err := startOwnedProcess(cmd)
+	if err != nil {
+		return nil, &Error{Code: "probe_failed", Message: "media capability check failed or timed out"}
+	}
+	exited := make(chan error, 1)
+	go func() {
+		err := cmd.Wait()
+		owner.close()
+		exited <- err
+	}()
+	select {
+	case err = <-exited:
+	case <-ctx.Done():
+		_ = owner.kill()
+		<-exited
+		err = ctx.Err()
+	}
+	if err != nil || ctx.Err() != nil {
 		return nil, &Error{Code: "probe_failed", Message: "media capability check failed or timed out"}
 	}
 	return output.Bytes(), nil

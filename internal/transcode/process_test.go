@@ -62,3 +62,17 @@ func TestCommandProcessSafeError(t *testing.T) {
 		t.Fatalf("unexpected error %v", err)
 	}
 }
+
+func TestProbeRunnerCancellation(t *testing.T) {
+	t.Setenv("TRANSCODE_HELPER", "1")
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := (CommandProbeRunner{}).Run(ctx, os.Args[0], "-test.run=^TestBackendHelper$")
+	if err == nil {
+		t.Fatal("canceled probe reported success")
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatal("canceled probe did not stop promptly")
+	}
+}
