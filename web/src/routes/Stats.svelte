@@ -42,7 +42,7 @@
     { id: 'recordings', labelKey: 'stats.tabRecordings', icon: Video },
     { id: 'cameras',    labelKey: 'stats.tabCameras',    icon: CameraIcon },
     { id: 'system',     labelKey: 'stats.tabSystem',     icon: Server },
-    { id: 'traffic', labelKey: '流量出口', icon: Network },
+    { id: 'traffic', labelKey: '流量监控', icon: Network },
   ];
 
   // ── Shared state ──────────────────────────────────────────────────────────
