@@ -42,16 +42,16 @@ func (h *trafficHistory) since(cutoff int64, stride int64) []trafficSample {
     defer h.mu.RUnlock()
     out := make([]trafficSample, 0)
     start := (h.next - h.count + trafficHistoryCap) % trafficHistoryCap
-    var last int64
+    var lastBucket int64 = -1
     for i := 0; i < h.count; i++ {
         p := h.points[(start+i)%trafficHistoryCap]
         if p.Timestamp < cutoff { continue }
-        if len(out) == 0 || p.Timestamp-last >= stride {
+        bucket := p.Timestamp / stride
+        if len(out) == 0 || bucket != lastBucket {
             out = append(out, p)
-            last = p.Timestamp
+            lastBucket = bucket
         } else {
             out[len(out)-1] = p
-            last = p.Timestamp
         }
     }
     return out
