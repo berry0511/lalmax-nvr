@@ -104,7 +104,7 @@ func (s *Service) Start(ctx context.Context, id string, generation uint64) (Runt
 	if err = s.allow(p); err != nil {
 		return Runtime{}, err
 	}
-	_, alreadyActive := s.manager.Status(id)
+	previous, alreadyActive := s.manager.Status(id)
 	runtime, err := s.manager.Acquire(j, p)
 	if err == nil && j.StoppedByUser {
 		if err = s.repo.SetTranscodeJobStopped(ctx, id, generation, false); err != nil {
@@ -114,6 +114,12 @@ func (s *Service) Start(ctx context.Context, id string, generation uint64) (Runt
 				cancel()
 			}
 			return Runtime{}, err
+		}
+	}
+	if err == nil && (!alreadyActive || previous.State != Running) {
+		if retry, exists := s.retry[id]; exists && !retry.healthySince.IsZero() {
+			retry.healthySince = time.Time{}
+			s.retry[id] = retry
 		}
 	}
 	return runtime, err
@@ -151,11 +157,14 @@ func (s *Service) Delete(ctx context.Context, id string, generation uint64) erro
 }
 
 type retryState struct {
-	generation uint64
-	attempts   int
-	next       time.Time
-	errorCode  string
+	generation   uint64
+	attempts     int
+	next         time.Time
+	errorCode    string
+	healthySince time.Time
 }
+
+const recoveryHealthyResetInterval = 30 * time.Second
 
 // Run periodically reconciles persisted enabled always jobs. Previously enabled
 // jobs revalidate expired capabilities before recovery; new enablement still
@@ -201,13 +210,25 @@ func (s *Service) ReconcileAlways(ctx context.Context) map[string]error {
 		if s.manager != nil {
 			if runtime, ok := s.manager.Status(j.ID); ok {
 				if runtime.State == Running {
-					// A healthy run ends the previous failure streak. Subsequent
-					// outages should start with the initial backoff, not inherit
-					// the maximum delay accumulated before recovery.
-					delete(s.retry, j.ID)
+					// Reset only after sustained health, so a flapping output
+					// cannot repeatedly bypass exponential backoff.
+					if retry, exists := s.retry[j.ID]; exists {
+						if retry.generation != j.Generation {
+							delete(s.retry, j.ID)
+						} else if retry.healthySince.IsZero() {
+							retry.healthySince = time.Now()
+							s.retry[j.ID] = retry
+						} else if time.Since(retry.healthySince) >= recoveryHealthyResetInterval {
+							delete(s.retry, j.ID)
+						}
+					}
 					continue
 				}
 				if runtime.State == Starting {
+					if retry, exists := s.retry[j.ID]; exists && !retry.healthySince.IsZero() {
+						retry.healthySince = time.Time{}
+						s.retry[j.ID] = retry
+					}
 					continue
 				}
 			}
@@ -215,6 +236,9 @@ func (s *Service) ReconcileAlways(ctx context.Context) map[string]error {
 		retry := s.retry[j.ID]
 		if retry.generation != j.Generation {
 			retry = retryState{generation: j.Generation}
+		} else if !retry.healthySince.IsZero() {
+			retry.healthySince = time.Time{}
+			s.retry[j.ID] = retry
 		}
 		if time.Now().Before(retry.next) {
 			continue
