@@ -291,11 +291,11 @@ let videoEventAc: AbortController | null = null;
 
   async function initFlv() {
     if (!videoEl) {
-      console.info('[FlvPlayer] init skipped: missing video element', { cameraId, protocol, streamUrl });
+      console.info('[FlvPlayer] init skipped: missing video element', { cameraId, protocol, hasStreamUrl: Boolean(streamUrl) });
       return;
     }
     if (destroyed) {
-      console.info('[FlvPlayer] init skipped: component destroyed', { cameraId, protocol, streamUrl });
+      console.info('[FlvPlayer] init skipped: component destroyed', { cameraId, protocol, hasStreamUrl: Boolean(streamUrl) });
       return;
     }
 
@@ -319,8 +319,8 @@ let videoEventAc: AbortController | null = null;
         cameraId,
         cameraName,
         protocol,
-        propStreamUrl: streamUrl,
-        finalUrl: url,
+        hasStreamUrl: Boolean(streamUrl),
+        hasResolvedUrl: Boolean(url),
         isWebSocket,
         sendAuthHeader,
         hasAuthHeader: Boolean(authHeader),
@@ -347,7 +347,7 @@ let videoEventAc: AbortController | null = null;
       console.info('[FlvPlayer] createPlayer complete', {
         cameraId,
         protocol,
-        finalUrl: url,
+        hasResolvedUrl: Boolean(url),
       });
 
       mpegtsPlayer = player;
@@ -357,12 +357,12 @@ let videoEventAc: AbortController | null = null;
       player.attachMediaElement(videoEl);
       console.info('[FlvPlayer] attachMediaElement complete', { cameraId, protocol });
       player.load();
-      console.info('[FlvPlayer] load called', { cameraId, protocol, finalUrl: url });
+      console.info('[FlvPlayer] load called', { cameraId, protocol, hasResolvedUrl: Boolean(url) });
       player.play().catch(() => {});
       console.info('[FlvPlayer] play called', { cameraId, protocol });
 
       player.on(mpegts.default.Events.ERROR, (_event: string, data: any) => {
-        console.warn('[FlvPlayer] mpegts.js error', { cameraId, protocol, finalUrl: url, data });
+        console.warn('[FlvPlayer] mpegts.js error', { cameraId, protocol, hasResolvedUrl: Boolean(url), data });
         if (data && data.type === mpegts.default.ErrorTypes.NETWORK_ERROR) {
           scheduleReconnect();
         } else if (data && data.type === mpegts.default.ErrorTypes.MEDIA_ERROR) {
@@ -381,7 +381,7 @@ let videoEventAc: AbortController | null = null;
       });
 
       player.on(mpegts.default.Events.LOADING_COMPLETE, () => {
-        console.warn('[FlvPlayer] loading complete event for live stream', { cameraId, protocol, finalUrl: url });
+        console.warn('[FlvPlayer] loading complete event for live stream', { cameraId, protocol, hasResolvedUrl: Boolean(url) });
         streamState = 'error';
         scheduleReconnect();
       });
@@ -436,7 +436,7 @@ let videoEventAc: AbortController | null = null;
         });
       }, { signal: ac.signal });
     } catch (e) {
-      console.warn('[FlvPlayer] init failed', { cameraId, protocol, streamUrl, error: e });
+      console.warn('[FlvPlayer] init failed', { cameraId, protocol, hasStreamUrl: Boolean(streamUrl), error: e });
       streamState = 'error';
       scheduleReconnect();
     }
@@ -456,7 +456,7 @@ let videoEventAc: AbortController | null = null;
   $effect(() => {
     const _id = cameraId;
     if (!_id) return;
-    console.info('[FlvPlayer] effect start', { cameraId, protocol, streamUrl });
+    console.info('[FlvPlayer] effect start', { cameraId, protocol, hasStreamUrl: Boolean(streamUrl) });
 
     stopSnapshotMode();
     destroyPlayer();
@@ -464,7 +464,7 @@ let videoEventAc: AbortController | null = null;
 
     const timer = setTimeout(() => initFlv(), 50);
     return () => {
-      console.info('[FlvPlayer] effect cleanup', { cameraId, protocol, streamUrl });
+      console.info('[FlvPlayer] effect cleanup', { cameraId, protocol, hasStreamUrl: Boolean(streamUrl) });
       clearTimeout(timer);
       destroyPlayer();
     };
