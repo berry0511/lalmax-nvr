@@ -23,3 +23,13 @@ export function gbDisplayName(names: ChannelNames, ids: Array<string | undefined
   }
   return fallback;
 }
+
+/** Resolve the current GB28181 catalog name without changing the camera's stable ID or saved metadata. */
+export function cameraDisplayName(
+  names: ChannelNames,
+  camera: { id: string; stream_id?: string; name?: string; protocol?: string },
+): string {
+  const fallback = camera.name || camera.id;
+  if (camera.protocol?.toLowerCase() !== 'gb28181') return fallback;
+  return gbDisplayName(names, [camera.stream_id, camera.id], fallback);
+}
