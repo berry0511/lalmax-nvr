@@ -4,7 +4,7 @@
   import type { Camera, EventsResponse, NvrEvent, AlarmRule } from '$lib/api';
   import { formatDate } from '$lib/format';
   import { t } from '$lib/i18n';
-  import { loadGBChannelNames, gbDisplayName, type ChannelNames } from '$lib/gb-channel-names';
+  import { loadGBChannelNames, cameraDisplayName, type ChannelNames } from '$lib/gb-channel-names';
   import { Activity, AlertCircle, Check, ExternalLink, RefreshCw } from 'lucide-svelte';
   import Pagination from '../components/Pagination.svelte';
 
@@ -13,7 +13,7 @@
   let events = $state<NvrEvent[]>([]);
   let cameras = $state<Camera[]>([]);
   let gbNames = $state<ChannelNames>(new Map());
-  const cameraLabel = (camera: Camera) => gbDisplayName(gbNames, [camera.stream_id, camera.id], camera.name || camera.id);
+  const cameraLabel = (camera: Camera) => cameraDisplayName(gbNames, camera);
   let total = $state(0);
   let loading = $state(true);
   let error = $state('');
