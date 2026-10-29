@@ -27,7 +27,8 @@ describe('stream URL rows', () => {
     expect(button.getAttribute('type')).toBe('button');
     await fireEvent.click(button);
     await waitFor(() => {
-      expect(copy).toHaveBeenCalledExactlyOnceWith(url);
+      expect(copy).toHaveBeenCalledTimes(1);
+      expect(copy).toHaveBeenCalledWith(url);
       expect(toast).toHaveBeenCalledWith(expect.any(String), 'success');
     });
   });
@@ -36,7 +37,10 @@ describe('stream URL rows', () => {
     const url = 'rtmp://127.0.0.1/live/stream0?stream_key=secret';
     const { getByRole } = render(CopyableStreamURL, { props: { protocol: 'RTMP', url } });
     await fireEvent.click(getByRole('button'));
-    await waitFor(() => expect(copy).toHaveBeenCalledExactlyOnceWith(url));
+    await waitFor(() => {
+      expect(copy).toHaveBeenCalledTimes(1);
+      expect(copy).toHaveBeenCalledWith(url);
+    });
   });
 
   it('does not report copied when the clipboard fallback requires manual copying', async () => {
