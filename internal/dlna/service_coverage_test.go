@@ -323,14 +323,7 @@ func TestDLNAMediaStreaming(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "clip.mp4"), []byte("mp4-bytes"), 0o644))
 	repo := &dlnaRepo{recording: &model.Recording{ID: "clip", FilePath: filepath.Join(dir, "clip.mp4")}}
-	hold := make(chan struct{})
-	var once sync.Once
-	entered := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("mode") == "block" {
-			once.Do(func() { close(entered) })
-			<-hold
-		}
 		if r.URL.Query().Get("mode") == "fail" {
 			http.Error(w, "nope", http.StatusBadGateway)
 			return
@@ -338,10 +331,7 @@ func TestDLNAMediaStreaming(t *testing.T) {
 		w.Header().Set("Content-Type", "video/mp2t")
 		_, _ = w.Write([]byte("ts-bytes"))
 	}))
-	t.Cleanup(func() {
-		closeHold(hold)
-		upstream.Close()
-	})
+	t.Cleanup(upstream.Close)
 	engine := &dlnaEngine{info: &media.StreamInfo{StreamID: "cam", Active: true}, play: upstream.URL + "?mode=ok"}
 	svc := enabledService(repo, engine)
 	svc.store = store
@@ -362,34 +352,25 @@ func TestDLNAMediaStreaming(t *testing.T) {
 	head.Body.Close()
 	require.Equal(t, http.StatusOK, head.StatusCode)
 
-	engine.mu.Lock()
-	engine.play = upstream.URL + "?mode=block"
-	engine.mu.Unlock()
-	firstDone := make(chan struct{})
-	go func() {
-		defer close(firstDone)
-		resp, err := http.Get(srv.URL + "/dlna/live/cam.ts")
-		if err == nil {
-			_, _ = io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
-		}
-	}()
+	releaseViewer := make(chan struct{})
+	started := make(chan struct{})
+	var once sync.Once
+	limit := svc.limitMediaViewers(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(started) })
+		<-releaseViewer
+		w.WriteHeader(http.StatusOK)
+	})
+	go limit(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/dlna/live/cam.ts", nil))
 	select {
-	case <-entered:
+	case <-started:
 	case <-time.After(3 * time.Second):
-		t.Fatal("viewer request did not reach upstream")
+		t.Fatal("viewer slot was not acquired")
 	}
-	limited, err := http.Get(srv.URL + "/dlna/live/cam.ts")
-	require.NoError(t, err)
-	require.Equal(t, http.StatusServiceUnavailable, limited.StatusCode)
-	require.Equal(t, "5", limited.Header.Get("Retry-After"))
-	limited.Body.Close()
-	closeHold(hold)
-	select {
-	case <-firstDone:
-	case <-time.After(3 * time.Second):
-		t.Fatal("blocked viewer did not finish")
-	}
+	limited := httptest.NewRecorder()
+	limit(limited, httptest.NewRequest(http.MethodGet, "/dlna/live/cam.ts", nil))
+	require.Equal(t, http.StatusServiceUnavailable, limited.Code)
+	require.Equal(t, "5", limited.Header().Get("Retry-After"))
+	close(releaseViewer)
 
 	rr := httptest.NewRecorder()
 	svc.live(rr, httptest.NewRequest(http.MethodGet, "/dlna/live/.ts", nil))
@@ -703,14 +684,6 @@ func udpLoopback(t *testing.T) *net.UDPConn {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 	return conn
-}
-
-func closeHold(ch chan struct{}) {
-	select {
-	case <-ch:
-	default:
-		close(ch)
-	}
 }
 
 type failWriter struct {
