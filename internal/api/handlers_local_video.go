@@ -2,6 +2,8 @@ package api
 
 import (
  "context"
+ "crypto/rand"
+ "encoding/hex"
  "errors"
  "fmt"
  "io"
@@ -33,6 +35,28 @@ func (h *Handler) localVideoDirectory() (string,error) {
  if absErr!=nil {return "",absErr}
  if err:=os.MkdirAll(dir,0700);err!=nil{return "",err}
  return dir,nil
+}
+
+// ensureLocalVideoPublishKey provisions a cryptographically random RTMP key
+// without weakening the existing publish authentication policy.
+func (h *Handler) ensureLocalVideoPublishKey(streamID string) error {
+ if h.config==nil || !h.config.RTMP.RTMPPublishAuthEnabled() {return nil}
+ if h.config.RTMP.StreamKeys[streamID]!="" {return nil}
+ updater,ok:=h.banMgr.(interface{SetRTMPStreamKeys(map[string]string)})
+ if !ok {return errors.New("runtime RTMP credential manager is unavailable")}
+ key:=make([]byte,32)
+ if _,err:=rand.Read(key);err!=nil{return err}
+ previous:=h.config.RTMP.StreamKeys
+ next:=make(map[string]string,len(previous)+1)
+ for id,token:=range previous {next[id]=token}
+ next[streamID]=hex.EncodeToString(key)
+ h.config.RTMP.StreamKeys=next
+ if err:=config.Save(h.configPath,h.config);err!=nil {
+  h.config.RTMP.StreamKeys=previous
+  return fmt.Errorf("persist local video publish token: %w",err)
+ }
+ updater.SetRTMPStreamKeys(next)
+ return nil
 }
 
 func (h *Handler) localVideoRTMP(streamID string) (string,error) {
@@ -117,7 +141,10 @@ func (h *Handler) handleCreateLocalVideo(w http.ResponseWriter,r *http.Request){
  if r.MultipartForm!=nil {defer r.MultipartForm.RemoveAll()}
  id:=strings.TrimSpace(r.FormValue("stream_id"))
  if !pushStreamIDPattern.MatchString(id) {writeError(w,http.StatusBadRequest,"invalid stream_id");return}
- if _,err:=h.localVideoRTMP(id);err!=nil {writeError(w,http.StatusBadRequest,err.Error());return}
+ // Validate RTMP availability before accepting a potentially large upload.
+ if h.config==nil || h.config.RTMP.Enabled==nil || !*h.config.RTMP.Enabled {
+  writeError(w,http.StatusBadRequest,"RTMP ingest must be enabled for local video");return
+ }
  existing,err:=h.db.GetCreatedStream(r.Context(),id)
  if err!=nil {writeError(w,http.StatusInternalServerError,"stream lookup failed");return}
  if existing!=nil {writeError(w,http.StatusConflict,"stream already exists");return}
@@ -151,6 +178,10 @@ func (h *Handler) handleCreateLocalVideo(w http.ResponseWriter,r *http.Request){
   writeError(w,http.StatusBadRequest,"invalid or oversized video file");return
  }
  if err=os.Rename(tempPath,dest);err!=nil {writeError(w,http.StatusInternalServerError,"failed to save video");return}
+ if err:=h.ensureLocalVideoPublishKey(id);err!=nil {
+  _=os.Remove(dest)
+  writeError(w,http.StatusInternalServerError,err.Error());return
+ }
  row:=storage.CreatedStream{StreamID:id,Name:normalizeStreamDisplayName(r.FormValue("name"),id),
   AppName:"live",InputMode:storage.CreatedStreamLocalVideo,SourceURL:dest}
  if err:=h.db.InsertCreatedStream(r.Context(),row);err!=nil {
