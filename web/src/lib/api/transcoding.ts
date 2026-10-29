@@ -74,12 +74,12 @@ export function acquireTranscodeDemandLease(jobID: string, generation: number) {
 }
 export function renewTranscodeDemandLease(token: string) {
   return apiRequest<TranscodeDemandLease>(
-    `/transcoding/leases/${encodeURIComponent(token)}/renew`, {method:'POST'},
+    `/transcoding/leases/renew`, {method:'POST', body:JSON.stringify({token})},
   );
 }
 export function releaseTranscodeDemandLease(token: string) {
   return apiRequest<void>(
-    `/transcoding/leases/${encodeURIComponent(token)}`, {method:'DELETE'},
+    `/transcoding/leases/release`, {method:'POST', body:JSON.stringify({token})},
   );
 }
 

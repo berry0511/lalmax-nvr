@@ -64,6 +64,9 @@ func TestHomeAssistantMediaRoutesRequireSourceAuthorization(t *testing.T) {
 		{"GET", "/api/integrations/home-assistant/streams/camera/recordings/id/file"},
 		{"HEAD", "/api/integrations/home-assistant/streams/camera/recordings/id/file"},
 		{"GET", "/api/integrations/home-assistant/streams/camera/snapshot"},
+        {"POST", "/api/transcoding/jobs/job/leases?generation=1"},
+        {"POST", "/api/transcoding/leases/renew"},
+        {"POST", "/api/transcoding/leases/release"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
