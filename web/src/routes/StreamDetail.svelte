@@ -24,7 +24,7 @@
     CalendarClock,
     Trash2,
     UserMinus,
-    ExternalLink,
+    Copy,
     Clock,
     Wifi,
     WifiOff,
@@ -818,7 +818,7 @@
             {t('streams.tabMetrics')}
           </button>
           <button class="detail-tab" class:active={activeTab === 'urls'} onclick={() => switchTab('urls')}>
-            <ExternalLink size={15} />
+            <Copy size={15} />
             {t('streams.tabUrls')}
           </button>
           <button class="detail-tab" class:active={activeTab === 'actions'} onclick={() => switchTab('actions')}>
@@ -1058,7 +1058,7 @@
         <section class="urls-section glass">
           <div class="section-header">
             <h2>
-              <ExternalLink size={18} />
+              <Copy size={18} />
               {t('streams.playUrls')}
             </h2>
           </div>
@@ -1078,7 +1078,7 @@
           {#if stream.source_type === 'relay_pull'}
             <div class="section-header" style="margin-top: 1.5rem;">
               <h2>
-                <ExternalLink size={18} />
+                <Copy size={18} />
                 {t('streams.pullSource')}
               </h2>
             </div>
@@ -1095,7 +1095,7 @@
           {:else}
           <div class="section-header" style="margin-top: 1.5rem;">
             <h2>
-              <ExternalLink size={18} />
+              <Copy size={18} />
               {t('streams.ingestUrls')}
             </h2>
           </div>
