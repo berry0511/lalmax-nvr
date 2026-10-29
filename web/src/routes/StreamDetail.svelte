@@ -69,7 +69,7 @@
   let userPickedProtocol = $state(false);
   let selectedVariantJobID = $state(''); // empty = original media stream
   let transcodeJobs = $state<TranscodeJob[]>([]);
-  let currentDemandLease: TranscodeDemandLease | null = null;
+  let currentDemandLease = $state<TranscodeDemandLease | null>(null);
   let demandRenewTimer: number | undefined;
   let demandPollTimer: number | undefined;
   let outputSelectionSerial = 0;
@@ -864,7 +864,7 @@
               {:else}
                 <div class="player-inactive" role="status">
                   <WifiOff size={40} />
-                  <p>派生输出尚未就绪：{selectedVariant?.error_code || selectedVariant?.state || derivedVariantsError || '不可用'}</p>
+                  <p>派生输出尚未就绪：{derivedVariantsError || selectedVariant?.error_code || selectedVariant?.state || '不可用'}</p>
                   <p class="hint">不会自动切回原始流。可在系统设置的转码任务中启动或检查此输出。</p>
                 </div>
               {/if}

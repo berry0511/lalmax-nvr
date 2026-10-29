@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { transcodeJobAction, saveTranscodeJob, listStreamTranscodeVariants, transcodePreviewFLVURL, updateTranscodeProfile, deleteTranscodeProfile } from '$lib/api/transcoding';
+import { transcodeJobAction, saveTranscodeJob, listStreamTranscodeVariants, transcodePreviewFLVURL, updateTranscodeProfile, deleteTranscodeProfile, acquireTranscodeDemandLease, renewTranscodeDemandLease, releaseTranscodeDemandLease } from '$lib/api/transcoding';
 import type { TranscodeJob } from '$lib/api/transcoding';
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -52,4 +52,24 @@ it('edits or deletes templates with an expected revision', async () => {
   await deleteTranscodeProfile(profile);
   expect(fetch.mock.calls[1][0]).toBe('/api/transcoding/profiles/video?revision=7');
   expect(fetch.mock.calls[1][1].method).toBe('DELETE');
+});
+
+it('keeps independent demand tokens across start, renewal and final release', async () => {
+  vi.stubGlobal('sessionStorage', { getItem: () => null });
+  const token = 'a-runtime-token';
+  const fetch = vi.fn().mockImplementation(async (url: string, opts: RequestInit) => ({
+    ok: true, status: opts.method === 'DELETE' ? 204 : opts.method === 'POST' && url.endsWith('/leases?generation=3') ? 201 : 200,
+    json: async () => url.endsWith('/renew')
+      ? {token,job_id:'job',generation:3,expires_at:'2026-10-29T00:00:00Z'}
+      : {lease:{token,job_id:'job',generation:3,expires_at:'2026-10-29T00:00:00Z'},runtime:{state:'starting'}},
+  }));
+  vi.stubGlobal('fetch', fetch);
+  const result = await acquireTranscodeDemandLease('job', 3);
+  expect(result.runtime.state).toBe('starting');
+  expect(fetch.mock.calls[0][0]).toBe('/api/transcoding/jobs/job/leases?generation=3');
+  await renewTranscodeDemandLease(token);
+  expect(fetch.mock.calls[1][0]).toBe('/api/transcoding/leases/a-runtime-token/renew');
+  await releaseTranscodeDemandLease(token);
+  expect(fetch.mock.calls[2][0]).toBe('/api/transcoding/leases/a-runtime-token');
+  expect(fetch.mock.calls[2][1].method).toBe('DELETE');
 });
