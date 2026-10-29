@@ -789,6 +789,7 @@
                     cameraId={encodedStreamId}
                     cameraName={displayName + ' · 派生流'}
                     streamUrl={transcodePreviewFLVURL(stream.stream_id, selectedVariantJobID)}
+                    allowSnapshotFallback={false}
                     protocol="flv"
                     expanded={true}
                   />
