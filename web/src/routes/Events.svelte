@@ -128,7 +128,9 @@
 
   async function loadCameras() {
     try {
-      cameras = await listCameras();
+      const [cameraRows, names] = await Promise.all([listCameras(), loadGBChannelNames().catch(() => new Map<string, string>())]);
+      cameras = cameraRows;
+      gbNames = names;
     } catch (e) {
       console.warn('Failed to load cameras:', e);
     }
@@ -205,8 +207,7 @@
   }
 
   onMount(() => {
-    void loadGBChannelNames().then(names => { gbNames = names; }).catch(() => {});
-    loadCameras();
+    void loadCameras();
     loadRules();
   });
 </script>
