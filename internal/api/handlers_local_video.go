@@ -157,7 +157,6 @@ func (h *Handler) startLocalVideo(row storage.CreatedStream) error {
  h.localVideos.mu.Unlock()
  go func(){
   defer close(done)
-  var lastWarning time.Time
   for ctx.Err()==nil {
    // Re-encode to H264/AAC for predictable FLV/RTMP playback.
    args:=[]string{"-hide_banner","-nostdin","-loglevel","error","-re","-stream_loop","-1","-i",abs}
