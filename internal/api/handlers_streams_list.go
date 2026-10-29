@@ -1409,6 +1409,7 @@ func (h *Handler) handleDeleteStream(w http.ResponseWriter, r *http.Request) {
 	}
 	if removedCreated && created != nil && created.InputMode == storage.CreatedStreamLocalVideo {
 		h.removeLocalVideoFile(created.SourceURL)
+		h.revokeLocalVideoPublishKey(streamID)
 	}
 	if info == nil && !removedCreated {
 		ok, err := h.deleteOfflineStream(ctx, streamID)
