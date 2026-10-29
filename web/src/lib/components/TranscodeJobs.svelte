@@ -154,7 +154,7 @@
         <div class="space-y-2">
           <div class="flex justify-between gap-2"><span class="text-sm th-text-primary">{preview.id}</span><button class="btn btn-secondary" onclick={() => preview = null}>{t('transcode.closePreview')}</button></div>
           <div class="aspect-video bg-neutral-900 rounded overflow-hidden">
-            {#key preview.id}<FlvPlayer cameraId={preview.source.stream_id} cameraName={preview.id} streamUrl={`/api/streams/${encodeURIComponent(preview.source.stream_id)}/variants/${encodeURIComponent(preview.id)}/stream.flv`} />{/key}
+            {#key preview.id}<FlvPlayer allowSnapshotFallback={false} cameraId={preview.source.stream_id} cameraName={preview.id} streamUrl={`/api/streams/${encodeURIComponent(preview.source.stream_id)}/variants/${encodeURIComponent(preview.id)}/stream.flv`} />{/key}
           </div>
         </div>
       {/if}
