@@ -332,6 +332,7 @@
       case 'rtmp_push': return t('streams.sourceRTMPPush');
       case 'srt_push': return t('streams.sourceSRTPush');
       case 'whip_push': return t('streams.sourceWHIPPush');
+      case 'local_video': return '本地视频循环';
       case 'relay_pull': return t('streams.sourceRelayPull');
       case 'push': return t('streams.sourcePush');
       default: return t('streams.sourceStream');
