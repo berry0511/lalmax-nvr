@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { createStream, deleteStream, listStreams, subscribeNvrEvents, updateStream } from '$lib/api';
+  import { createStream, createLocalVideoStream, deleteStream, listStreams, subscribeNvrEvents, updateStream } from '$lib/api';
   import type { StreamInfo } from '$lib/api';
   import { t } from '$lib/i18n';
   import { loadGBChannelNames, gbDisplayName, type ChannelNames } from '$lib/gb-channel-names';
@@ -41,7 +41,8 @@
   let refreshTimer: number | undefined;
   let stopEvents: (() => void) | undefined;
   let createOpen = $state(false);
-  let createMode = $state<'push' | 'pull'>('push');
+  let createMode = $state<'push' | 'pull' | 'local_video'>('push');
+  let createVideoFile = $state<File | null>(null);
   let createStreamID = $state('');
   let createName = $state('');
   let createSourceURL = $state('');
@@ -146,6 +147,7 @@
     createStreamID = '';
     createName = '';
     createSourceURL = '';
+    createVideoFile = null;
     creating = false;
     createError = '';
     createdResult = null;
@@ -162,6 +164,10 @@
       return;
     }
     const sourceURL = createSourceURL.trim();
+    if (createMode === 'local_video' && !createVideoFile) {
+      createError = '请选择需要循环播放的视频文件';
+      return;
+    }
     if (createMode === 'pull' && !sourceURL) {
       createError = t('streams.sourceURLHint');
       return;
@@ -169,7 +175,9 @@
     creating = true;
     createError = '';
     try {
-      const info = await createStream({
+      const info = createMode === 'local_video' && createVideoFile
+        ? await createLocalVideoStream({stream_id:streamID, name:createName.trim() || undefined, video:createVideoFile})
+        : await createStream({
         stream_id: streamID,
         name: createName.trim() || undefined,
         input_mode: createMode,
@@ -440,6 +448,8 @@
             </div>
             <code class="block text-xs break-all th-text-secondary">{createdResult.source_url}</code>
           </div>
+        {:else if createdResult.source_type === 'local_video'}
+          <p class="text-sm th-text-secondary mt-4">视频已上传，NVR 将通过 FFmpeg 循环发布。可在流列表查看状态。</p>
         {:else}
           <p class="text-sm th-text-secondary mt-4">{t('streams.pushUrlsReady')}</p>
           {#if createdResult.ingest_urls?.length}
@@ -474,6 +484,9 @@
             <button type="button" class="btn btn-sm {createMode === 'pull' ? 'btn-primary' : 'btn-secondary'}" onclick={() => createMode = 'pull'} disabled={creating}>
               {t('streams.inputPull')}
             </button>
+            <button type="button" class="btn btn-sm {createMode === 'local_video' ? 'btn-primary' : 'btn-secondary'}" onclick={() => createMode = 'local_video'} disabled={creating}>
+              本地视频循环
+            </button>
           </div>
           <div>
             <label for="create-stream-id" class="input-label">{t('streams.streamId')}</label>
@@ -498,6 +511,13 @@
               disabled={creating}
             />
           </div>
+          {#if createMode === 'local_video'}
+            <div>
+              <label for="create-video-file" class="input-label">选择本地视频</label>
+              <input id="create-video-file" type="file" accept=".mp4,.mkv,.mov,.avi,.webm,.ts" class="input mt-1" disabled={creating} onchange={(e) => createVideoFile = e.currentTarget.files?.[0] || null} />
+              <p class="text-xs th-text-tertiary mt-1">上传到 NVR 服务器后持续循环播放（最大 2 GB）；需安装 FFmpeg 并启用 RTMP 推流。</p>
+            </div>
+          {/if}
           {#if createMode === 'pull'}
             <div>
               <label for="create-source-url" class="input-label">{t('streams.sourceURL')}</label>
@@ -517,7 +537,7 @@
           {/if}
           <div class="flex justify-end gap-2">
             <button type="button" class="btn btn-secondary btn-sm" onclick={closeCreateDialog} disabled={creating}>{t('common.cancel')}</button>
-            <button type="submit" class="btn btn-primary btn-sm" disabled={creating || !createStreamID.trim() || (createMode === 'pull' && !createSourceURL.trim())}>
+            <button type="submit" class="btn btn-primary btn-sm" disabled={creating || !createStreamID.trim() || (createMode === 'pull' && !createSourceURL.trim()) || (createMode === 'local_video' && !createVideoFile)}>
               {creating ? t('streams.creating') : t('streams.create')}
             </button>
           </div>
