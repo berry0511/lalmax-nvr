@@ -587,9 +587,8 @@
     console.info('[StreamDetail] player selection', {
       streamId: stream.stream_id,
       selectedProtocol,
-      selectedURL: getPlayerURL(selectedProtocol),
       availableProtocols: available,
-      playURLs: stream.play_urls,
+      // Never print token-bearing media URLs or playback credentials.
     });
   });
 
@@ -768,7 +767,7 @@
                       console.info('[StreamDetail] protocol click', {
                         streamId: stream.stream_id,
                         protocol,
-                        targetURL: getPlayerURL(protocol),
+                        // No media URL in diagnostics (it can contain bearer credentials).
                       });
                       userPickedProtocol = true;
                       selectedProtocol = protocol;
