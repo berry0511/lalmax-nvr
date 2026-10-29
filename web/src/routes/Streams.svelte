@@ -96,6 +96,8 @@
 
       managedStreams = managedRes.streams;
       externalStreams = externalRes.streams;
+      // Refresh channel labels with the stream list; name updates must not require a page reload.
+      void loadGBChannelNames().then(names => { gbNames = names; }).catch(() => {});
     } catch (e) {
       error = e instanceof Error ? e.message : t('streams.loadFailed');
     } finally {
@@ -238,7 +240,6 @@
       openCreateDialog();
       createMode = initialCreateMode;
     }
-    void loadGBChannelNames().then(names => { gbNames = names; }).catch(() => {});
     void loadStreams();
     stopEvents = subscribeNvrEvents({}, () => { void loadStreams({ silent: true }); }, { debounceMs: 500 });
     refreshTimer = window.setInterval(() => {
