@@ -24,6 +24,7 @@ import (
 const localVideoMaxBytes int64 = 2 << 30
 
 type localVideoPlayers struct {
+ authMu sync.Mutex
  mu sync.Mutex
  cancels map[string]context.CancelFunc
  done map[string]chan struct{}
@@ -42,6 +43,8 @@ func (h *Handler) localVideoDirectory() (string,error) {
 // ensureLocalVideoPublishKey provisions a cryptographically random RTMP key
 // without weakening the existing publish authentication policy.
 func (h *Handler) ensureLocalVideoPublishKey(streamID string) error {
+ h.localVideos.authMu.Lock()
+ defer h.localVideos.authMu.Unlock()
  if h.config==nil || !h.config.RTMP.RTMPPublishAuthEnabled() {return nil}
  if h.config.RTMP.StreamKeys[streamID]!="" {return nil}
  updater,ok:=h.banMgr.(interface{SetRTMPStreamKeys(map[string]string)})
@@ -59,6 +62,24 @@ func (h *Handler) ensureLocalVideoPublishKey(streamID string) error {
  }
  updater.SetRTMPStreamKeys(next)
  return nil
+}
+
+func (h *Handler) revokeLocalVideoPublishKey(streamID string) {
+ h.localVideos.authMu.Lock()
+ defer h.localVideos.authMu.Unlock()
+ if h.config==nil || h.config.RTMP.StreamKeys[streamID]=="" {return}
+ updater,ok:=h.banMgr.(interface{SetRTMPStreamKeys(map[string]string)})
+ if !ok {logger.Warn("unable to revoke local video RTMP token", "stream_id",streamID);return}
+ previous:=h.config.RTMP.StreamKeys
+ next:=make(map[string]string,len(previous))
+ for id,token:=range previous {if id!=streamID {next[id]=token}}
+ h.config.RTMP.StreamKeys=next
+ if err:=config.Save(h.configPath,h.config);err!=nil {
+  h.config.RTMP.StreamKeys=previous
+  logger.Warn("failed to persist RTMP token revocation", "stream_id",streamID,"err",err)
+  return
+ }
+ updater.SetRTMPStreamKeys(next)
 }
 
 func (h *Handler) localVideoRTMP(streamID string) (string,error) {
