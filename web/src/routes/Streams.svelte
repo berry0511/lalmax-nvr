@@ -43,6 +43,7 @@
   let createOpen = $state(false);
   let createMode = $state<'push' | 'pull' | 'local_video'>('push');
   let createVideoFile = $state<File | null>(null);
+  let uploadPercent = $state<number | null>(null);
   let createStreamID = $state('');
   let createName = $state('');
   let createSourceURL = $state('');
@@ -148,6 +149,7 @@
     createName = '';
     createSourceURL = '';
     createVideoFile = null;
+    uploadPercent = null;
     creating = false;
     createError = '';
     createdResult = null;
@@ -173,10 +175,11 @@
       return;
     }
     creating = true;
+    uploadPercent = null;
     createError = '';
     try {
       const info = createMode === 'local_video' && createVideoFile
-        ? await createLocalVideoStream({stream_id:streamID, name:createName.trim() || undefined, video:createVideoFile})
+        ? await createLocalVideoStream({stream_id:streamID, name:createName.trim() || undefined, video:createVideoFile}, value => uploadPercent = value)
         : await createStream({
         stream_id: streamID,
         name: createName.trim() || undefined,
@@ -530,6 +533,15 @@
                 disabled={creating}
               />
               <p class="text-xs th-text-tertiary mt-1">{t('streams.sourceURLHint')}</p>
+            </div>
+          {/if}
+          {#if createMode === 'local_video' && creating}
+            <div class="space-y-1" aria-live="polite">
+              <p class="text-xs th-text-secondary">上传视频：{uploadPercent === null ? '准备中' : uploadPercent + '%'}</p>
+              <div class="h-2 w-full rounded-full th-bg-tertiary overflow-hidden">
+                <div class="h-full bg-[var(--color-primary)] transition-all" style:width={(uploadPercent ?? 0) + '%'}></div>
+              </div>
+              {#if uploadPercent === 100}<p class="text-xs th-text-secondary">上传完成，服务器正在校验并创建循环流…</p>{/if}
             </div>
           {/if}
           {#if createError}
