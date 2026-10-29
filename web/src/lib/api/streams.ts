@@ -80,6 +80,23 @@ export interface UpdateStreamRequest {
   name: string;
 }
 
+export async function createLocalVideoStream(data: {stream_id:string; name?:string; video:File}, signal?:AbortSignal):Promise<StreamInfo> {
+  const body = new FormData();
+  body.set('stream_id',data.stream_id);
+  body.set('name',data.name || '');
+  body.set('video',data.video);
+  const {getAuthHeader} = await import('./client');
+  const headers: Record<string,string> = {};
+  const auth = getAuthHeader();
+  if (auth) headers.Authorization = auth;
+  const response = await fetch('/api/streams/local-video',{method:'POST',headers,body,signal});
+  if (!response.ok) {
+    const message = await response.json().catch(() => ({}));
+    throw new Error(message.error || '本地视频上传失败');
+  }
+  return response.json();
+}
+
 export async function createStream(data: CreateStreamRequest, signal?: AbortSignal): Promise<StreamInfo> {
   return apiRequest<StreamInfo>('/streams', {
     method: 'POST',
