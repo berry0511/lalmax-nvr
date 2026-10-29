@@ -4,6 +4,7 @@ import (
  "context"
  "crypto/rand"
  "encoding/hex"
+ "encoding/json"
  "errors"
  "fmt"
  "io"
@@ -75,6 +76,39 @@ func (h *Handler) localVideoRTMP(streamID string) (string,error) {
  return target,nil
 }
 
+type localVideoProbe struct {
+ Streams []struct {
+  CodecType string `json:"codec_type"`
+  CodecName string `json:"codec_name"`
+ } `json:"streams"`
+}
+
+// probeLocalVideo rejects invalid uploads and chooses stream-copy codecs where
+// FLV/RTMP supports them, minimizing CPU consumption for H264/AAC source files.
+func probeLocalVideo(file string) (videoCopy, audioCopy, hasAudio bool, err error) {
+ if _,err=exec.LookPath("ffprobe");err!=nil{return false,false,false,errors.New("ffprobe is required alongside ffmpeg")}
+ ctx,cancel:=context.WithTimeout(context.Background(),15*time.Second)
+ defer cancel()
+ out,err:=exec.CommandContext(ctx,"ffprobe","-v","error","-show_entries","stream=codec_type,codec_name",
+  "-of","json",file).Output()
+ if err!=nil{return false,false,false,fmt.Errorf("invalid video file: %w",err)}
+ var probe localVideoProbe
+ if err=json.Unmarshal(out,&probe);err!=nil{return false,false,false,err}
+ hasVideo:=false
+ for _,stream:=range probe.Streams {
+  if stream.CodecType=="video" && !hasVideo {
+   hasVideo=true
+   videoCopy=strings.EqualFold(stream.CodecName,"h264")
+  }
+  if stream.CodecType=="audio" && !hasAudio {
+   hasAudio=true
+   audioCopy=strings.EqualFold(stream.CodecName,"aac")
+  }
+ }
+ if !hasVideo {return false,false,false,errors.New("file contains no video stream")}
+ return videoCopy,audioCopy,hasAudio,nil
+}
+
 func (h *Handler) startLocalVideo(row storage.CreatedStream) error {
  if _,err:=exec.LookPath("ffmpeg");err!=nil{return fmt.Errorf("ffmpeg not installed: %w",err)}
  target,err:=h.localVideoRTMP(row.StreamID)
@@ -88,6 +122,8 @@ func (h *Handler) startLocalVideo(row storage.CreatedStream) error {
   return errors.New("local video must be under the managed video directory")
  }
  if fi,err:=os.Stat(abs);err!=nil || !fi.Mode().IsRegular() {return errors.New("local video file is unavailable")}
+ copyVideo,copyAudio,hasAudio,err:=probeLocalVideo(abs)
+ if err!=nil{return err}
  h.stopLocalVideo(row.StreamID)
  ctx,cancel:=context.WithCancel(context.Background())
  h.localVideos.mu.Lock()
@@ -97,9 +133,15 @@ func (h *Handler) startLocalVideo(row storage.CreatedStream) error {
  go func(){
   for ctx.Err()==nil {
    // Re-encode to H264/AAC for predictable FLV/RTMP playback.
-   cmd:=exec.CommandContext(ctx,"ffmpeg","-hide_banner","-nostdin","-loglevel","error","-re","-stream_loop","-1",
-    "-i",abs,"-c:v","libx264","-preset","veryfast","-tune","zerolatency","-pix_fmt","yuv420p",
-    "-c:a","aac","-f","flv",target)
+   args:=[]string{"-hide_banner","-nostdin","-loglevel","error","-re","-stream_loop","-1","-i",abs}
+   if copyVideo {args=append(args,"-c:v","copy")} else {
+    args=append(args,"-c:v","libx264","-preset","veryfast","-tune","zerolatency","-pix_fmt","yuv420p")
+   }
+   if !hasAudio {args=append(args,"-an")} else if copyAudio {args=append(args,"-c:a","copy")} else {
+    args=append(args,"-c:a","aac")
+   }
+   args=append(args,"-f","flv",target)
+   cmd:=exec.CommandContext(ctx,"ffmpeg",args...)
    cmd.SysProcAttr=localVideoProcessAttr()
    cmd.Stdout=io.Discard
    cmd.Stderr=io.Discard
@@ -179,6 +221,10 @@ func (h *Handler) handleCreateLocalVideo(w http.ResponseWriter,r *http.Request){
   writeError(w,http.StatusBadRequest,"invalid or oversized video file");return
  }
  if err=os.Rename(tempPath,dest);err!=nil {writeError(w,http.StatusInternalServerError,"failed to save video");return}
+ if _,_,_,err=probeLocalVideo(dest);err!=nil {
+  _=os.Remove(dest)
+  writeError(w,http.StatusBadRequest,err.Error());return
+ }
  if err:=h.ensureLocalVideoPublishKey(id);err!=nil {
   _=os.Remove(dest)
   writeError(w,http.StatusInternalServerError,err.Error());return
