@@ -522,7 +522,7 @@ func (h *Handler) Routes() http.Handler {
 		r.With(middleware.RequireOperatePermission()).Get("/api/streams/{stream_id}/variants", h.handleTranscodeVariants)
 		r.With(middleware.RequireOperatePermission()).Get("/api/streams/{stream_id}/variants/{job_id}/play", h.handleTranscodePlayURL)
 		r.With(middleware.RequireOperatePermission()).Get("/api/streams/{stream_id}/variants/{job_id}/stream.flv", h.handleTranscodeFLV)
-		r.Get("/api/settings/home-assistant", h.handleGetHomeAssistantSettings)
+		r.With(middleware.RequireOperatePermission()).Get("/api/settings/home-assistant", h.handleGetHomeAssistantSettings)
 		r.With(middleware.RequireOperatePermission()).Put("/api/settings/home-assistant", h.handleUpdateHomeAssistantSettings)
 		r.With(middleware.RequireOperatePermission()).Get("/api/integrations/home-assistant", h.handleHomeAssistantCatalog)
 		r.With(middleware.RequireOperatePermission()).Get("/api/integrations/home-assistant/events", h.handleHomeAssistantEvents)
