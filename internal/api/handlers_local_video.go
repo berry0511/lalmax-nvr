@@ -100,6 +100,7 @@ func (h *Handler) startLocalVideo(row storage.CreatedStream) error {
    cmd:=exec.CommandContext(ctx,"ffmpeg","-hide_banner","-nostdin","-loglevel","error","-re","-stream_loop","-1",
     "-i",abs,"-c:v","libx264","-preset","veryfast","-tune","zerolatency","-pix_fmt","yuv420p",
     "-c:a","aac","-f","flv",target)
+   cmd.SysProcAttr=localVideoProcessAttr()
    cmd.Stdout=io.Discard
    cmd.Stderr=io.Discard
    if err:=cmd.Run();err!=nil && ctx.Err()==nil {
