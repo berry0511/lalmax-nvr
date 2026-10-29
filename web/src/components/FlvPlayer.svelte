@@ -17,6 +17,7 @@
     protocol = 'flv',
     expanded = false,
     tabVisible = true,
+    allowSnapshotFallback = true,
   }: {
     cameraId: string;
     cameraName: string;
@@ -24,6 +25,7 @@
     protocol?: 'flv' | 'ws-flv';
     expanded?: boolean;
     tabVisible?: boolean;
+    allowSnapshotFallback?: boolean;
   } = $props();
 
   // Reconnection coordinator from Dashboard context
@@ -124,7 +126,8 @@ let videoEventAc: AbortController | null = null;
 
   function scheduleReconnect() {
     if (reconnectAttempts >= maxReconnectAttempts) {
-      enterSnapshotMode();
+      if (allowSnapshotFallback) enterSnapshotMode();
+      else { streamState = 'error'; dispatchStateChange('error'); }
       return;
     }
     captureFreezeFrame();
@@ -154,7 +157,7 @@ let videoEventAc: AbortController | null = null;
   }
 
   function enterSnapshotMode() {
-    if (snapshotMode) return;
+    if (!allowSnapshotFallback || snapshotMode) return;
     console.warn(`FLV max retries reached for ${cameraId}, entering snapshot fallback`);
     sendTelemetry('stream_degradation', cameraId, undefined, { protocol, target: 'snapshot' });
     snapshotMode = true;
