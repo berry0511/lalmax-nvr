@@ -26,6 +26,7 @@
 
   let camera = $state<Camera | null>(null);
   let catalogChannelName = $state('');
+  let catalogRefreshTimer: ReturnType<typeof setInterval> | undefined;
   let displayCameraName = $derived(catalogChannelName || camera?.name || camera?.id || '');
 
   async function refreshCatalogChannelName(cam: Camera) {
@@ -300,6 +301,10 @@
     }
 
     loadCamera();
+    // Keep the title in sync when a channel is renamed while live preview stays open.
+    catalogRefreshTimer = window.setInterval(() => {
+      if (camera && !document.hidden) void refreshCatalogChannelName(camera);
+    }, 30000);
     document.addEventListener('fullscreenchange', handleFullscreenChange);
     listProtocols().then(list => {
       if (list && list.length > 0) protocolsMap = buildProtocolsMap(list);
@@ -307,6 +312,7 @@
   });
 
   onDestroy(() => {
+    if (catalogRefreshTimer) window.clearInterval(catalogRefreshTimer);
     document.removeEventListener('fullscreenchange', handleFullscreenChange);
   });
 </script>
