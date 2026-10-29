@@ -11,7 +11,7 @@
     TraceListResponse, TraceDetailResponse,
   } from '$lib/api';
   import { t } from '$lib/i18n';
-  import { loadGBChannelNames, gbDisplayName, type ChannelNames } from '$lib/gb-channel-names';
+  import { loadGBChannelNames, gbDisplayName, cameraDisplayName, type ChannelNames } from '$lib/gb-channel-names';
   import { formatFileSize, formatDate } from '$lib/format';
 
   import {
@@ -349,8 +349,14 @@
   }
 
   async function loadCameras() {
-    try { cameras = await listCameras(); }
-    catch (e) { console.error(e); }
+    try {
+      const [cameraRows, channelNames] = await Promise.all([
+        listCameras(),
+        loadGBChannelNames().catch(() => new Map<string, string>()),
+      ]);
+      cameras = cameraRows;
+      gbNames = channelNames;
+    } catch (e) { console.error(e); }
   }
 
   async function loadHealth() {
@@ -1483,7 +1489,7 @@
                       <tr class="transition-all duration-200 hover:th-bg-hover">
                         <td class="font-medium th-text-primary">
                           <span class="inline-block w-2 h-2 rounded-full mr-2 {camera.enabled ? 'bg-[var(--color-success)]' : 'bg-[var(--color-danger)]'}"></span>
-                          {gbDisplayName(gbNames, [camera.stream_id, camera.id], camera.name || camera.id)}
+                          {cameraDisplayName(gbNames, camera)}
                         </td>
                         <td class="th-text-muted font-mono text-sm">{camera.id}</td>
                         <td><span class="badge badge-neutral">{camera.protocol}</span></td>
