@@ -129,9 +129,13 @@ func TestJobValidation(t *testing.T) {
 	if err := j.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	j.RunPolicy = "on_demand"
+	j.RunPolicy = OnDemand
+	if err := j.Validate(); err != nil {
+		t.Fatalf("valid on-demand policy rejected: %v", err)
+	}
+	j.RunPolicy = "unrecognized"
 	if j.Validate() == nil {
-		t.Fatal("unimplemented demand policy accepted")
+		t.Fatal("unknown policy accepted")
 	}
 	j.RunPolicy = Manual
 	j.ProfileRevision = 0

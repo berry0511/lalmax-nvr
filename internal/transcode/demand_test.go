@@ -1,0 +1,87 @@
+package transcode
+
+import (
+ "context"
+ "sync"
+ "testing"
+ "time"
+)
+
+func setupDemandLeaseService(t *testing.T) (*Service,*Manager,*fakeExecutor,Job) {
+ t.Helper()
+ ctx:=context.Background()
+ p:=testProfile(t)
+ j:=managerJob(t,"leased",p)
+ j.RunPolicy=OnDemand
+ executor:=&fakeExecutor{}
+ executor.ready.Store(true)
+ manager:=NewManager(ctx,executor,2)
+ probes:=NewProbeService(nil)
+ cfg:=Config{Enabled:true}
+ fingerprint,err:=ProbeFingerprint(cfg.Tools(),p)
+ if err!=nil{t.Fatal(err)}
+ probes.reports[p.ID]=CapabilityReport{CanEnable:true,Fingerprint:fingerprint,CheckedAt:time.Now()}
+ service:=NewService(&recoveryRepository{profile:p,job:j},manager,probes,cfg)
+ t.Cleanup(func(){_ = manager.Close(context.Background())})
+ return service,manager,executor,j
+}
+
+func TestDemandLeaseSharesOneProcessAndReleasesLastOwner(t *testing.T){
+ service,manager,executor,job:=setupDemandLeaseService(t)
+ const n=8
+ type output struct{lease DemandLease;runtime Runtime;err error}
+ results:=make(chan output,n)
+ var wg sync.WaitGroup
+ for i:=0;i<n;i++{
+  wg.Add(1)
+  go func(){defer wg.Done();l,r,e:=service.AcquireDemand(context.Background(),job.ID,job.Generation);results<-output{l,r,e}}()
+ }
+ wg.Wait();close(results)
+ tokens:=make([]string,0,n)
+ var variant string
+ for result:=range results {
+  if result.err!=nil{t.Fatalf("acquire: %v",result.err)}
+  if result.lease.Token=="" || result.lease.JobID!=job.ID {t.Fatalf("bad lease: %+v",result.lease)}
+  if variant!="" && result.runtime.VariantID!=variant {t.Fatal("shared demand created different physical outputs")}
+  variant=result.runtime.VariantID
+  tokens=append(tokens,result.lease.Token)
+ }
+ if executor.starts.Load()!=1 {t.Fatalf("wanted one backend start, got %d",executor.starts.Load())}
+ for _,token:=range tokens[:len(tokens)-1]{
+  if err:=service.ReleaseDemand(context.Background(),token);err!=nil{t.Fatal(err)}
+  if _,ok:=manager.Status(job.ID);!ok {t.Fatal("a remaining consumer lost the media owner")}
+ }
+ if err:=service.ReleaseDemand(context.Background(),tokens[len(tokens)-1]);err!=nil{t.Fatal(err)}
+ if _,ok:=manager.Status(job.ID);ok {t.Fatal("last lease did not release process owner")}
+}
+
+func TestDemandLeaseExpiryAndNoRestartWithoutConsumers(t *testing.T){
+ service,manager,_,job:=setupDemandLeaseService(t)
+ if _,err:=service.Start(context.Background(),job.ID,job.Generation);err==nil{
+  t.Fatal("on-demand job started without a consumer lease")
+ }
+ lease,_,err:=service.AcquireDemand(context.Background(),job.ID,job.Generation)
+ if err!=nil{t.Fatal(err)}
+ service.mu.Lock()
+ lease.ExpiresAt=time.Now().Add(-time.Second)
+ service.leases[lease.Token]=lease
+ service.mu.Unlock()
+ if _,err=service.RenewDemand(lease.Token);err==nil{t.Fatal("expired lease renewed")}
+ service.expireDemandLeases(context.Background())
+ if _,ok:=manager.Status(job.ID);ok{t.Fatal("expired demand lease kept process alive")}
+ if _,err=service.RenewDemand(lease.Token);err==nil{t.Fatal("removed token renewed")}
+ if errs:=service.ReconcileAlways(context.Background());len(errs)!=0{t.Fatalf("unexpected reconcile errors: %v",errs)}
+ if _,ok:=manager.Status(job.ID);ok {t.Fatal("on-demand job resumed without consumer")}
+}
+
+func TestDemandLeaseInvalidGenerationAndManualPolicyFailClosed(t *testing.T){
+ service,manager,_,job:=setupDemandLeaseService(t)
+ if _,_,err:=service.AcquireDemand(context.Background(),job.ID,job.Generation+1);err==nil{
+  t.Fatal("stale or future generation accepted")
+ }
+ service.config.Enabled=false
+ if _,_,err:=service.AcquireDemand(context.Background(),job.ID,job.Generation);err==nil{
+  t.Fatal("on-demand started while globally disabled")
+ }
+ if _,ok:=manager.Status(job.ID);ok {t.Fatal("failed request started media")}
+}
