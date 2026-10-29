@@ -138,8 +138,8 @@
   let trafficHistoryError = $state('');
   let trafficChart: any = null;
   let trafficSessionsChart: any = null;
-  let trafficChartCanvas: HTMLCanvasElement;
-  let trafficSessionsCanvas: HTMLCanvasElement;
+  let trafficChartCanvas = $state<HTMLCanvasElement>();
+  let trafficSessionsCanvas = $state<HTMLCanvasElement>();
   let trafficHistoryRequest = 0;
 
   function destroyTrafficChart() {
