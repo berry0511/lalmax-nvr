@@ -37,6 +37,21 @@ export function listTranscodeJobs(signal?: AbortSignal) {
 export function createTranscodeProfile(profile: TranscodeProfile, signal?: AbortSignal) {
   return apiRequest<TranscodeProfile>('/transcoding/profiles', { method: 'POST', body: JSON.stringify(profile), signal });
 }
+export function updateTranscodeProfile(profile: TranscodeProfile, signal?: AbortSignal) {
+  if (!profile.revision) throw new Error('Profile revision is required for updates');
+  return apiRequest<TranscodeProfile>(`/transcoding/profiles/${encodeURIComponent(profile.id)}`, {
+    method: 'PATCH', body: JSON.stringify(profile), signal,
+  });
+}
+
+export function deleteTranscodeProfile(profile: TranscodeProfile, signal?: AbortSignal) {
+  if (!profile.revision) throw new Error('Profile revision is required for deletion');
+  return apiRequest<void>(
+    `/transcoding/profiles/${encodeURIComponent(profile.id)}?revision=${profile.revision}`,
+    { method: 'DELETE', signal },
+  );
+}
+
 export function probeSavedTranscodeProfile(id: string, signal?: AbortSignal) {
   return apiRequest<CapabilityReport>(`/transcoding/profiles/${encodeURIComponent(id)}/probe`, { method: 'POST', signal });
 }
