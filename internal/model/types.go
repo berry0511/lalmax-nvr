@@ -83,6 +83,7 @@ type SegmentMeta struct {
 }
 
 type RecordingFilter struct {
+	StreamID  string // Exact recorded stream; fall back to camera_id only for legacy rows.
 	CameraID  string
 	StartTime time.Time
 	EndTime   time.Time
