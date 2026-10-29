@@ -1,0 +1,33 @@
+name: Transcode Windows
+
+on:
+  pull_request:
+    paths:
+      - 'internal/transcode/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/transcode-windows.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'internal/transcode/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/transcode-windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  transcode-process:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-go@v5.2.0
+        with:
+          go-version: '1.26.2'
+          cache: true
+      - name: Test transcoding process lifecycle on Windows
+        run: go test -count=1 ./internal/transcode
