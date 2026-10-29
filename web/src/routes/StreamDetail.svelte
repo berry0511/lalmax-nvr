@@ -604,6 +604,7 @@
     stopEvents = subscribeNvrEvents({ camera_id: streamId }, () => { void loadStream(); }, { debounceMs: 400 });
     refreshTimer = window.setInterval(() => {
       void loadStream();
+      void loadGBChannelNames().then(names => { gbNames = names; }).catch(() => {});
     }, 15000);
   });
 
