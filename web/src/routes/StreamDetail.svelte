@@ -6,7 +6,6 @@
   import { t } from '$lib/i18n';
   import { loadGBChannelNames, gbDisplayName, type ChannelNames } from '$lib/gb-channel-names';
   import { showToast } from '$lib/toast';
-  import { copyTextWithFallback } from '$lib/clipboard';
   import {
     ArrowLeft,
     RefreshCw,
@@ -26,7 +25,6 @@
     Trash2,
     UserMinus,
     Copy,
-    ExternalLink,
     Clock,
     Wifi,
     WifiOff,
@@ -35,6 +33,7 @@
   import VideoPlayer from '../components/VideoPlayer.svelte';
   import WebRTCPlayer from '../components/WebRTCPlayer.svelte';
   import FlvPlayer from '../components/FlvPlayer.svelte';
+  import CopyableStreamURL from '$lib/components/CopyableStreamURL.svelte';
   import { listStreamTranscodeVariants, transcodePreviewFLVURL, type TranscodeVariant } from '$lib/api/transcoding';
 
   let { streamId = '' }: { streamId?: string } = $props();
@@ -316,16 +315,6 @@
       return ['wasm', ...backend];
     }
     return backend;
-  }
-
-  async function copyIngestURL(url: string) {
-    try {
-      if (await copyTextWithFallback(url)) {
-        showToast(t('streams.copied'), 'success');
-      }
-    } catch {
-      showToast(t('streams.copyFailed'), 'error');
-    }
   }
 
   function protocolLabel(protocol: string): string {
@@ -892,7 +881,7 @@
             {t('streams.tabMetrics')}
           </button>
           <button class="detail-tab" class:active={activeTab === 'urls'} onclick={() => switchTab('urls')}>
-            <ExternalLink size={15} />
+            <Copy size={15} />
             {t('streams.tabUrls')}
           </button>
           <button class="detail-tab" class:active={activeTab === 'actions'} onclick={() => switchTab('actions')}>
@@ -1132,7 +1121,7 @@
         <section class="urls-section glass">
           <div class="section-header">
             <h2>
-              <ExternalLink size={18} />
+              <Copy size={18} />
               {t('streams.playUrls')}
             </h2>
           </div>
@@ -1140,13 +1129,7 @@
           {#if stream.play_urls?.length}
             <div class="urls-list">
               {#each stream.play_urls as play}
-                <a class="url-item" href={play.url} target="_blank" rel="noreferrer">
-                  <div class="url-info">
-                    <span class="url-protocol">{protocolLabel(play.protocol)}</span>
-                    <code>{play.url}</code>
-                  </div>
-                  <ExternalLink size={14} />
-                </a>
+                <CopyableStreamURL protocol={protocolLabel(play.protocol)} url={play.url} />
               {/each}
             </div>
           {:else}
@@ -1158,23 +1141,14 @@
           {#if stream.source_type === 'relay_pull'}
             <div class="section-header" style="margin-top: 1.5rem;">
               <h2>
-                <ExternalLink size={18} />
+                <Copy size={18} />
                 {t('streams.pullSource')}
               </h2>
             </div>
             <p class="th-text-muted text-sm" style="margin: 0 0 0.75rem;">{t('streams.pullSourceHint')}</p>
             {#if stream.source_url}
               <div class="urls-list">
-                <div class="url-item">
-                  <div class="url-info">
-                    <span class="url-protocol">{t('streams.inputPull')}</span>
-                    <code>{stream.source_url}</code>
-                  </div>
-                  <button type="button" class="btn btn-ghost btn-xs" onclick={() => copyIngestURL(stream.source_url || '')}>
-                    <Copy size={14} />
-                    <span>{t('streams.copy')}</span>
-                  </button>
-                </div>
+                <CopyableStreamURL protocol={t('streams.inputPull')} url={stream.source_url} />
               </div>
             {:else}
               <div class="empty-urls">
@@ -1184,7 +1158,7 @@
           {:else}
           <div class="section-header" style="margin-top: 1.5rem;">
             <h2>
-              <ExternalLink size={18} />
+              <Copy size={18} />
               {t('streams.ingestUrls')}
             </h2>
           </div>
@@ -1194,16 +1168,7 @@
           {#if stream.ingest_urls?.length}
             <div class="urls-list">
               {#each stream.ingest_urls as ingest}
-                <div class="url-item">
-                  <div class="url-info">
-                    <span class="url-protocol">{protocolLabel(ingest.protocol)}</span>
-                    <code>{ingest.url}</code>
-                  </div>
-                  <button type="button" class="btn btn-ghost btn-xs" onclick={() => copyIngestURL(ingest.url)}>
-                    <Copy size={14} />
-                    <span>{t('streams.copy')}</span>
-                  </button>
-                </div>
+                <CopyableStreamURL protocol={protocolLabel(ingest.protocol)} url={ingest.url} />
               {/each}
             </div>
           {:else}
@@ -1793,50 +1758,6 @@
     padding: 1rem;
     display: grid;
     gap: 0.5rem;
-  }
-
-  .url-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.75rem;
-    border-radius: var(--radius-md);
-    border: 1px solid var(--border);
-    text-decoration: none;
-    color: inherit;
-    transition: all 0.15s ease;
-  }
-
-  .url-item:hover {
-    border-color: var(--color-primary);
-    transform: translateY(-1px);
-  }
-
-  .url-info {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    min-width: 0;
-  }
-
-  .url-protocol {
-    padding: 0.2rem 0.5rem;
-    border-radius: var(--radius-sm);
-    background: rgba(14, 165, 233, 0.15);
-    color: var(--color-primary);
-    font-size: 0.7rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    white-space: nowrap;
-  }
-
-  .url-info code {
-    font-size: 0.8rem;
-    color: var(--text-secondary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .empty-urls {
