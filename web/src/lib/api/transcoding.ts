@@ -9,7 +9,7 @@ export interface TranscodeProfile {
 export interface TranscodeJob {
   id: string; source: { engine_id: string; stream_id: string; app_name: string };
   profile_id: string; profile_revision: number; enabled: boolean;
-  run_policy: 'always' | 'manual'; generation: number;
+  run_policy: 'always' | 'manual' | 'on_demand'; generation: number;
 }
 export interface TranscodeVariant {
   id: string; job_id: string; source_id: string; state: string; error_code?: string; retry_at?: string;
@@ -63,6 +63,26 @@ export function transcodeJobAction(job: TranscodeJob, action: 'start' | 'stop' |
   const suffix = action === 'delete' ? '' : `/${action}`;
   return apiRequest<unknown>(`/transcoding/jobs/${encodeURIComponent(job.id)}${suffix}?generation=${job.generation}`, { method: action === 'delete' ? 'DELETE' : 'POST', signal });
 }
+export interface TranscodeDemandLease {
+  token: string; job_id: string; generation: number; expires_at: string;
+}
+export function acquireTranscodeDemandLease(jobID: string, generation: number) {
+  return apiRequest<{lease: TranscodeDemandLease; runtime: {state: string}}>(
+    `/transcoding/jobs/${encodeURIComponent(jobID)}/leases?generation=${generation}`,
+    {method:'POST'},
+  );
+}
+export function renewTranscodeDemandLease(token: string) {
+  return apiRequest<TranscodeDemandLease>(
+    `/transcoding/leases/${encodeURIComponent(token)}/renew`, {method:'POST'},
+  );
+}
+export function releaseTranscodeDemandLease(token: string) {
+  return apiRequest<void>(
+    `/transcoding/leases/${encodeURIComponent(token)}`, {method:'DELETE'},
+  );
+}
+
 export interface CapabilityReport {
   backend: TranscodeBackend;
   profile_id: string;

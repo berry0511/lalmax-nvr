@@ -146,7 +146,7 @@
         <label class="space-y-1"><span class="input-label">{t('transcode.sourceID')}</span><input class="input w-full" required bind:value={sourceID} /></label>
         <label class="space-y-1"><span class="input-label">{t('transcode.appName')}</span><input class="input w-full" required bind:value={appName} /></label>
         <label class="space-y-1"><span class="input-label">{t('transcode.profile')}</span><select class="input w-full" required bind:value={profileID}><option value="">{t('transcode.selectProfile')}</option>{#each profiles as p}<option value={p.id}>{p.name || p.id}</option>{/each}</select></label>
-        <label class="space-y-1"><span class="input-label">任务运行策略</span><select class="input w-full" bind:value={draftPolicy}><option value="manual">手动</option><option value="always">常驻自动恢复</option></select></label>
+        <label class="space-y-1"><span class="input-label">任务运行策略</span><select class="input w-full" bind:value={draftPolicy}><option value="manual">手动</option><option value="always">常驻自动恢复</option><option value="on_demand">按需（消费者租约）</option></select></label>
         <button type="submit" class="btn btn-primary">{t('transcode.createDraft')}</button>
       </form>
       {#if jobs.length === 0}<p class="text-sm th-text-secondary">{t('transcode.noJobs')}</p>{/if}
@@ -167,7 +167,7 @@
           <div class="flex flex-wrap gap-2">
             <button class="btn btn-secondary" onclick={() => act(() => saveTranscodeJob({...job, enabled: !job.enabled}, controller.signal))}>{job.enabled ? t('transcode.disable') : t('transcode.enable')}</button>
             <button class="btn btn-secondary" disabled={runtime?.state !== 'running' || busy} onclick={() => preview = job}>{t('transcode.preview')}</button>
-            <button class="btn btn-secondary" disabled={!job.enabled || busy} onclick={() => act(() => transcodeJobAction(job, 'start', controller.signal))}>{t('transcode.start')}</button>
+            <button class="btn btn-secondary" disabled={!job.enabled || busy || job.run_policy === 'on_demand'} onclick={() => act(() => transcodeJobAction(job, 'start', controller.signal))}>{t('transcode.start')}</button>
             <button class="btn btn-secondary" onclick={() => act(() => transcodeJobAction(job, 'stop', controller.signal))}>{t('transcode.stop')}</button>
             <button class="btn btn-secondary" onclick={() => { if (window.confirm(t('transcode.deleteConfirm'))) void act(() => transcodeJobAction(job, 'delete', controller.signal)); }}>{t('transcode.delete')}</button>
           </div>

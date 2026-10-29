@@ -34,7 +34,7 @@
   import WebRTCPlayer from '../components/WebRTCPlayer.svelte';
   import FlvPlayer from '../components/FlvPlayer.svelte';
   import CopyableStreamURL from '$lib/components/CopyableStreamURL.svelte';
-  import { listStreamTranscodeVariants, transcodePreviewFLVURL, type TranscodeVariant } from '$lib/api/transcoding';
+  import { listStreamTranscodeVariants, listTranscodeJobs, transcodePreviewFLVURL, acquireTranscodeDemandLease, renewTranscodeDemandLease, releaseTranscodeDemandLease, type TranscodeJob, type TranscodeDemandLease, type TranscodeVariant } from '$lib/api/transcoding';
 
   let { streamId = '' }: { streamId?: string } = $props();
 
@@ -68,6 +68,11 @@
   let configuredDefaultProtocol = $state<string>('wasm');
   let userPickedProtocol = $state(false);
   let selectedVariantJobID = $state(''); // empty = original media stream
+  let transcodeJobs = $state<TranscodeJob[]>([]);
+  let currentDemandLease: TranscodeDemandLease | null = null;
+  let demandRenewTimer: number | undefined;
+  let demandPollTimer: number | undefined;
+  let outputSelectionSerial = 0;
   let derivedVariants = $state<TranscodeVariant[]>([]);
   let derivedVariantsError = $state('');
   let derivedRequest = 0;
@@ -189,6 +194,58 @@
       // If the user already selected a variant, retain selection and fail closed.
       derivedVariants = [];
       derivedVariantsError = e instanceof Error ? e.message : '无法读取派生流';
+    }
+  }
+
+  async function loadTranscodeJobs() {
+    try {
+      const result = await listTranscodeJobs();
+      transcodeJobs = result.jobs ?? [];
+    } catch {
+      transcodeJobs = [];
+    }
+  }
+
+  // Consumer leases are only created by explicit user choice. They are never
+  // attached to the original stream and never start on component mount.
+  async function selectPlaybackOutput(jobID: string) {
+    const serial = ++outputSelectionSerial;
+    const oldLease = currentDemandLease;
+    currentDemandLease = null;
+    selectedVariantJobID = jobID;
+    derivedVariantsError = '';
+    if (oldLease) void releaseTranscodeDemandLease(oldLease.token).catch(() => {});
+    if (!jobID) return;
+    if (!transcodeJobs.length) await loadTranscodeJobs();
+    const job = transcodeJobs.find(j => j.id === jobID);
+    if (job?.run_policy === 'on_demand') {
+      try {
+        const result = await acquireTranscodeDemandLease(job.id, job.generation);
+        if (outputSelectionSerial !== serial) {
+          void releaseTranscodeDemandLease(result.lease.token).catch(() => {});
+          return;
+        }
+        currentDemandLease = result.lease;
+      } catch (e) {
+        if (outputSelectionSerial === serial) {
+          derivedVariantsError = e instanceof Error ? e.message : '按需派生流申请失败';
+        }
+      }
+    }
+    if (outputSelectionSerial === serial) void loadDerivedVariants();
+  }
+
+  async function renewSelectedDemandLease() {
+    const lease = currentDemandLease;
+    if (!lease || selectedVariantJobID !== lease.job_id) return;
+    try {
+      const next = await renewTranscodeDemandLease(lease.token);
+      if (currentDemandLease?.token === lease.token) currentDemandLease = next;
+    } catch {
+      if (currentDemandLease?.token === lease.token) {
+        currentDemandLease = null;
+        derivedVariantsError = '按需租约失效，请重新选择派生输出';
+      }
     }
   }
 
@@ -606,6 +663,11 @@
     }
     loadStream();
     void loadDerivedVariants();
+    void loadTranscodeJobs();
+    demandPollTimer = window.setInterval(() => {
+      if (selectedVariantJobID && !document.hidden) void loadDerivedVariants();
+    }, 2000);
+    demandRenewTimer = window.setInterval(() => { void renewSelectedDemandLease(); }, 45000);
     // Resolve the configured default playback protocol (Settings page).
     getStreamingSettings()
       .then(config => {
@@ -621,6 +683,11 @@
   });
 
   onDestroy(() => {
+    ++outputSelectionSerial;
+    if (demandPollTimer) window.clearInterval(demandPollTimer);
+    if (demandRenewTimer) window.clearInterval(demandRenewTimer);
+    if (currentDemandLease) void releaseTranscodeDemandLease(currentDemandLease.token).catch(() => {});
+    currentDemandLease = null;
     stopEvents?.();
     if (refreshTimer) {
       window.clearInterval(refreshTimer);
@@ -744,7 +811,8 @@
                 id="stream-derived-output"
                 class="form-input"
                 aria-label="选择原始流或派生流"
-                bind:value={selectedVariantJobID}
+                value={selectedVariantJobID}
+                onchange={e => void selectPlaybackOutput(e.currentTarget.value)}
               >
                 <option value="">原始流</option>
                 {#each derivedVariants as variant (variant.job_id)}
@@ -782,7 +850,7 @@
 
           {#if selectedVariantJobID}
             <div class="player-container">
-              {#if selectedVariant?.state === 'running'}
+              {#if selectedVariant?.state === 'running' && (!transcodeJobs.some(j => j.id === selectedVariantJobID && j.run_policy === 'on_demand') || currentDemandLease)}
                 {#key stream.stream_id + ':' + selectedVariantJobID}
                   <FlvPlayer
                     cameraId={encodedStreamId}
