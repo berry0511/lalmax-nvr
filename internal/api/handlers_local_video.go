@@ -26,6 +26,7 @@ const localVideoMaxBytes int64 = 2 << 30
 type localVideoPlayers struct {
  mu sync.Mutex
  cancels map[string]context.CancelFunc
+ done map[string]chan struct{}
 }
 
 func (h *Handler) localVideoDirectory() (string,error) {
@@ -129,8 +130,13 @@ func (h *Handler) startLocalVideo(row storage.CreatedStream) error {
  h.localVideos.mu.Lock()
  if h.localVideos.cancels==nil {h.localVideos.cancels=make(map[string]context.CancelFunc)}
  h.localVideos.cancels[row.StreamID]=cancel
+ if h.localVideos.done==nil {h.localVideos.done=make(map[string]chan struct{})}
+ done:=make(chan struct{})
+ h.localVideos.done[row.StreamID]=done
  h.localVideos.mu.Unlock()
  go func(){
+  defer close(done)
+  var lastWarning time.Time
   for ctx.Err()==nil {
    // Re-encode to H264/AAC for predictable FLV/RTMP playback.
    args:=[]string{"-hide_banner","-nostdin","-loglevel","error","-re","-stream_loop","-1","-i",abs}
@@ -169,9 +175,16 @@ func (h *Handler) removeLocalVideoFile(file string) {
 func (h *Handler) stopLocalVideo(streamID string){
  h.localVideos.mu.Lock()
  cancel:=h.localVideos.cancels[streamID]
+ done:=h.localVideos.done[streamID]
  delete(h.localVideos.cancels,streamID)
+ delete(h.localVideos.done,streamID)
  h.localVideos.mu.Unlock()
  if cancel!=nil {cancel()}
+ if done!=nil {
+  select {case <-done: case <-time.After(5*time.Second):
+   logger.Warn("timed out waiting for local video publisher to exit", "stream_id",streamID)
+  }
+ }
 }
 
 // handleCreateLocalVideo accepts a browser-uploaded media file and creates a
