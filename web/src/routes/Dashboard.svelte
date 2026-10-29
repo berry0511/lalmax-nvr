@@ -864,9 +864,13 @@
     pendingSlotAssignments = [...slotAssignments];
     // WS-FLV requires a server-provided play URL. Other modes have stable route fallbacks.
     loading = false;
+    let catalogRefreshTicks = 0;
     streamStatusTimer = window.setInterval(() => {
       void refreshWallStreams();
       retryUnreadyGBPlayers();
+      if (++catalogRefreshTicks % 3 === 0) {
+        void loadGBChannelNames().then(names => { gbNames = names; }).catch(() => {});
+      }
     }, 10000);
     if (dashboardDisposed) window.clearInterval(streamStatusTimer);
     document.addEventListener('fullscreenchange', handleFullscreenChange);
