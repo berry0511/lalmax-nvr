@@ -16,7 +16,7 @@
   } from '$lib/api';  import type { NvrEvent } from '$lib/api';
   import type { Camera, ProtocolInfo, StreamInfo } from '$lib/api';
   import { t } from '$lib/i18n';
-  import { loadGBChannelNames, gbDisplayName, type ChannelNames } from '$lib/gb-channel-names';
+  import { loadGBChannelNames, gbDisplayName, cameraDisplayName, type ChannelNames } from '$lib/gb-channel-names';
   import { showToast } from '$lib/toast';
   import { Loader2, AlertCircle, Video, VideoOff, X, Settings, ImageOff, CircleCheck, CirclePause, WifiOff, LayoutGrid, Plus, Search, Play } from 'lucide-svelte';
   import PtzControl from '../components/PtzControl.svelte';
@@ -30,7 +30,7 @@
   import { createReconnectCoordinator } from '$lib/reconnect-coordinator.svelte';
 
   let gbNames = $state<ChannelNames>(new Map());
-  function cameraTitle(camera: Camera): string { return gbDisplayName(gbNames, [camera.stream_id, camera.id], camera.name || camera.id); }
+  function cameraTitle(camera: Camera): string { return cameraDisplayName(gbNames, camera); }
   function streamTitle(stream: StreamInfo): string { return gbDisplayName(gbNames, [stream.stream_id, stream.camera_id], stream.name || stream.camera_name || stream.stream_id); }
 
   type GridLayout = 1 | 4 | 6 | 9 | 16;
