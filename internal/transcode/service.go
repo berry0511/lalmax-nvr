@@ -17,11 +17,12 @@ type Service struct {
 	probes  *ProbeService
 	config  Config
 	retry   map[string]retryState
+	leases  map[string]DemandLease
 }
 
 func NewService(repo Repository, manager *Manager, probes *ProbeService, cfg Config) *Service {
 	cfg.ApplyDefaults()
-	return &Service{repo: repo, manager: manager, probes: probes, config: cfg, retry: map[string]retryState{}}
+	return &Service{repo: repo, manager: manager, probes: probes, config: cfg, retry: map[string]retryState{}, leases: map[string]DemandLease{}}
 }
 func (s *Service) profile(ctx context.Context, j Job) (Profile, error) {
 	profiles, err := s.repo.ListTranscodeProfiles(ctx)
@@ -97,6 +98,9 @@ func (s *Service) Start(ctx context.Context, id string, generation uint64) (Runt
 	if err != nil {
 		return Runtime{}, err
 	}
+	if j.RunPolicy == OnDemand {
+		return Runtime{}, &Error{Code: "demand_lease_required", Message: "on-demand jobs must be started by an active consumer lease"}
+	}
 	p, err := s.profile(ctx, j)
 	if err != nil {
 		return Runtime{}, err
@@ -134,6 +138,7 @@ func (s *Service) Stop(ctx context.Context, id string, generation uint64) error 
 	if err := s.repo.SetTranscodeJobStopped(ctx, id, generation, true); err != nil {
 		return err
 	}
+	s.invalidateDemandLeasesLocked(id)
 	if s.manager == nil {
 		return nil
 	}
@@ -145,6 +150,7 @@ func (s *Service) Delete(ctx context.Context, id string, generation uint64) erro
 	if _, err := s.job(ctx, id, generation); err != nil {
 		return err
 	}
+	s.invalidateDemandLeasesLocked(id)
 	if s.manager != nil {
 		if err := s.manager.Release(ctx, id, generation); err != nil {
 			return err
@@ -180,6 +186,7 @@ func (s *Service) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			attempt, cancel := context.WithTimeout(ctx, 45*time.Second)
+			s.expireDemandLeases(attempt)
 			for id, err := range s.ReconcileAlways(attempt) {
 				code := "reconcile_failed"
 				var domain *Error

@@ -154,6 +154,7 @@ type RunPolicy string
 const (
 	Always RunPolicy = "always"
 	Manual RunPolicy = "manual"
+	OnDemand RunPolicy = "on_demand"
 )
 
 type Job struct {
@@ -174,8 +175,8 @@ func (j Job) Validate() error {
 	if err := j.Source.Validate(); err != nil {
 		return err
 	}
-	if j.RunPolicy != Always && j.RunPolicy != Manual {
-		return invalid("only always and manual policies are supported")
+	if j.RunPolicy != Always && j.RunPolicy != Manual && j.RunPolicy != OnDemand {
+		return invalid("only always, manual and on_demand policies are supported")
 	}
 	if j.ProfileRevision == 0 {
 		return invalid("profile revision is required")
