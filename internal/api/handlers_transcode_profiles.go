@@ -32,8 +32,10 @@ func transcodeAPIError(w http.ResponseWriter, err error) {
 		status = 503
 	case "probe_required", "transcoding_disabled":
 		status = 412
-	case "profile_not_found", "job_not_found":
+	case "profile_not_found", "job_not_found", "lease_not_found":
 		status = 404
+	case "demand_unavailable":
+		status = 412
 	case "capacity_exceeded":
 		status = 429
 	}
