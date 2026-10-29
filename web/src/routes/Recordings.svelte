@@ -6,7 +6,7 @@
   import { formatDuration, formatFileSize } from '$lib/format';
   import { showToast } from '$lib/toast';
   import { t } from '$lib/i18n';
-  import { loadGBChannelNames, gbDisplayName, type ChannelNames } from '$lib/gb-channel-names';
+  import { loadGBChannelNames, cameraDisplayName, type ChannelNames } from '$lib/gb-channel-names';
   import { wallMsToHour, wallMsToMediaOffset, mediaOffsetToWallMs, vodClips, dayStartFromISO } from '$lib/playback';
   import { Trash2, Download, ChevronLeft, ChevronRight, Calendar, AlertCircle, Play, Search, Video, Lock, Unlock } from 'lucide-svelte';
   import Timeline from '$lib/components/Timeline.svelte';
@@ -18,7 +18,7 @@
 
   let cameras = $state<Camera[]>([]);
   let gbNames = $state<ChannelNames>(new Map());
-  const sourceName = (camera: Camera) => gbDisplayName(gbNames, [camera.stream_id, camera.id], camera.name || camera.id);
+  const sourceName = (camera: Camera) => cameraDisplayName(gbNames, camera);
   let recordingSources = $state<RecordingSource[]>([]);
   let selectedCameraId = $state(untrack(() => initialCameraId));
   let selectedDate = $state(formatDateForInput(new Date()));
