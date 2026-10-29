@@ -14,6 +14,20 @@ export interface TranscodeJob {
 export interface TranscodeVariant {
   id: string; job_id: string; source_id: string; state: string; error_code?: string; retry_at?: string;
 }
+// Read-only catalog for a single logical source. The server verifies the job
+// belongs to this source before issuing any actual playback target.
+export function listStreamTranscodeVariants(streamID: string, signal?: AbortSignal) {
+  return apiRequest<{ variants: TranscodeVariant[] }>(
+    `/streams/${encodeURIComponent(streamID)}/variants`, { signal },
+  );
+}
+
+// Always use the authenticated same-origin FLV proxy; physical output IDs,
+// engine credentials and token-bearing RTSP URLs never reach the browser.
+export function transcodePreviewFLVURL(streamID: string, jobID: string): string {
+  return `/api/streams/${encodeURIComponent(streamID)}/variants/${encodeURIComponent(jobID)}/stream.flv`;
+}
+
 export function listTranscodeProfiles(signal?: AbortSignal) {
   return apiRequest<{ profiles: TranscodeProfile[] }>('/transcoding/profiles', { signal });
 }
