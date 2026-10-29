@@ -85,3 +85,36 @@ func TestDemandLeaseInvalidGenerationAndManualPolicyFailClosed(t *testing.T){
  }
  if _,ok:=manager.Status(job.ID);ok {t.Fatal("failed request started media")}
 }
+
+func TestDemandLeaseRecoversFailedMediaWithoutNewConsumer(t *testing.T) {
+ service,manager,executor,job:=setupDemandLeaseService(t)
+ manager.healthTimeout=150*time.Millisecond
+ lease,first,err:=service.AcquireDemand(context.Background(),job.ID,job.Generation)
+ if err!=nil{t.Fatal(err)}
+ deadline:=time.After(4*time.Second)
+ for {
+  state,ok:=manager.Status(job.ID)
+  if ok && state.State==Running {break}
+  select {case <-deadline:t.Fatal("initial stream did not become ready");case <-time.After(15*time.Millisecond):}
+ }
+ manager.mu.Lock()
+ done:=manager.work[first.Key].done
+ manager.mu.Unlock()
+ executor.ready.Store(false)
+ select {case <-done:case <-time.After(4*time.Second):t.Fatal("source loss did not terminate backend")}
+ executor.ready.Store(true)
+ if errors:=service.ReconcileDemand(context.Background());len(errors)!=0{
+  t.Fatalf("valid lease could not recover: %v",errors)
+ }
+ deadline=time.After(4*time.Second)
+ for {
+  state,ok:=manager.Status(job.ID)
+  if ok && state.State==Running && state.VariantID!=first.VariantID {break}
+  select {case <-deadline:t.Fatal("leased media did not recover");case <-time.After(15*time.Millisecond):}
+ }
+ if executor.starts.Load()!=2 {t.Fatalf("expected exactly one recovery start, got %d",executor.starts.Load())}
+ if _,err:=service.RenewDemand(lease.Token);err!=nil{t.Fatal(err)}
+ if err:=service.ReleaseDemand(context.Background(),lease.Token);err!=nil{t.Fatal(err)}
+ if errors:=service.ReconcileDemand(context.Background());len(errors)!=0 {t.Fatal(errors)}
+ if _,ok:=manager.Status(job.ID);ok {t.Fatal("released demand lease restarted media")}
+}

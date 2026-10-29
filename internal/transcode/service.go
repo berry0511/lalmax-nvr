@@ -187,6 +187,12 @@ func (s *Service) Run(ctx context.Context) {
 		case <-ticker.C:
 			attempt, cancel := context.WithTimeout(ctx, 45*time.Second)
 			s.expireDemandLeases(attempt)
+			for id, err := range s.ReconcileDemand(attempt) {
+				code := "demand_reconcile_failed"
+				var domain *Error
+				if errors.As(err, &domain) { code = domain.Code }
+				slog.Warn("demand transcoding reconciliation deferred", "job_id", id, "code", code)
+			}
 			for id, err := range s.ReconcileAlways(attempt) {
 				code := "reconcile_failed"
 				var domain *Error

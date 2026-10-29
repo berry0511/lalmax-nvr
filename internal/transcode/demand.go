@@ -93,3 +93,72 @@ func (s *Service) expireDemandLeases(ctx context.Context) {
   }
  }
 }
+
+// ReconcileDemand restarts failed on-demand work only while an unexpired
+// consumer lease exists. It never starts a job after reboot without a new
+// consumer and it uses bounded exponential backoff to avoid restart storms.
+func (s *Service) ReconcileDemand(ctx context.Context) map[string]error {
+ s.mu.Lock()
+ defer s.mu.Unlock()
+ results:=map[string]error{}
+ if s.repo==nil || s.manager==nil{return results}
+ jobs,err:=s.repo.ListTranscodeJobs(ctx)
+ if err!=nil{results["repository"]=err;return results}
+ now:=time.Now()
+ for _,j:=range jobs {
+  if ctx.Err()!=nil {break}
+  if j.RunPolicy!=OnDemand {continue}
+  consumers:=0
+  for token,l:=range s.leases {
+   if l.JobID!=j.ID {continue}
+   if l.Generation!=j.Generation || !now.Before(l.ExpiresAt) {
+    delete(s.leases,token)
+    continue
+   }
+   consumers++
+  }
+  if consumers==0 {continue}
+  if !j.Enabled || j.StoppedByUser {
+   s.invalidateDemandLeasesLocked(j.ID)
+   _=s.manager.Release(ctx,j.ID,j.Generation)
+   continue
+  }
+  runtime,active:=s.manager.Status(j.ID)
+  if active && (runtime.State==Running || runtime.State==Starting) {
+   if runtime.State==Running {
+    if backoff,exists:=s.retry[j.ID];exists && backoff.generation==j.Generation {
+     if backoff.healthySince.IsZero() || backoff.healthyVariantID!=runtime.VariantID {
+      backoff.healthySince=now
+      backoff.healthyVariantID=runtime.VariantID
+      s.retry[j.ID]=backoff
+     } else if now.Sub(backoff.healthySince)>=recoveryHealthyResetInterval {
+      delete(s.retry,j.ID)
+     }
+    }
+   }
+   continue
+  }
+  backoff:=s.retry[j.ID]
+  if backoff.generation!=j.Generation {backoff=retryState{generation:j.Generation}}
+  if now.Before(backoff.next) {continue}
+  p,e:=s.profile(ctx,j)
+  if e==nil {e=s.allow(p)}
+  if e==nil {_,e=s.manager.Acquire(j,p)}
+  backoff.attempts++
+  delay:=5*time.Second
+  for k:=1;k<backoff.attempts && delay<time.Minute;k++ {delay*=2}
+  if delay>time.Minute {delay=time.Minute}
+  backoff.next=now.Add(delay)
+  backoff.healthySince=time.Time{}
+  backoff.healthyVariantID=""
+  backoff.errorCode=""
+  if e!=nil {
+   backoff.errorCode="demand_reconcile_failed"
+   var domain *Error
+   if errors.As(e,&domain){backoff.errorCode=domain.Code}
+   results[j.ID]=e
+  }
+  s.retry[j.ID]=backoff
+ }
+ return results
+}
