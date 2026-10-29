@@ -255,5 +255,25 @@ func (h *Handler) handleCreateLocalVideo(w http.ResponseWriter,r *http.Request){
   writeError(w,http.StatusInternalServerError,err.Error())
   return
  }
+ // Do not return a false success when FFmpeg cannot publish (for example,
+ // because an external MediaServer rejects the stream or RTMP is unreachable).
+ readyCtx,stopWaiting:=context.WithTimeout(r.Context(),15*time.Second)
+ defer stopWaiting()
+ ticker:=time.NewTicker(350*time.Millisecond)
+ defer ticker.Stop()
+ published:=false
+ for !published {
+  info,err:=h.mediaEngine.GetStream(readyCtx,id)
+  if err==nil && info!=nil && info.Active {published=true;break}
+  select {
+  case <-readyCtx.Done():
+   h.stopLocalVideo(id)
+   _,_=h.db.DeleteCreatedStream(context.Background(),id)
+   h.removeLocalVideoFile(dest)
+   writeError(w,http.StatusBadGateway,"video saved but RTMP publication failed; check MediaServer and FFmpeg configuration")
+   return
+  case <-ticker.C:
+  }
+ }
  writeJSON(w,http.StatusCreated,h.summaryFromCreated(r.Context(),row))
 }
