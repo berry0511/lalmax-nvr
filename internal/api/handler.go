@@ -173,6 +173,7 @@ type Handler struct {
 	stabilityProvider StabilityProvider
 	cloudProxy        CloudAuthProxy
 	streamRegistry    *StreamRegistry
+	localVideos localVideoPlayers
 	aiManager         *ai.Manager
 	onvifDiscover     func(ctx context.Context, timeout time.Duration) *onvif.DiscoveryResult
 	onvifProbeDevice  func(ctx context.Context, host string, port int, timeout time.Duration) (*onvif.DiscoveredDevice, error)
@@ -496,6 +497,7 @@ func (h *Handler) Routes() http.Handler {
 		r.Get("/api/streams", h.handleListStreams)
 		r.Get("/api/metrics/traffic/history", h.handleTrafficHistory)
 		r.With(middleware.RequireOperatePermission()).Post("/api/streams", h.handleCreateStream)
+		r.With(middleware.RequireOperatePermission()).Post("/api/streams/local-video", h.handleCreateLocalVideo)
 		r.Get("/api/streams/{stream_id}", h.handleGetStream)
 		r.With(middleware.RequireOperatePermission()).Put("/api/streams/{stream_id}", h.handleUpdateStream)
 		r.Get("/api/streams/{stream_id}/stream/ws", h.handleStreamWS)
