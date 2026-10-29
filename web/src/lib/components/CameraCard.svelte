@@ -31,7 +31,7 @@
   let {
     camera,
     displayName,
-    protocolsMap:
+    protocolsMap,
     health,
     ptzCapabilities,
     onedit,
