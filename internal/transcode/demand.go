@@ -2,6 +2,7 @@ package transcode
 
 import (
  "context"
+ "errors"
  "crypto/rand"
  "time"
 )
