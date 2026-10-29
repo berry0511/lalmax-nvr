@@ -29,7 +29,8 @@ func (h *Handler) localVideoDirectory() (string,error) {
  if h.config == nil || strings.TrimSpace(h.config.Storage.RootDir)=="" {
   return "",errors.New("storage root directory is not configured")
  }
- dir:=filepath.Join(h.config.Storage.RootDir,"local-videos")
+ dir,absErr:=filepath.Abs(filepath.Join(h.config.Storage.RootDir,"local-videos"))
+ if absErr!=nil {return "",absErr}
  if err:=os.MkdirAll(dir,0700);err!=nil{return "",err}
  return dir,nil
 }
@@ -84,6 +85,18 @@ func (h *Handler) startLocalVideo(row storage.CreatedStream) error {
   }
  }()
  return nil
+}
+
+func (h *Handler) removeLocalVideoFile(file string) {
+ dir,err:=h.localVideoDirectory()
+ if err!=nil{return}
+ abs,err:=filepath.Abs(file)
+ if err!=nil{return}
+ rel,err:=filepath.Rel(dir,abs)
+ if err!=nil || rel==".." || strings.HasPrefix(rel,".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {return}
+ if err:=os.Remove(abs);err!=nil && !os.IsNotExist(err) {
+  logger.Warn("failed to remove local video", "file",abs,"err",err)
+ }
 }
 
 func (h *Handler) stopLocalVideo(streamID string){
