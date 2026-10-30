@@ -67,5 +67,15 @@ func ffmpegVideoArgs(v VideoSpec, threads string) []string {
 	// min(iw/ih, limit) prevents upscaling. Aspect ratio is retained and both
 	// dimensions are rounded to multiples of two for yuv420p encoding.
 	filter := fmt.Sprintf("scale=w='min(iw,%d)':h='min(ih,%d)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1", v.MaxWidth, v.MaxHeight)
+	// Hardware path is named explicitly and cannot silently fall back to
+	// libx264. Its availability is checked by the synthetic media probe.
+	if v.Encoder == "h264_nvenc" {
+		return []string{"-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll",
+			"-rc", "cbr", "-pix_fmt", "yuv420p", "-vf", filter,
+			"-r", strconv.Itoa(v.FPS), "-g", strconv.Itoa(v.GOPFrames),
+			"-bf", "0", "-b:v", fmt.Sprintf("%dk", v.BitrateKbps),
+			"-maxrate", fmt.Sprintf("%dk", v.BitrateKbps),
+			"-bufsize", fmt.Sprintf("%dk", v.BitrateKbps*2)}
+	}
 	return []string{"-c:v", "libx264", "-threads", threads, "-filter_threads", threads, "-preset", "veryfast", "-tune", "zerolatency", "-pix_fmt", "yuv420p", "-vf", filter, "-r", strconv.Itoa(v.FPS), "-g", strconv.Itoa(v.GOPFrames), "-keyint_min", strconv.Itoa(v.GOPFrames), "-sc_threshold", "0", "-bf", "0", "-b:v", fmt.Sprintf("%dk", v.BitrateKbps), "-maxrate", fmt.Sprintf("%dk", v.BitrateKbps), "-bufsize", fmt.Sprintf("%dk", v.BitrateKbps*2)}
 }
