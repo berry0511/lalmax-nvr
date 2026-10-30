@@ -506,8 +506,8 @@ func (m *Manager) StartTask(ctx context.Context, taskID string) error {
 				m.updateTaskStatus(taskID, TaskStatusStopped, "")
 				return
 			}
-			logger.Error("relay push failed to connect", "task_id", taskID, "error", err)
-			m.updateTaskStatus(taskID, TaskStatusError, err.Error())
+			logger.Error("relay push failed to connect", "task_id", taskID, "code", "relay_push_failed")
+			m.updateTaskStatus(taskID, TaskStatusError, "relay target connection failed")
 			stoppedAt := time.Now()
 			m.updateTaskStoppedAt(taskID, &stoppedAt)
 			return
@@ -526,8 +526,8 @@ func (m *Manager) StartTask(ctx context.Context, taskID string) error {
 				m.updateTaskStatus(taskID, TaskStatusStopped, "")
 				return
 			}
-			logger.Error("relay pull failed", "task_id", taskID, "error", err)
-			m.updateTaskStatus(taskID, TaskStatusError, err.Error())
+			logger.Error("relay pull failed", "task_id", taskID, "code", "relay_source_failed")
+			m.updateTaskStatus(taskID, TaskStatusError, "relay source pull failed")
 			stoppedAt := time.Now()
 			m.updateTaskStoppedAt(taskID, &stoppedAt)
 			return
@@ -541,8 +541,8 @@ func (m *Manager) StartTask(ctx context.Context, taskID string) error {
 		select {
 		case err = <-pullSession.WaitChan():
 			if err != nil {
-				logger.Error("relay pull ended with error", "task_id", taskID, "error", err)
-				m.updateTaskStatus(taskID, TaskStatusError, err.Error())
+				logger.Error("relay pull ended with error", "task_id", taskID, "code", "relay_source_closed")
+				m.updateTaskStatus(taskID, TaskStatusError, "relay source closed unexpectedly")
 			} else {
 				logger.Info("relay pull ended", "task_id", taskID)
 				m.updateTaskStatus(taskID, TaskStatusStopped, "")
@@ -551,8 +551,8 @@ func (m *Manager) StartTask(ctx context.Context, taskID string) error {
 			m.updateTaskStoppedAt(taskID, &now)
 		case err = <-pushSession.WaitChan():
 			if err != nil {
-				logger.Error("relay push ended with error", "task_id", taskID, "error", err)
-				m.updateTaskStatus(taskID, TaskStatusError, err.Error())
+				logger.Error("relay push ended with error", "task_id", taskID, "code", "relay_target_closed")
+				m.updateTaskStatus(taskID, TaskStatusError, "relay target closed unexpectedly")
 			} else {
 				logger.Info("relay push ended", "task_id", taskID)
 				m.updateTaskStatus(taskID, TaskStatusStopped, "")
