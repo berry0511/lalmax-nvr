@@ -13,6 +13,7 @@ transcoding:
   enabled: false
   max_concurrent: 2
   threads_per_job: 2
+  worker_enabled: false  # P5：独立子进程，先通过能力检测及专项测试再开启
   ffmpeg_path: /opt/homebrew/bin/ffmpeg
   ffprobe_path: /opt/homebrew/bin/ffprobe
   gst_launch_path: /opt/homebrew/bin/gst-launch-1.0
@@ -60,3 +61,18 @@ docker build --build-arg WITH_GSTREAMER=true -t lalmax-nvr:transcode-gst .
 ## 安全验收要求
 
 上线前必须实际验证源拉取、派生发布、RTSP 播放的鉴权；拒绝无令牌和跨源播放；验证取消 HA 发布与全局停止的不同作用域。不得以参数构造、进程启动或前端构建成功替代实际媒体解码验收。
+
+
+## P4/P5 实验功能（尚未完成实际环境验收）
+
+- **按需订阅**：`POST /api/transcoding/jobs/{id}/leases?generation=N&wait_ms=20000` 可等待实际媒体就绪。租约会按需续期，最后一个租约释放或过期后自动收回媒体进程。前端派生预览已接入申请、续期和释放。
+- **Home Assistant 预加载**：发布列表中选择 `on_demand` 转码 Job 后可单独勾选 `preload_transcode`；默认关闭，关闭 HA 发布、任务被禁用或代次变化后撤销租约。
+- **WebRTC 有声派生输出**：选择 G.711 A-law 8kHz mono / H.264 模板，媒体检测必须成功；只接受能够协商 PCMA 的 WHEP SDP，其他音频明确拒绝，不静默回退 AAC 或原流。派生会话签名令牌已改为认证加密。
+- **硬件编码**：可显式选择 `h264_nvenc`；必须完成当前机器上实际 FFmpeg 编码、ffprobe 与解码自检后才能启用，失败绝不回退 `libx264`。Intel/AMD 和其他架构不声称支持。
+- **多档共享解码**：本期只完成对照评估，保留独立编码任务与同配置去重；参见 [实验记录](transcoding-multitier-evaluation.md)。未启用未通过收益与故障隔离门槛的共享解码。
+- **派生录像**：通过受控 `/api/transcoding/jobs/{id}/record/start|stop?generation=N` 显式启动/停止，默认录像策略不改变；录制物理流及其来源 Job、代次、Profile 版本和实际编码被持久化关联。录制停止时随派生物理输出释放。
+- **派生转推**：Relay 创建接口接受可选 `transcode_job_id`；存逻辑源与 Job 而非物理流 ID，启动时从内部注册表解析受保护输出并获取定向 RTMP 播放凭据，不能自行启动转码。失败不自动回落原流。
+- **独立 Worker**：启用 `worker_enabled: true` 后，NVR 启动一个临时独立的本机 Worker 来运行固定 FFmpeg/GStreamer 管线。一次性 HMAC 控制消息通过私有 stdin 传输；无网络控制端口、不经 shell、不继承 NVR 密码/数据库 DSN；父进程管道断开触发退出与进程回收，原有 Always/OnDemand 管理器负责恢复。现阶段为**同用户身份的进程级隔离**，不等同于 seccomp、容器或专用 OS 用户隔离；高安全等级环境必须补充独立运行账户、沙箱和设备访问控制。
+- **历史录像离线转码**：不在实时 Issue #66 范围，见 [独立后续设计](transcoding-offline-followup.md)。
+
+正式发布前仍须通过 Linux/Windows CI，FFmpeg/GStreamer 真实编码及解码、WHEP 音视频、数据库迁移与录像/转推生命周期测试。未拿到证据的场景不应标记验收通过。
