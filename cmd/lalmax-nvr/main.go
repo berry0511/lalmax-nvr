@@ -1883,6 +1883,12 @@ func newInternalMediaControlAuth(
 // ---------------------------------------------------------------------------
 
 func main() {
+	// A strictly one-shot authenticated worker reads a private pipe and never
+	// loads the NVR configuration or starts HTTP/media management services.
+	if len(os.Args)==2 && os.Args[1]==transcode.IsolatedWorkerArg {
+		if err:=transcode.RunIsolatedWorker(os.Stdin);err!=nil {os.Exit(78)}
+		return
+	}
 	// Dispatch CLI subcommands before flag parsing
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
