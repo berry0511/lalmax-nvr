@@ -66,9 +66,10 @@ export function transcodeJobAction(job: TranscodeJob, action: 'start' | 'stop' |
 export interface TranscodeDemandLease {
   token: string; job_id: string; generation: number; expires_at: string;
 }
-export function acquireTranscodeDemandLease(jobID: string, generation: number) {
+export function acquireTranscodeDemandLease(jobID: string, generation: number, waitMs = 20000) {
+  if (!Number.isSafeInteger(waitMs) || waitMs < 1 || waitMs > 20000) throw new Error('waitMs must be 1–20000');
   return apiRequest<{lease: TranscodeDemandLease; runtime: {state: string}}>(
-    `/transcoding/jobs/${encodeURIComponent(jobID)}/leases?generation=${generation}`,
+    `/transcoding/jobs/${encodeURIComponent(jobID)}/leases?generation=${generation}&wait_ms=${waitMs}`,
     {method:'POST'},
   );
 }
