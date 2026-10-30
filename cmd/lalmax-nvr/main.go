@@ -1992,6 +1992,7 @@ func newMediaEngine(cfg *config.Config, internalToken string, opts ...interface{
 		ConfigPath:            cfg.Media.LalmaxConfigPath,
 		InternalAuthToken:     internalToken,
 		RTMPPort:              cfg.RTMP.Port,
+		RTMPListenAddr:        cfg.Media.RTMPListenAddr,
 		RTSPPort:              cfg.Media.RTSPPort,
 		HTTPPort:              cfg.Media.HTTPPort,
 		RTMPEnabled:           cfg.RTMP.Enabled != nil && *cfg.RTMP.Enabled,
