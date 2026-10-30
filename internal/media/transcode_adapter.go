@@ -25,6 +25,7 @@ type TranscodeAdapter struct {
 	Auth           *auth.MediaAuthorizer
 	Config         *config.Config
 	RegisterOutput func(context.Context, string, string) error
+	StopDerivedRecording func(context.Context, string) error
 	mu             sync.RWMutex
 	outputs        map[string]derivedOutput
 }
@@ -128,6 +129,11 @@ func (a *TranscodeAdapter) Release(ctx context.Context, id string) error {
 	defer a.mu.Unlock()
 	if _, ok := a.outputs[id]; !ok {
 		return nil
+	}
+	if a.StopDerivedRecording != nil {
+		if err := a.StopDerivedRecording(ctx, id); err != nil {
+			return err
+		}
 	}
 	a.Auth.RevokeInternalStream(id)
 	// The backend is reaped before release; revoke remaining subscriber sessions.
