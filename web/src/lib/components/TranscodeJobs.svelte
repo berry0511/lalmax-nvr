@@ -114,6 +114,9 @@
             <label class="space-y-1"><span class="input-label">编码后端</span><select class="input w-full" value={profileEditor.backend} disabled={editingExistingProfile} onchange={e => updateBackend(e.currentTarget.value)}><option value="ffmpeg">FFmpeg</option><option value="gstreamer">GStreamer</option></select></label>
             <label class="space-y-1"><span class="input-label">视频模式</span><select class="input w-full" value={profileEditor.video.codec} onchange={e => updateVideoCodec(e.currentTarget.value)}><option value="h264">H.264 编码</option><option value="copy">H.264 直接复制</option></select></label>
             {#if profileEditor.video.codec === 'h264'}
+              {#if profileEditor.backend === 'ffmpeg'}
+                <label class="space-y-1"><span class="input-label">视频编码器</span><select class="input w-full" bind:value={profileEditor.video.encoder}><option value="libx264">libx264（软件）</option><option value="h264_nvenc">NVIDIA NVENC（需实机能力检测）</option></select></label>
+              {/if}
               <label class="space-y-1"><span class="input-label">最大宽度</span><input class="input w-full" type="number" min="2" max="3840" step="2" bind:value={profileEditor.video.max_width} /></label>
               <label class="space-y-1"><span class="input-label">最大高度</span><input class="input w-full" type="number" min="2" max="2160" step="2" bind:value={profileEditor.video.max_height} /></label>
               <label class="space-y-1"><span class="input-label">帧率 (fps)</span><input class="input w-full" type="number" min="1" max="60" bind:value={profileEditor.video.fps} /></label>
