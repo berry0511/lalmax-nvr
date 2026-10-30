@@ -101,3 +101,10 @@ export function probeTranscodeCapabilities(backend: TranscodeBackend, signal?: A
     method: 'POST', body: JSON.stringify({ backend }), signal,
   });
 }
+
+export function derivedRecordingAction(job: TranscodeJob, action: 'start' | 'stop', signal?: AbortSignal) {
+  return apiRequest<void>(
+    `/transcoding/jobs/${encodeURIComponent(job.id)}/record/${action}?generation=${job.generation}`,
+    { method: 'POST', signal },
+  );
+}
