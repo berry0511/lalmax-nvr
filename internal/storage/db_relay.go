@@ -54,7 +54,7 @@ func (d *DB) GetRelayTask(ctx context.Context, taskID string) (*RelayTaskRecord,
 }
 
 func (d *DB) ListRelayTasks(ctx context.Context) ([]RelayTaskRecord, error) {
-	rows, err := d.queryContext(ctx, `SELECT id, stream_id, target_url, status, error_msg,
+	rows, err := d.queryContext(ctx, `SELECT id, stream_id, transcode_job_id, target_url, status, error_msg,
 		created_at, started_at, stopped_at FROM relay_tasks ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -65,7 +65,7 @@ func (d *DB) ListRelayTasks(ctx context.Context) ([]RelayTaskRecord, error) {
 	for rows.Next() {
 		var task RelayTaskRecord
 		var createdAt, startedAt, stoppedAt sql.NullString
-		if err := rows.Scan(&task.ID, &task.StreamID, &task.TargetURL, &task.Status,
+		if err := rows.Scan(&task.ID, &task.StreamID, &task.TranscodeJobID, &task.TargetURL, &task.Status,
 			&task.ErrorMsg, &createdAt, &startedAt, &stoppedAt); err != nil {
 			return nil, err
 		}
