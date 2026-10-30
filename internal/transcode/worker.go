@@ -193,6 +193,8 @@ func StartIsolatedWorker(ctx context.Context, tools ToolPaths, spec JobSpec, wid
 func RunIsolatedWorker(input io.Reader) error {
     raw:=os.Getenv(workerKeyEnv)
     key,err:=hex.DecodeString(raw)
+    // Never pass the one-shot authorization key to the FFmpeg/GStreamer child.
+    _=os.Unsetenv(workerKeyEnv)
     if err!=nil || len(key)!=32{return errors.New("worker authorization not configured")}
     reader:=bufio.NewReader(input)
     frame,err:=reader.ReadBytes('\n')
