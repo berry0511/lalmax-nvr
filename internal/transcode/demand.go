@@ -26,7 +26,8 @@ func (s *Service) invalidateDemandLeasesLocked(jobID string) {
 
 func (s *Service) demandOwnersLocked(jobID string) int {
  owners:=0
- for _,l:=range s.leases {if l.JobID==jobID{owners++}}
+ now:=time.Now()
+ for _,l:=range s.leases {if l.JobID==jobID && now.Before(l.ExpiresAt){owners++}}
  return owners
 }
 
