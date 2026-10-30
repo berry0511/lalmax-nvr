@@ -10,6 +10,7 @@ import (
 // HomeAssistantPublication keeps identity and application even while a publisher is offline.
 type HomeAssistantPublication struct {
 	TranscodeJobID string `json:"transcode_job_id,omitempty"`
+	PreloadTranscode bool `json:"preload_transcode,omitempty"`
 	StreamID       string `json:"stream_id"`
 	Name           string `json:"name,omitempty"`
 	AppName        string `json:"app_name"`
