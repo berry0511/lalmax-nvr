@@ -64,7 +64,12 @@ func GStreamerArgs(spec JobSpec, width, height int) ([]string, error) {
 		if audio == "aac" {
 			args = append(args, "!", "avdec_aac")
 		}
-		args = append(args, "!", "audioconvert", "!", "audioresample", "!", fmt.Sprintf("audio/x-raw,rate=%d,channels=%d", a.SampleRate, a.Channels), "!", "avenc_aac", "bitrate="+strconv.Itoa(a.BitrateKbps*1000), "!", "aacparse")
+		args = append(args, "!", "audioconvert", "!", "audioresample", "!", fmt.Sprintf("audio/x-raw,rate=%d,channels=%d", a.SampleRate, a.Channels))
+		if a.Codec == "g711a" {
+			args = append(args, "!", "alawenc")
+		} else {
+			args = append(args, "!", "avenc_aac", "bitrate="+strconv.Itoa(a.BitrateKbps*1000), "!", "aacparse")
+		}
 	}
 	args = append(args, "!", "queue", "!", "mux.audio")
 	return args, nil
