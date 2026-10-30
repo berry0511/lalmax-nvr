@@ -140,3 +140,16 @@ func TestDemandLeaseReleaseIgnoresExpiredOtherConsumer(t *testing.T) {
  if _,ok:=manager.Status(job.ID);ok {t.Fatal("expired second lease kept media process alive after final live consumer released")}
  if _,err:=service.RenewDemand(second.Token);err==nil {t.Fatal("expired lease unexpectedly renewed")}
 }
+
+func TestReconcileDemandReleasesOrphanedProcessWithoutLiveLeases(t *testing.T) {
+ service,manager,_,job:=setupDemandLeaseService(t)
+ lease,_,err:=service.AcquireDemand(context.Background(),job.ID,job.Generation)
+ if err!=nil {t.Fatal(err)}
+ // Simulate a lost lease entry while the media manager still owns the job.
+ service.mu.Lock()
+ delete(service.leases,lease.Token)
+ service.mu.Unlock()
+ if errs:=service.ReconcileDemand(context.Background());len(errs)!=0 {t.Fatalf("orphan reconciliation failed: %v",errs)}
+ if _,ok:=manager.Status(job.ID);ok {t.Fatal("on-demand media retained an owner without a live lease")}
+ if errs:=service.ReconcileDemand(context.Background());len(errs)!=0 {t.Fatalf("repeated reconciliation should be harmless: %v",errs)}
+}
