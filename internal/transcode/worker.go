@@ -104,15 +104,25 @@ func allowedWorkerEnvironment(key []byte) []string {
 }
 
 type isolatedWorkerProcess struct {
-    Process
+    process *commandProcess
     stdin io.WriteCloser
 }
 func(p *isolatedWorkerProcess) Stop(ctx context.Context) error {
+    // EOF tells the worker to cancel FFmpeg/GStreamer first. Do not SIGTERM
+    // the worker until its descendant process has had time to exit.
     _=p.stdin.Close()
-    return p.Process.Stop(ctx)
+    grace:=time.NewTimer(4*time.Second)
+    defer grace.Stop()
+    select {
+    case <-p.process.done: return nil
+    case <-ctx.Done():
+        return p.process.Stop(ctx)
+    case <-grace.C:
+        return p.process.Stop(ctx)
+    }
 }
 func(p *isolatedWorkerProcess) Wait() error {
-    err:=p.Process.Wait()
+    err:=p.process.Wait()
     _=p.stdin.Close()
     return err
 }
@@ -163,18 +173,18 @@ func StartIsolatedWorker(ctx context.Context, tools ToolPaths, spec JobSpec, wid
     go func(){
         if _,err:=stdin.Write(frame);err!=nil { _=stdin.Close() }
     }()
+    isolated:=&isolatedWorkerProcess{process:p,stdin:stdin}
     go func(){
         select {
         case <-ctx.Done():
-            _=stdin.Close()
-            stopCtx,cancel:=context.WithTimeout(context.Background(),3*time.Second)
-            _=p.Stop(stopCtx)
+            stopCtx,cancel:=context.WithTimeout(context.Background(),5*time.Second)
+            _=isolated.Stop(stopCtx)
             cancel()
         case <-p.done:
             _=stdin.Close()
         }
     }()
-    return &isolatedWorkerProcess{Process:p,stdin:stdin},nil
+    return isolated,nil
 }
 
 // RunIsolatedWorker is invoked only by the internal CLI mode. The isolated
