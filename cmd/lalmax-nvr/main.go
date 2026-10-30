@@ -988,6 +988,17 @@ func (a *App) buildRouter() http.Handler {
 	handler.SetTranscodeService(a.transcodeService)
 	handler.SetTranscodePlayback(adapter)
 	handler.SetDerivedRecorder(a.recTasks)
+	if a.relayMgr != nil {
+		a.relayMgr.SetDerivedResolver(func(ctx context.Context, sourceID, jobID string) (string, string, error) {
+			source, physicalID, err := a.transcodeService.PlaybackTarget(ctx, sourceID, jobID)
+			if err != nil { return "", "", err }
+			play, err := adapter.DerivedPlayURL(ctx, source, physicalID, "rtmp")
+			if err != nil || play == nil || play.URL == "" {
+				return "", "", fmt.Errorf("derived RTMP endpoint unavailable")
+			}
+			return physicalID, play.URL, nil
+		}, a.mediaAuth.InternalPlaybackRequired)
+	}
 	if a.mediaAuth != nil {
 		handler.SetInternalMediaStreamCheck(a.mediaAuth.InternalPlaybackRequired)
 	}
