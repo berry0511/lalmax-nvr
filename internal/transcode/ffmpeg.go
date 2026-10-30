@@ -52,6 +52,10 @@ func FFmpegArgs(s JobSpec) ([]string, error) {
 		args = append(args, "-map", "0:a:0?")
 		if a.Codec == "copy" {
 			args = append(args, "-c:a", "copy")
+		} else if a.Codec == "g711a" {
+			// A-law is supported by the media engine's WHEP RTP packetizer.
+			// No AAC fallback is allowed for WebRTC audio profiles.
+			args = append(args, "-c:a", "pcm_alaw", "-ar", "8000", "-ac", "1")
 		} else {
 			args = append(args, "-c:a", "aac", "-ar", strconv.Itoa(a.SampleRate), "-ac", strconv.Itoa(a.Channels), "-b:a", fmt.Sprintf("%dk", a.BitrateKbps))
 		}
