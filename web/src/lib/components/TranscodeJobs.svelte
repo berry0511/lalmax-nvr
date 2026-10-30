@@ -17,7 +17,7 @@
   let appName = $state('live');
   let profileID = $state('');
   let profileBackend = $state<'ffmpeg' | 'gstreamer'>('ffmpeg');
-  let draftPolicy = $state<'manual' | 'always'>('manual');
+  let draftPolicy = $state<'manual' | 'always' | 'on_demand'>('manual');
   let profileEditor = $state<TranscodeProfile | null>(null);
   let editingExistingProfile = $state(false);
   let defaultProfileID = $derived(profileBackend === 'gstreamer' ? 'gst_h264_720p' : 'h264_720p');
