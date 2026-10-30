@@ -43,6 +43,7 @@ func TestTranscodingYAMLPathsRoundTrip(t *testing.T) {
 	if restored.Transcoding != cfg.Transcoding {
 		t.Fatal("transcoding settings lost on save")
 	}
+	if !restored.Transcoding.WorkerEnabled { t.Fatal("worker mode lost during YAML roundtrip") }
 	if restored.Transcoding.Tools().GSTLaunch != "/opt/media/gst-launch-1.0" {
 		t.Fatal("configured path ignored")
 	}
