@@ -63,12 +63,14 @@ func (p Profile) Validate() error {
 			return invalid("video copy cannot apply encoder, resizing, frame rate, bitrate or GOP settings")
 		}
 	case "h264":
-		encoder := "libx264"
-		if p.Backend == "gstreamer" {
-			encoder = "x264enc"
-		}
-		if v.Encoder != encoder {
-			return invalid("unsupported video encoder for selected backend")
+		// Hardware encoding is explicit. There is no automatic fallback from
+		// NVENC to the software encoder; activation requires the real self-test.
+		if p.Backend == "ffmpeg" {
+			if v.Encoder != "libx264" && v.Encoder != "h264_nvenc" {
+				return invalid("unsupported FFmpeg encoder")
+			}
+		} else if v.Encoder != "x264enc" {
+			return invalid("unsupported GStreamer encoder")
 		}
 		if v.MaxWidth < 2 || v.MaxWidth > 3840 || v.MaxWidth%2 != 0 || v.MaxHeight < 2 || v.MaxHeight > 2160 || v.MaxHeight%2 != 0 {
 			return invalid("maximum dimensions must be even and within 3840x2160")
