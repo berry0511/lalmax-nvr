@@ -78,7 +78,9 @@ func (e *BackendExecutor) Start(ctx context.Context, source SourceRef, p Profile
 	}
 	spec := JobSpec{Profile: p, InputURL: input.URL, OutputURL: output, VideoCodec: input.VideoCodec, AudioCodec: input.AudioCodec, Threads: cfg.ThreadsPerJob}
 	var process Process
-	if p.Backend == "ffmpeg" {
+	if cfg.WorkerEnabled {
+		process, err = StartIsolatedWorker(ctx, cfg.Tools(), spec, input.Width, input.Height)
+	} else if p.Backend == "ffmpeg" {
 		process, err = StartFFmpeg(ctx, cfg.Tools().FFmpeg, spec)
 	} else {
 		process, err = StartGStreamer(ctx, cfg.Tools().GSTLaunch, spec, input.Width, input.Height)
