@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
-	"crypto/hmac"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -69,39 +71,42 @@ func sameWHEPOrigin(a, b *url.URL) bool {
 	return a != nil && b != nil && (a.Scheme == "http" || a.Scheme == "https") && strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Host, b.Host)
 }
 
+// WHEP session locations can contain internal playback credentials. Use
+// authenticated encryption, never signed-but-readable Base64 JSON.
+func (h *Handler) homeAssistantSessionAEAD() (cipher.AEAD, error) {
+    key := sha256.Sum256(h.homeAssistantWHEPKey)
+    block, err := aes.NewCipher(key[:])
+    if err != nil { return nil,err }
+    return cipher.NewGCM(block)
+}
+
 func (h *Handler) sealHomeAssistantSession(session homeAssistantWHEPSession) string {
-	data, _ := json.Marshal(session)
-	mac := hmac.New(sha256.New, h.homeAssistantWHEPKey)
-	mac.Write(data)
-	return base64.RawURLEncoding.EncodeToString(data) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+    data,err:=json.Marshal(session)
+    if err!=nil { return "" }
+    aead,err:=h.homeAssistantSessionAEAD()
+    if err!=nil { return "" }
+    nonce:=make([]byte,aead.NonceSize())
+    if _,err=rand.Read(nonce);err!=nil{return ""}
+    sealed:=aead.Seal(nonce,nonce,data,[]byte("nvr/ha/whep/session/v1"))
+    return base64.RawURLEncoding.EncodeToString(sealed)
 }
 
 func (h *Handler) openHomeAssistantSession(token string) (homeAssistantWHEPSession, error) {
-	var session homeAssistantWHEPSession
-	parts := strings.Split(token, ".")
-	if len(token) > 8192 || len(parts) != 2 {
-		return session, fmt.Errorf("invalid session")
-	}
-	data, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil {
-		return session, err
-	}
-	signature, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return session, err
-	}
-	mac := hmac.New(sha256.New, h.homeAssistantWHEPKey)
-	mac.Write(data)
-	if !hmac.Equal(signature, mac.Sum(nil)) {
-		return session, fmt.Errorf("invalid signature")
-	}
-	if err := json.Unmarshal(data, &session); err != nil {
-		return session, err
-	}
-	if session.Expires < time.Now().Unix() {
-		return session, fmt.Errorf("expired session")
-	}
-	return session, nil
+    var session homeAssistantWHEPSession
+    if token=="" || len(token)>8192 {return session,fmt.Errorf("invalid session")}
+    ciphertext,err:=base64.RawURLEncoding.DecodeString(token)
+    if err!=nil{return session,fmt.Errorf("invalid session encoding")}
+    aead,err:=h.homeAssistantSessionAEAD()
+    if err!=nil{return session,err}
+    if len(ciphertext)<aead.NonceSize()+aead.Overhead() {
+        return session,fmt.Errorf("invalid session length")
+    }
+    nonce,encrypted:=ciphertext[:aead.NonceSize()],ciphertext[aead.NonceSize():]
+    data,err:=aead.Open(nil,nonce,encrypted,[]byte("nvr/ha/whep/session/v1"))
+    if err!=nil{return session,fmt.Errorf("invalid session authentication")}
+    if err=json.Unmarshal(data,&session);err!=nil{return session,err}
+    if session.Expires < time.Now().Unix() {return session,fmt.Errorf("expired session")}
+    return session,nil
 }
 
 func (h *Handler) homeAssistantWHEPURL(ctx context.Context, sid, app string, cleanup bool) (*url.URL, error) {
@@ -274,6 +279,10 @@ func (h *Handler) handleHomeAssistantWHEP(w http.ResponseWriter, r *http.Request
 		return
 	}
 	token := h.sealHomeAssistantSession(homeAssistantWHEPSession{StreamID: sid, InstanceID: cfg.InstanceID, AppName: app, URL: target.String(), Derived: selectedJob != "", Expires: time.Now().Add(24 * time.Hour).Unix()})
+	if token == "" {
+        writeError(w, 503, "could not secure WebRTC session")
+        return
+    }
 	w.Header().Set("Content-Type", "application/sdp")
 	w.Header().Set("Location", "/api/integrations/home-assistant/streams/"+url.PathEscape(sid)+"/webrtc/"+token)
 	w.WriteHeader(201)
