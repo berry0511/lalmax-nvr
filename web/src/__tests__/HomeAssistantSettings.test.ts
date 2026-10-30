@@ -46,7 +46,7 @@ describe('Home Assistant publication settings', () => {
     await fireEvent.click(view.getByLabelText(t('ha.enabled')));
     await fireEvent.input(view.getByPlaceholderText(t('ha.search')), { target: { value: 'Camera 100' } });
     await fireEvent.click(view.getByText(t('ha.selectVisible')));
-    await fireEvent.click(view.getByText('Save Settings'));
+    await fireEvent.click(view.getByText(t('settings.save')));
     await waitFor(() => expect(fetch.mock.calls.some(([, options]) => options.method === 'PUT')).toBe(true));
     const call = fetch.mock.calls.find(([, options]) => options.method === 'PUT');
     const body = JSON.parse(call![1].body);
