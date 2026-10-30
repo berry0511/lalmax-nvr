@@ -129,7 +129,7 @@
             </label>
             {#if selected.has(stream.stream_id) && variantsLoaded}
               {@const selectedJob = settings.streams.find(p => p.stream_id === stream.stream_id)?.transcode_job_id}
-              <label class="block px-3 pb-3 space-y-1">
+              <div class="block px-3 pb-3 space-y-1">
                 <span class="input-label">{t('ha.outputFor', { name: stream.name || stream.stream_id })}</span>
                 <select aria-label={t('ha.outputFor', { name: stream.name || stream.stream_id })} class="input w-full" value={settings.streams.find(p => p.stream_id === stream.stream_id)?.transcode_job_id || ''} onchange={e => chooseVariant(stream.stream_id, e.currentTarget.value)}>
                   <option value="">{t('ha.originalOutput')}</option>
@@ -147,7 +147,7 @@
                   </div>
                 {/if}
                 <span class="text-xs th-text-tertiary">{t('ha.transcodeOutputHint')}</span>
-              </label>
+              </div>
             {/if}
           {:else}<p class="p-4 text-sm th-text-secondary">{t('ha.empty')}</p>{/each}
         </div>
