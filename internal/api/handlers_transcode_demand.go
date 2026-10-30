@@ -1,8 +1,11 @@
 package api
 
 import (
+ "context"
  "net/http"
+ "strconv"
  "strings"
+ "time"
 
  "github.com/go-chi/chi/v5"
 )
@@ -15,6 +18,28 @@ func (h *Handler) handleAcquireTranscodeDemandLease(w http.ResponseWriter,r *htt
  if !ok{return}
  lease,runtime,err:=h.transcodeService.AcquireDemand(r.Context(),chi.URLParam(r,"id"),generation)
  if err!=nil{transcodeAPIError(w,err);return}
+ // Clients can opt into a bounded first-frame wait instead of interpreting
+ // process startup as playable media. Default remains backwards compatible.
+ if raw:=r.URL.Query().Get("wait_ms");raw!="" {
+  millis,parseErr:=strconv.Atoi(raw)
+  if parseErr!=nil || millis<1 || millis>20000 {
+   cleanup,cancel:=context.WithTimeout(context.WithoutCancel(r.Context()),5*time.Second)
+   _=h.transcodeService.ReleaseDemand(cleanup,lease.Token)
+   cancel()
+   writeError(w,http.StatusBadRequest,"wait_ms must be between 1 and 20000")
+   return
+  }
+  waitCtx,cancel:=context.WithTimeout(r.Context(),time.Duration(millis)*time.Millisecond)
+  runtime,err=h.transcodeService.WaitDemandReady(waitCtx,lease.Token)
+  cancel()
+  if err!=nil {
+   cleanup,cleanupCancel:=context.WithTimeout(context.WithoutCancel(r.Context()),5*time.Second)
+   _=h.transcodeService.ReleaseDemand(cleanup,lease.Token)
+   cleanupCancel()
+   transcodeAPIError(w,err)
+   return
+  }
+ }
  w.Header().Set("Cache-Control","no-store")
  writeJSON(w,http.StatusCreated,map[string]any{"lease":lease,"runtime":runtime})
 }
