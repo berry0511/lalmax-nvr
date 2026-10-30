@@ -69,6 +69,7 @@ const (
 type Task struct {
 	ID        string     `json:"id"`
 	StreamID  string     `json:"stream_id"`
+	TranscodeJobID string `json:"transcode_job_id,omitempty"`
 	TargetURL string     `json:"target_url"`
 	Status    TaskStatus `json:"status"`
 	ErrorMsg  string     `json:"error_msg,omitempty"`
@@ -113,6 +114,8 @@ type StatsHistory struct {
 type Manager struct {
 	db     storage.RelayTaskRepository
 	engine media.Engine
+	derivedResolver func(context.Context, string, string) (string, string, error)
+	isInternalStream func(string) bool
 
 	mu       sync.RWMutex
 	tasks    map[string]*activeTask
@@ -122,6 +125,7 @@ type Manager struct {
 }
 
 type activeTask struct {
+	physicalStreamID string
 	task        *Task
 	session     *rtmp.PushSession
 	pullSession *rtmp.PullSession
@@ -244,7 +248,7 @@ func (m *Manager) collectTaskStats(ctx context.Context, task *Task, at *activeTa
 	}
 
 	// Get source stream info for FPS
-	streamInfo, err := m.engine.GetStream(ctx, task.StreamID)
+	streamInfo, err := m.engine.GetStream(ctx, at.physicalStreamID)
 	if err == nil && streamInfo != nil {
 		sample.VideoFPS = streamInfo.InFPS
 		sample.AudioFPS = 0 // lal doesn't separate audio/video FPS
@@ -269,8 +273,40 @@ func (m *Manager) collectTaskStats(ctx context.Context, task *Task, at *activeTa
 	m.mu.Unlock()
 }
 
+// SetDerivedResolver installs a trusted source-bound, playback-token-aware
+// resolver. Only the logical source and job ID are persisted.
+func (m *Manager) SetDerivedResolver(
+    resolve func(context.Context, string, string) (string, string, error),
+    isInternal func(string) bool,
+) {
+    m.mu.Lock()
+    defer m.mu.Unlock()
+    m.derivedResolver = resolve
+    m.isInternalStream = isInternal
+}
+
+// CreateDerivedTask binds relay to a logical transcode job, not an ephemeral
+// internal stream ID. It never creates a new transcoding encoder.
+func (m *Manager) CreateDerivedTask(ctx context.Context, sourceID, jobID, targetURL string) (*Task,error) {
+    if sourceID == "" || jobID == "" || targetURL == "" { return nil, fmt.Errorf("source, transcode job and target URL are required") }
+    m.mu.RLock()
+    resolver := m.derivedResolver
+    m.mu.RUnlock()
+    if resolver == nil { return nil, fmt.Errorf("derived relay is unavailable") }
+    if _, _, err := resolver(ctx, sourceID, jobID); err != nil { return nil, fmt.Errorf("derived output is not playable") }
+    task := &Task{ID:generateTaskID(),StreamID:sourceID,TranscodeJobID:jobID,TargetURL:targetURL,Status:TaskStatusStopped,CreatedAt:time.Now()}
+    if err:=m.saveTask(task);err!=nil { return nil,fmt.Errorf("save derived relay: %w",err) }
+    return task,nil
+}
+
 // CreateTask creates a new relay push task.
 func (m *Manager) CreateTask(ctx context.Context, streamID, targetURL string) (*Task, error) {
+    m.mu.RLock()
+    internal := m.isInternalStream
+    m.mu.RUnlock()
+    if internal != nil && internal(streamID) {
+        return nil, fmt.Errorf("derived stream requires a source-bound transcode job")
+    }
 	// Validate stream exists
 	streams, err := m.engine.ListStreams(ctx)
 	if err != nil {
@@ -387,22 +423,28 @@ func (m *Manager) StartTask(ctx context.Context, taskID string) error {
 		return err
 	}
 
-	// Get stream info
-	streamInfo, err := m.engine.GetStream(ctx, task.StreamID)
-	if err != nil {
-		return fmt.Errorf("get stream: %w", err)
+	// Resolve derived outputs at the point of use. Never persist ephemeral
+	// physical stream IDs or scoped playback credentials in relay records.
+	physicalID := task.StreamID
+	var pullAddress string
+	if task.TranscodeJobID != "" {
+		if m.derivedResolver == nil { return fmt.Errorf("derived relay is not configured") }
+		resolved, url, resolveErr := m.derivedResolver(ctx, task.StreamID, task.TranscodeJobID)
+		if resolveErr != nil || resolved == "" || url == "" { return fmt.Errorf("derived output is not ready") }
+		physicalID, pullAddress = resolved, url
+	} else {
+		if m.isInternalStream != nil && m.isInternalStream(task.StreamID) {
+			return fmt.Errorf("internal stream requires a source-bound transcode job")
+		}
+		pullURL, playErr := m.engine.BuildPlayURL(ctx, media.PlayURLRequest{
+			StreamID: task.StreamID, Protocol: "rtmp",
+		})
+		if playErr != nil || pullURL == nil { return fmt.Errorf("build play URL failed") }
+		pullAddress = pullURL.URL
 	}
-	if !streamInfo.Active {
-		return fmt.Errorf("stream %s is not active", task.StreamID)
-	}
-
-	// Build RTMP pull URL from lalmax
-	pullURL, err := m.engine.BuildPlayURL(ctx, media.PlayURLRequest{
-		StreamID: task.StreamID,
-		Protocol: "rtmp",
-	})
-	if err != nil {
-		return fmt.Errorf("build play URL: %w", err)
+	streamInfo, err := m.engine.GetStream(ctx, physicalID)
+	if err != nil || streamInfo == nil || !streamInfo.Active {
+		return fmt.Errorf("relay source is offline")
 	}
 
 	// Create context for this task
@@ -428,6 +470,7 @@ func (m *Manager) StartTask(ctx context.Context, taskID string) error {
 	now := time.Now()
 	task.StartedAt = &now
 	at := &activeTask{
+		physicalStreamID: physicalID,
 		task:        task,
 		session:     pushSession,
 		pullSession: pullSession,
@@ -445,8 +488,9 @@ func (m *Manager) StartTask(ctx context.Context, taskID string) error {
 			cancel()
 		}()
 
-		logger.Info("starting relay push", "task_id", taskID, "stream_id", task.StreamID,
-			"source", pullURL.URL, "target", task.TargetURL)
+		// Do not log either URL: both source bearer and destination may
+		// contain credentials.
+		logger.Info("starting relay push", "task_id", taskID, "stream_id", task.StreamID, "derived", task.TranscodeJobID != "")
 		if taskCtx.Err() != nil {
 			m.updateTaskStatus(taskID, TaskStatusStopped, "")
 			stoppedAt := time.Now()
@@ -475,7 +519,7 @@ func (m *Manager) StartTask(ctx context.Context, taskID string) error {
 		}
 
 		// Start pulling
-		err = pullSession.Pull(pullURL.URL)
+		err = pullSession.Pull(pullAddress)
 		if err != nil {
 			if taskCtx.Err() != nil {
 				m.updateTaskStatus(taskID, TaskStatusStopped, "")
@@ -562,6 +606,7 @@ func (m *Manager) GetTaskStats(ctx context.Context, taskID string) (*TaskStats, 
 	stats := &TaskStats{
 		TaskID:    task.ID,
 		StreamID:  task.StreamID,
+		TranscodeJobID: task.TranscodeJobID,
 		TargetURL: task.TargetURL,
 		Status:    task.Status,
 		StartedAt: task.StartedAt,
@@ -579,7 +624,11 @@ func (m *Manager) GetTaskStats(ctx context.Context, taskID string) (*TaskStats, 
 	// Get real-time stats from push session and stream
 	if task.Status == TaskStatusRunning {
 		// Get source stream info for FPS
-		streamInfo, err := m.engine.GetStream(ctx, task.StreamID)
+		physicalID := task.StreamID
+        m.mu.RLock()
+        if active, found := m.tasks[taskID];found && active.physicalStreamID!="" {physicalID=active.physicalStreamID}
+        m.mu.RUnlock()
+		streamInfo, err := m.engine.GetStream(ctx, physicalID)
 		if err == nil && streamInfo != nil {
 			stats.VideoFPS = streamInfo.InFPS
 		}
@@ -674,6 +723,7 @@ func relayTaskFromRecord(record *storage.RelayTaskRecord) *Task {
 	return &Task{
 		ID:        record.ID,
 		StreamID:  record.StreamID,
+		TranscodeJobID: record.TranscodeJobID,
 		TargetURL: record.TargetURL,
 		Status:    TaskStatus(record.Status),
 		ErrorMsg:  record.ErrorMsg,
