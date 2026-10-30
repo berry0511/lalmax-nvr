@@ -89,6 +89,7 @@ func desiredHAPreloadJobs(cfg storage.HomeAssistantSettings, jobs []transcode.Jo
         for _, job := range jobs {
             if job.ID == publication.TranscodeJobID &&
                 job.Source.StreamID == publication.StreamID &&
+                (publication.AppName == "" || job.Source.AppName == publication.AppName) &&
                 job.Enabled && !job.StoppedByUser &&
                 job.RunPolicy == transcode.OnDemand {
                 desired[job.ID] = job.Generation
