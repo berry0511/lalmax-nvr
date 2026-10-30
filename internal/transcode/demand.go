@@ -119,7 +119,16 @@ func (s *Service) ReconcileDemand(ctx context.Context) map[string]error {
    }
    consumers++
   }
-  if consumers==0 {continue}
+  if consumers==0 {
+   // A generation change or a stale lease can leave a running on-demand
+   // owner behind. Reconciliation must release it even when no lease remains.
+   if _,active:=s.manager.Status(j.ID);active {
+    if err:=s.manager.Release(ctx,j.ID,j.Generation);err!=nil {
+     results[j.ID]=err
+    }
+   }
+   continue
+  }
   if !j.Enabled || j.StoppedByUser {
    s.invalidateDemandLeasesLocked(j.ID)
    _=s.manager.Release(ctx,j.ID,j.Generation)
