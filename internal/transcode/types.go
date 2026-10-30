@@ -91,8 +91,12 @@ func (p Profile) Validate() error {
 		if (a.SampleRate != 44100 && a.SampleRate != 48000) || a.Channels < 1 || a.Channels > 2 || a.BitrateKbps < 32 || a.BitrateKbps > 320 {
 			return invalid("unsupported AAC sample rate, channels or bitrate")
 		}
+	case "g711a":
+		if a.SampleRate != 8000 || a.Channels != 1 || a.BitrateKbps != 64 {
+			return invalid("G.711 A-law output requires 8000 Hz mono at 64 kbps")
+		}
 	default:
-		return invalid("audio codec must be aac, copy or none")
+		return invalid("audio codec must be aac, g711a, copy or none")
 	}
 	return nil
 }
@@ -217,8 +221,11 @@ func (p Profile) CheckMedia(videoCodec, audioCodec string) error {
 	if p.Audio.Codec == "copy" && audioCodec != "" && audioCodec != "aac" {
 		return &Error{Code: "unsupported_input", Message: "audio copy requires AAC for this output"}
 	}
-	if p.Audio.Codec == "aac" && audioCodec != "" && audioCodec != "aac" && audioCodec != "g711a" && audioCodec != "g711u" {
+	if (p.Audio.Codec == "aac" || p.Audio.Codec == "g711a") && audioCodec != "" && audioCodec != "aac" && audioCodec != "g711a" && audioCodec != "g711u" {
 		return &Error{Code: "unsupported_input", Message: "audio codec is not supported by the fixed template"}
+	}
+	if p.Audio.Codec == "g711a" && audioCodec == "" {
+		return &Error{Code: "audio_required", Message: "WebRTC audio profile needs an input audio track"}
 	}
 	return nil
 }
