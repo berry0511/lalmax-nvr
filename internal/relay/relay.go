@@ -687,6 +687,7 @@ func (m *Manager) saveTask(task *Task) error {
 	return m.db.SaveRelayTask(context.Background(), storage.RelayTaskRecord{
 		ID:        task.ID,
 		StreamID:  task.StreamID,
+		TranscodeJobID: task.TranscodeJobID,
 		TargetURL: task.TargetURL,
 		Status:    string(task.Status),
 		ErrorMsg:  task.ErrorMsg,
