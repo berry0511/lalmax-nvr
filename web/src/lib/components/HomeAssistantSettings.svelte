@@ -19,7 +19,15 @@
   }
   function chooseVariant(id: string, job: string) {
     if (!settings) return;
-    settings.streams = settings.streams.map(p => p.stream_id === id ? { ...p, transcode_job_id: job || undefined, preload_transcode: false } : p);
+    settings.streams = settings.streams.map(p => {
+      if (p.stream_id !== id) return p;
+      // Switching a job revokes any preload lease for the previous output.
+      // An omitted optional field means disabled; do not add false to every
+      // existing publication simply because its playback job was selected.
+      const updated = { ...p, transcode_job_id: job || undefined };
+      delete updated.preload_transcode;
+      return updated;
+    });
   }
   function choosePreload(id: string, enabled: boolean) {
     if (!settings) return;
