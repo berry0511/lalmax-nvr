@@ -62,6 +62,8 @@
     if (!profileEditor) return;
     profileEditor.audio = codec === 'aac'
       ? { codec: 'aac', sample_rate: 48000, channels: 1, bitrate_kbps: 64 }
+      : codec === 'g711a'
+      ? { codec: 'g711a', sample_rate: 8000, channels: 1, bitrate_kbps: 64 }
       : { codec, sample_rate: 0, channels: 0, bitrate_kbps: 0 };
   }
   function updateBackend(backend: string) {
@@ -123,7 +125,7 @@
               <label class="space-y-1"><span class="input-label">视频码率 (kbps)</span><input class="input w-full" type="number" min="64" max="20000" bind:value={profileEditor.video.bitrate_kbps} /></label>
               <label class="space-y-1"><span class="input-label">GOP 帧数</span><input class="input w-full" type="number" min="1" max="600" bind:value={profileEditor.video.gop_frames} /></label>
             {/if}
-            <label class="space-y-1"><span class="input-label">音频模式</span><select class="input w-full" value={profileEditor.audio.codec} onchange={e => updateAudioCodec(e.currentTarget.value)}><option value="aac">AAC 编码</option><option value="copy">AAC 复制</option><option value="none">无音频</option></select></label>
+            <label class="space-y-1"><span class="input-label">音频模式</span><select class="input w-full" value={profileEditor.audio.codec} onchange={e => updateAudioCodec(e.currentTarget.value)}><option value="aac">AAC 编码</option><option value="g711a">G.711 A-law（WebRTC 有声）</option><option value="copy">AAC 复制</option><option value="none">无音频</option></select></label>
             {#if profileEditor.audio.codec === 'aac'}
               <label class="space-y-1"><span class="input-label">采样率</span><select class="input w-full" bind:value={profileEditor.audio.sample_rate}><option value={44100}>44100</option><option value={48000}>48000</option></select></label>
               <label class="space-y-1"><span class="input-label">声道数</span><input class="input w-full" type="number" min="1" max="2" bind:value={profileEditor.audio.channels} /></label>
