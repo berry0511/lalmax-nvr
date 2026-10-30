@@ -5,6 +5,7 @@ import (
     "time"
 
     "github.com/lalmax-pro/lalmax-nvr/internal/transcode"
+    "github.com/lalmax-pro/lalmax-nvr/internal/storage"
 )
 
 // RunHAPreload keeps one short-lived consumer lease per explicitly opted-in HA
@@ -35,22 +36,9 @@ func (h *Handler) RunHAPreload(ctx context.Context) {
     refresh := func() {
         cfg, err := h.db.GetHomeAssistantSettings(ctx)
         if err != nil { return }
-        desired := map[string]uint64{}
-        if cfg.Enabled {
-            jobs, err := repository.ListTranscodeJobs(ctx)
-            if err != nil { return }
-            for _, publication := range cfg.Streams {
-                if !publication.PreloadTranscode || publication.TranscodeJobID == "" { continue }
-                for _, job := range jobs {
-                    if job.ID == publication.TranscodeJobID &&
-                        job.Source.StreamID == publication.StreamID &&
-                        job.Enabled && !job.StoppedByUser && job.RunPolicy == transcode.OnDemand {
-                        desired[job.ID] = job.Generation
-                        break
-                    }
-                }
-            }
-        }
+        jobs, err := repository.ListTranscodeJobs(ctx)
+        if err != nil { return }
+        desired := desiredHAPreloadJobs(cfg, jobs)
         for id, lease := range held {
             generation, wanted := desired[id]
             if !wanted || generation != lease.Generation {
@@ -82,4 +70,22 @@ func (h *Handler) RunHAPreload(ctx context.Context) {
         case <-ticker.C: refresh()
         }
     }
+}
+
+func desiredHAPreloadJobs(cfg storage.HomeAssistantSettings, jobs []transcode.Job) map[string]uint64 {
+    desired := map[string]uint64{}
+    if !cfg.Enabled { return desired }
+    for _, publication := range cfg.Streams {
+        if !publication.PreloadTranscode || publication.TranscodeJobID == "" { continue }
+        for _, job := range jobs {
+            if job.ID == publication.TranscodeJobID &&
+                job.Source.StreamID == publication.StreamID &&
+                job.Enabled && !job.StoppedByUser &&
+                job.RunPolicy == transcode.OnDemand {
+                desired[job.ID] = job.Generation
+                break
+            }
+        }
+    }
+    return desired
 }
