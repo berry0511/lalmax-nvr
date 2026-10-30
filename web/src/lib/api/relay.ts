@@ -3,6 +3,7 @@ import { apiRequest } from './client';
 export interface RelayTask {
   id: string;
   stream_id: string;
+  transcode_job_id?: string;
   target_url: string;
   status: 'running' | 'stopped' | 'error';
   error_msg?: string;
