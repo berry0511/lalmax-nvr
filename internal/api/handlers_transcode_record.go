@@ -1,10 +1,13 @@
 package api
 
 import (
+    "context"
     "net/http"
+    "strings"
 
     "github.com/go-chi/chi/v5"
     "github.com/lalmax-pro/lalmax-nvr/internal/recorder"
+    "github.com/lalmax-pro/lalmax-nvr/internal/storage"
     "github.com/lalmax-pro/lalmax-nvr/internal/transcode"
 )
 
@@ -48,6 +51,31 @@ func (h *Handler) derivedRecordTarget(w http.ResponseWriter, r *http.Request) (t
 func (h *Handler) handleStartDerivedRecording(w http.ResponseWriter, r *http.Request) {
     job, outputID, ok := h.derivedRecordTarget(w, r)
     if !ok { return }
+    if h.mediaEngine == nil {
+        writeError(w, http.StatusServiceUnavailable, "media engine unavailable")
+        return
+    }
+    actual, err := h.mediaEngine.GetStream(r.Context(), outputID)
+    if err != nil || actual == nil || !actual.Active || !strings.EqualFold(actual.VideoCodec, "h264") {
+        writeError(w, http.StatusServiceUnavailable, "recordable derived H264 media is not ready")
+        return
+    }
+    provenanceDB, ok := h.db.(interface {
+        SaveDerivedRecordingSource(context.Context,storage.DerivedRecordingSource) error
+    })
+    if !ok {
+        writeError(w, http.StatusServiceUnavailable, "derived recording provenance storage is unavailable")
+        return
+    }
+    if err := provenanceDB.SaveDerivedRecordingSource(r.Context(),storage.DerivedRecordingSource{
+        PhysicalStreamID: outputID,SourceStreamID:job.Source.StreamID,
+        JobID:job.ID,Generation:job.Generation,
+        ProfileID:job.ProfileID,ProfileRevision:job.ProfileRevision,
+        VideoCodec:strings.ToLower(actual.VideoCodec),AudioCodec:strings.ToLower(actual.AudioCodec),
+    }); err != nil {
+        writeError(w, http.StatusInternalServerError, "could not persist recording provenance")
+        return
+    }
     if err := h.derivedRecorder.EnsureDerived(r.Context(), outputID); err != nil {
         writeError(w, http.StatusServiceUnavailable, "derived recording could not be started")
         return
