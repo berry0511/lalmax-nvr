@@ -23,6 +23,7 @@ func TestManagerPersistsTasksThroughRepository(t *testing.T) {
 	task := &Task{
 		ID:        "task-1",
 		StreamID:  "stream-1",
+		TranscodeJobID: "job-1",
 		TargetURL: "rtmp://example.test/live",
 		Status:    TaskStatusRunning,
 		CreatedAt: startedAt.Add(-time.Minute),
@@ -48,4 +49,34 @@ func TestManagerPersistsTasksThroughRepository(t *testing.T) {
 	require.NoError(t, manager.deleteTask(task.ID))
 	_, err = manager.loadTask(task.ID)
 	require.Error(t, err)
+}
+
+func TestDerivedRelayRequiresTrustedLogicalResolver(t *testing.T) {
+    db, err := storage.New(filepath.Join(t.TempDir(), "relay-derived.db"))
+    require.NoError(t,err)
+    t.Cleanup(func(){_ = db.Close()})
+    require.NoError(t,db.Init(context.Background()))
+    manager:=NewManager(db,nil)
+    t.Cleanup(manager.Stop)
+    if _,err:=manager.CreateDerivedTask(context.Background(),"cam","job","rtmp://example.test/live");err==nil {
+        t.Fatal("derived relay accepted without an authorized resolver")
+    }
+    calls:=0
+    manager.SetDerivedResolver(func(_ context.Context, source, job string)(string,string,error){
+        calls++
+        if source!="cam" || job!="job" {t.Fatalf("unexpected source/job %q/%q",source,job)}
+        return "private-output","rtmp://127.0.0.1:11935/live/private-output?token=only-runtime",nil
+    }, func(id string)bool{return id=="private-output"})
+    if _,err:=manager.CreateTask(context.Background(),"private-output","rtmp://example.test/live");err==nil {
+        t.Fatal("internal output allowed through legacy relay task API")
+    }
+    task,err:=manager.CreateDerivedTask(context.Background(),"cam","job","rtmp://example.test/live")
+    require.NoError(t,err)
+    if calls!=1 {t.Fatalf("expected one source authorization, got %d",calls)}
+    saved,err:=manager.loadTask(task.ID)
+    require.NoError(t,err)
+    if saved.StreamID!="cam" || saved.TranscodeJobID!="job" {
+        t.Fatalf("logical provenance not persisted: %+v",saved)
+    }
+    if saved.StreamID=="private-output" {t.Fatal("persisted temporary physical stream ID")}
 }
