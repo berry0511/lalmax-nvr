@@ -58,15 +58,15 @@ it('keeps independent demand tokens across start, renewal and final release', as
   vi.stubGlobal('sessionStorage', { getItem: () => null });
   const token = 'a-runtime-token';
   const fetch = vi.fn().mockImplementation(async (url: string, opts: RequestInit) => ({
-    ok: true, status: url.endsWith('/leases/release') ? 204 : opts.method === 'POST' && url.endsWith('/leases?generation=3') ? 201 : 200,
+    ok: true, status: url.endsWith('/leases/release') ? 204 : opts.method === 'POST' && url.endsWith('/leases?generation=3&wait_ms=20000') ? 201 : 200,
     json: async () => url.endsWith('/renew')
       ? {token,job_id:'job',generation:3,expires_at:'2026-10-29T00:00:00Z'}
-      : {lease:{token,job_id:'job',generation:3,expires_at:'2026-10-29T00:00:00Z'},runtime:{state:'starting'}},
+      : {lease:{token,job_id:'job',generation:3,expires_at:'2026-10-29T00:00:00Z'},runtime:{state:'running'}},
   }));
   vi.stubGlobal('fetch', fetch);
   const result = await acquireTranscodeDemandLease('job', 3);
-  expect(result.runtime.state).toBe('starting');
-  expect(fetch.mock.calls[0][0]).toBe('/api/transcoding/jobs/job/leases?generation=3');
+  expect(result.runtime.state).toBe('running');
+  expect(fetch.mock.calls[0][0]).toBe('/api/transcoding/jobs/job/leases?generation=3&wait_ms=20000');
   await renewTranscodeDemandLease(token);
   expect(fetch.mock.calls[1][0]).toBe('/api/transcoding/leases/renew');
   await releaseTranscodeDemandLease(token);
@@ -74,4 +74,12 @@ it('keeps independent demand tokens across start, renewal and final release', as
   expect(fetch.mock.calls[2][1].method).toBe('POST');
   expect(JSON.parse(fetch.mock.calls[2][1].body)).toEqual({token});
   expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({token});
+});
+
+it('rejects unbounded first-subscriber waits before any network request', async () => {
+  const fetch = vi.fn();
+  vi.stubGlobal('fetch', fetch);
+  expect(() => acquireTranscodeDemandLease('job', 1, 20001)).toThrow();
+  expect(() => acquireTranscodeDemandLease('job', 1, -1)).toThrow();
+  expect(fetch).not.toHaveBeenCalled();
 });
