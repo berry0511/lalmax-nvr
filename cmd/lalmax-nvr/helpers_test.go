@@ -147,4 +147,30 @@ func TestRestartGB28181DisabledAndEmptyID(t *testing.T) {
 	enabled := true
 	require.NoError(t, app.RestartGB28181(context.Background(), &config.GB28181Config{Enabled: &enabled}))
 	require.Nil(t, app.CurrentGB28181Server())
+
+	err := app.RestartGB28181(context.Background(), &config.GB28181Config{
+		Enabled:  &enabled,
+		ID:       "short",
+		Password: "secret",
+		MediaIP:  "192.0.2.10",
+		Port:     5060,
+	})
+	require.ErrorContains(t, err, "gb28181 config")
+	require.Nil(t, app.CurrentGB28181Server())
+}
+
+func TestWireRecordTasksRequiresEngineAndCameraManager(t *testing.T) {
+	app := &App{cfg: &config.Config{}}
+	app.wireRecordTasks()
+	require.Nil(t, app.recTasks)
+
+	app.mediaEngine = listStreamsEngine{}
+	app.wireRecordTasks()
+	require.Nil(t, app.recTasks)
+}
+
+func TestRecordTaskHealthHooksWithoutManagers(t *testing.T) {
+	app := &App{}
+	app.onRecordTaskStart("cam", nil)
+	app.onRecordTaskStop("cam", nil)
 }
