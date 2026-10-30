@@ -110,7 +110,7 @@ jobs:
         run: |
           cd web
           npm ci
-          npm exec vitest run src/__tests__/flv-playback.test.ts
+          npm test
           npm run build
           cp -r dist/* ../internal/ui/static/
 
