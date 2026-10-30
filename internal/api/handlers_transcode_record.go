@@ -1,7 +1,6 @@
 package api
 
 import (
-    "context"
     "net/http"
 
     "github.com/go-chi/chi/v5"
@@ -71,6 +70,3 @@ func (h *Handler) handleStopDerivedRecording(w http.ResponseWriter, r *http.Requ
     w.WriteHeader(http.StatusNoContent)
 }
 
-// Compile-time check: recorder.TaskManager is a locally owned consumer and
-// does not receive credentials or an untrusted output URL from this route.
-var _ = context.Background
