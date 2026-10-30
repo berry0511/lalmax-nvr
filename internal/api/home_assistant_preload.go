@@ -55,6 +55,15 @@ func (h *Handler) RunHAPreload(ctx context.Context) {
         for id, generation := range desired {
             if _, ok := held[id]; ok { continue }
             lease, _, err := h.transcodeService.AcquireDemand(ctx, id, generation)
+            if err != nil {
+                // Cold-restart capability reports are ephemeral. An explicit
+                // HA preload may safely re-run the bounded media probe.
+                probeCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
+                if h.transcodeService.PrepareDemandCapability(probeCtx,id,generation) == nil {
+                    lease, _, err = h.transcodeService.AcquireDemand(probeCtx,id,generation)
+                }
+                cancel()
+            }
             if err == nil { held[id] = lease }
         }
     }
