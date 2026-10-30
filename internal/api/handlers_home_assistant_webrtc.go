@@ -165,10 +165,6 @@ func (h *Handler) handleHomeAssistantWHEP(w http.ResponseWriter, r *http.Request
 		return
 	}
 	codec := homeAssistantWebRTCCodec(info.VideoCodec)
-	if codec == "" {
-		writeError(w, 400, "WebRTC requires H.264 or H.265; use HLS or RTSP for this codec")
-		return
-	}
 	cfg, err := h.db.GetHomeAssistantSettings(r.Context())
 	if err != nil {
 		writeError(w, 500, "failed to load publications")
@@ -213,6 +209,10 @@ func (h *Handler) handleHomeAssistantWHEP(w http.ResponseWriter, r *http.Request
 			return
 		}
 	} else {
+		if codec == "" {
+			writeError(w, 400, "WebRTC requires H.264 or H.265; use HLS or RTSP for this codec")
+			return
+		}
 		upstream, err = h.homeAssistantWHEPURL(r.Context(), sid, app, false)
 		if err != nil {
 			writeError(w, 503, "WebRTC playback unavailable")
