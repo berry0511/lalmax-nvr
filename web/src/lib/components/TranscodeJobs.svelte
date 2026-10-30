@@ -3,7 +3,7 @@
   import { t } from '$lib/i18n';
   import FlvPlayer from '../../components/FlvPlayer.svelte';
   let preview = $state<TranscodeJob | null>(null);
-  import { listTranscodeJobs, listTranscodeProfiles, createTranscodeProfile, updateTranscodeProfile, deleteTranscodeProfile, probeSavedTranscodeProfile, saveTranscodeJob, transcodeJobAction } from '$lib/api/transcoding';
+  import { listTranscodeJobs, listTranscodeProfiles, createTranscodeProfile, updateTranscodeProfile, deleteTranscodeProfile, probeSavedTranscodeProfile, saveTranscodeJob, transcodeJobAction, derivedRecordingAction } from '$lib/api/transcoding';
   import type { TranscodeProfile, TranscodeJob, TranscodeVariant } from '$lib/api/transcoding';
   let profiles = $state<TranscodeProfile[]>([]);
   let jobs = $state<TranscodeJob[]>([]);
@@ -172,6 +172,8 @@
           <div class="flex flex-wrap gap-2">
             <button class="btn btn-secondary" onclick={() => act(() => saveTranscodeJob({...job, enabled: !job.enabled}, controller.signal))}>{job.enabled ? t('transcode.disable') : t('transcode.enable')}</button>
             <button class="btn btn-secondary" disabled={runtime?.state !== 'running' || busy} onclick={() => preview = job}>{t('transcode.preview')}</button>
+            <button class="btn btn-secondary" disabled={runtime?.state !== 'running' || busy} onclick={() => act(() => derivedRecordingAction(job, 'start', controller.signal))}>开始派生录像</button>
+            <button class="btn btn-secondary" disabled={runtime?.state !== 'running' || busy} onclick={() => act(() => derivedRecordingAction(job, 'stop', controller.signal))}>停止派生录像</button>
             <button class="btn btn-secondary" disabled={!job.enabled || busy || job.run_policy === 'on_demand'} onclick={() => act(() => transcodeJobAction(job, 'start', controller.signal))}>{t('transcode.start')}</button>
             <button class="btn btn-secondary" onclick={() => act(() => transcodeJobAction(job, 'stop', controller.signal))}>{t('transcode.stop')}</button>
             <button class="btn btn-secondary" onclick={() => { if (window.confirm(t('transcode.deleteConfirm'))) void act(() => transcodeJobAction(job, 'delete', controller.signal)); }}>{t('transcode.delete')}</button>
