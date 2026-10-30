@@ -91,6 +91,10 @@ type TaskStats struct {
 	VideoBitrate int           `json:"video_bitrate"`
 	AudioFPS     float64       `json:"audio_fps"`
 	AudioBitrate int           `json:"audio_bitrate"`
+	OutputBitrate int          `json:"output_bitrate"`
+	VideoPayloadBitrate int    `json:"video_payload_bitrate"`
+	AudioPayloadBitrate int   `json:"audio_payload_bitrate"`
+	BitrateScope string        `json:"bitrate_scope"`
 	TotalBytes   int64         `json:"total_bytes"`
 	Duration     time.Duration `json:"duration"`
 }
@@ -102,6 +106,10 @@ type StatSample struct {
 	VideoBitrate int       `json:"video_bitrate"`
 	AudioFPS     float64   `json:"audio_fps"`
 	AudioBitrate int       `json:"audio_bitrate"`
+	OutputBitrate int      `json:"output_bitrate"`
+	VideoPayloadBitrate int `json:"video_payload_bitrate"`
+	AudioPayloadBitrate int `json:"audio_payload_bitrate"`
+	BitrateScope string    `json:"bitrate_scope"`
 	TotalBytes   int64     `json:"total_bytes"`
 }
 
@@ -133,6 +141,18 @@ type activeTask struct {
 	pullSession *rtmp.PullSession
 	cancel      context.CancelFunc
 	done        chan struct{}
+	statsMu     sync.Mutex
+	videoFrames uint64
+	audioFrames uint64
+	videoBytes  uint64
+	audioBytes uint64
+	lastStatsAt time.Time
+	lastVideoFrames uint64
+	lastAudioFrames uint64
+	lastVideoBytes uint64
+	lastAudioBytes uint64
+	latestStats StatSample
+	hasStats    bool
 }
 
 // NewManager creates a new relay manager.
@@ -181,9 +201,14 @@ func (m *Manager) stopActiveTask(task *activeTask) {
 	if task == nil {
 		return
 	}
+	// Capture the last wire counters before disposing either RTMP session.
+	// The snapshot remains available after an error/stop for API consumers.
+	m.collectTaskStats(context.Background(), task.task, task)
 	if task.cancel != nil {
 		task.cancel()
 	}
+	task.statsMu.Lock()
+	defer task.statsMu.Unlock()
 	if task.pullSession != nil {
 		_ = task.pullSession.Dispose()
 	}
@@ -247,22 +272,58 @@ func (m *Manager) collectTaskStats(ctx context.Context, task *Task, at *activeTa
 	now := time.Now()
 	sample := StatSample{
 		Timestamp: now,
+		BitrateScope: "output_wire;input_media_payload_components",
 	}
 
-	// Get source stream info for FPS
-	streamInfo, err := m.engine.GetStream(ctx, at.physicalStreamID)
-	if err == nil && streamInfo != nil {
-		sample.VideoFPS = streamInfo.InFPS
-		sample.AudioFPS = 0 // lal doesn't separate audio/video FPS
+	// Count media messages actually received by the relay. The embedded
+	// engine's in_frame_per_sec endpoint is not populated for every RTMP
+	// publisher, so it cannot be the sole source of relay frame-rate metrics.
+	at.statsMu.Lock()
+	interval := now.Sub(at.lastStatsAt)
+	if at.lastStatsAt.IsZero() {
+		interval = statsSampleInterval
 	}
+	if interval <= 0 {
+		interval = time.Second
+	}
+	intervalSec := uint64(interval) / uint64(time.Second)
+	if intervalSec == 0 {
+		intervalSec = 1
+	}
+	videoFrames := at.videoFrames - at.lastVideoFrames
+	audioFrames := at.audioFrames - at.lastAudioFrames
+	videoBytes := at.videoBytes - at.lastVideoBytes
+	audioBytes := at.audioBytes - at.lastAudioBytes
+	seconds := interval.Seconds()
+	if seconds <= 0 {
+		seconds = 1
+	}
+	sample.VideoFPS = float64(videoFrames) / seconds
+	sample.AudioFPS = float64(audioFrames) / seconds
+	sample.VideoPayloadBitrate = int(float64(videoBytes*8) / seconds)
+	sample.AudioPayloadBitrate = int(float64(audioBytes*8) / seconds)
+	at.lastVideoFrames = at.videoFrames
+	at.lastAudioFrames = at.audioFrames
+	at.lastVideoBytes = at.videoBytes
+	at.lastAudioBytes = at.audioBytes
+	at.lastStatsAt = now
 
-	// Get push session stats for bitrate and bytes
+	// UpdateStat is required by lal before GetStat computes WriteBitrateKbits.
+	// Serialize both calls with API reads because lal's stat object mutates its
+	// cached rate fields and is not safe for concurrent UpdateStat/GetStat.
 	if at.session != nil {
+		at.session.UpdateStat(uint32(intervalSec))
 		stat := at.session.GetStat()
-		sample.VideoBitrate = stat.WriteBitrateKbits * 1000 // convert to bps
-		sample.AudioBitrate = 0                             // lal doesn't separate audio/video bitrate
+		sample.OutputBitrate = stat.WriteBitrateKbits * 1000
+		// Preserve the existing API field's historical meaning while exposing
+		// explicit output_bitrate and media-payload component rates.
+		sample.VideoBitrate = sample.OutputBitrate
+		sample.AudioBitrate = 0 // separate output audio bitrate is unavailable
 		sample.TotalBytes = int64(stat.WroteBytesSum)
 	}
+	at.latestStats = sample
+	at.hasStats = true
+	at.statsMu.Unlock()
 
 	// Store in memory ring buffer only (no database persistence)
 	m.mu.Lock()
@@ -277,6 +338,28 @@ func (m *Manager) collectTaskStats(ctx context.Context, task *Task, at *activeTa
 
 // SetDerivedResolver installs a trusted source-bound, playback-token-aware
 // resolver. Only the logical source and job ID are persisted.
+func trackRelayMedia(at *activeTask, msg base.RtmpMsg) {
+	if at == nil || len(msg.Payload) == 0 {
+		return
+	}
+	at.statsMu.Lock()
+	defer at.statsMu.Unlock()
+	switch msg.Header.MsgTypeId {
+	case base.RtmpTypeIdVideo:
+		if len(msg.Payload) >= 2 && msg.Payload[1] == base.RtmpAvcPacketTypeSeqHeader {
+			return
+		}
+		at.videoFrames++
+		at.videoBytes += uint64(len(msg.Payload))
+	case base.RtmpTypeIdAudio:
+		if msg.AudioCodecId() == base.RtmpSoundFormatAac && len(msg.Payload) >= 2 && msg.Payload[1] == base.RtmpAacPacketTypeSeqHeader {
+			return
+		}
+		at.audioFrames++
+		at.audioBytes += uint64(len(msg.Payload))
+	}
+}
+
 func (m *Manager) SetDerivedResolver(
     resolve func(context.Context, string, string) (string, string, error),
     isInternal func(string) bool,
@@ -488,7 +571,9 @@ func (m *Manager) StartTask(ctx context.Context, taskID string) error {
 	pullSession := rtmp.NewPullSession(func(option *rtmp.PullSessionOption) {
 		option.PullTimeoutMs = 5000
 	})
+	var at *activeTask
 	pullSession.WithOnReadRtmpAvMsg(func(msg base.RtmpMsg) {
+		trackRelayMedia(at, msg)
 		if err := pushSession.WriteMsg(msg); err != nil {
 			logger.Error("relay push write error", "task_id", taskID, "error", err)
 		}
@@ -499,7 +584,7 @@ func (m *Manager) StartTask(ctx context.Context, taskID string) error {
 	task.Status = TaskStatusRunning
 	now := time.Now()
 	task.StartedAt = &now
-	at := &activeTask{
+	at = &activeTask{
 		physicalStreamID: physicalID,
 		task:        task,
 		session:     pushSession,
@@ -513,8 +598,10 @@ func (m *Manager) StartTask(ctx context.Context, taskID string) error {
 	go func() {
 		defer close(at.done)
 		defer func() {
+			at.statsMu.Lock()
 			_ = pullSession.Dispose()
 			_ = pushSession.Dispose()
+			at.statsMu.Unlock()
 			cancel()
 		}()
 
@@ -628,21 +715,29 @@ func (m *Manager) StopTask(taskID string) error {
 
 // GetTaskStats returns statistics for a relay push task.
 func (m *Manager) GetTaskStats(ctx context.Context, taskID string) (*TaskStats, error) {
-	task, err := m.GetTask(taskID)
-	if err != nil {
-		return nil, err
+	var task Task
+	var at *activeTask
+	m.mu.RLock()
+	if active, ok := m.tasks[taskID]; ok {
+		task = *active.task
+		at = active
+	}
+	m.mu.RUnlock()
+	if at == nil {
+		loaded, err := m.loadTask(taskID)
+		if err != nil {
+			return nil, err
+		}
+		task = *loaded
 	}
 
+	if at != nil && task.Status == TaskStatusRunning {
+		m.collectTaskStats(ctx, &task, at)
+	}
 	stats := &TaskStats{
-		TaskID:    task.ID,
-		StreamID:  task.StreamID,
-		TranscodeJobID: task.TranscodeJobID,
-		TargetURL: task.TargetURL,
-		Status:    task.Status,
-		StartedAt: task.StartedAt,
-		StoppedAt: task.StoppedAt,
+		TaskID: task.ID, StreamID: task.StreamID, TranscodeJobID: task.TranscodeJobID,
+		TargetURL: task.TargetURL, Status: task.Status, StartedAt: task.StartedAt, StoppedAt: task.StoppedAt,
 	}
-
 	if task.StartedAt != nil {
 		if task.StoppedAt != nil {
 			stats.Duration = task.StoppedAt.Sub(*task.StartedAt)
@@ -650,30 +745,22 @@ func (m *Manager) GetTaskStats(ctx context.Context, taskID string) (*TaskStats, 
 			stats.Duration = time.Since(*task.StartedAt)
 		}
 	}
-
-	// Get real-time stats from push session and stream
-	if task.Status == TaskStatusRunning {
-		// Get source stream info for FPS
-		physicalID := task.StreamID
-        m.mu.RLock()
-        if active, found := m.tasks[taskID];found && active.physicalStreamID!="" {physicalID=active.physicalStreamID}
-        m.mu.RUnlock()
-		streamInfo, err := m.engine.GetStream(ctx, physicalID)
-		if err == nil && streamInfo != nil {
-			stats.VideoFPS = streamInfo.InFPS
+	if at != nil {
+		at.statsMu.Lock()
+		if at.hasStats {
+			sample := at.latestStats
+			stats.VideoFPS = sample.VideoFPS
+			stats.VideoBitrate = sample.VideoBitrate
+			stats.AudioFPS = sample.AudioFPS
+			stats.AudioBitrate = sample.AudioBitrate
+			stats.OutputBitrate = sample.OutputBitrate
+			stats.VideoPayloadBitrate = sample.VideoPayloadBitrate
+			stats.AudioPayloadBitrate = sample.AudioPayloadBitrate
+			stats.BitrateScope = sample.BitrateScope
+			stats.TotalBytes = sample.TotalBytes
 		}
-
-		// Get push session stats for bitrate and bytes
-		m.mu.RLock()
-		at, ok := m.tasks[taskID]
-		m.mu.RUnlock()
-		if ok && at.session != nil {
-			stat := at.session.GetStat()
-			stats.VideoBitrate = stat.WriteBitrateKbits * 1000
-			stats.TotalBytes = int64(stat.WroteBytesSum)
-		}
+		at.statsMu.Unlock()
 	}
-
 	return stats, nil
 }
 
@@ -778,14 +865,13 @@ func (m *Manager) GetTaskStatsHistory(taskID string, duration time.Duration) (*S
 		Samples: make([]StatSample, 0),
 	}
 
-	// Get from in-memory ring buffer
+	// Get from the in-memory ring buffer while holding its manager lock.
+	// Sampling appends and history reads must not race.
 	m.mu.RLock()
-	ring := m.rings[taskID]
-	m.mu.RUnlock()
-
-	if ring != nil {
+	if ring := m.rings[taskID]; ring != nil {
 		history.Samples = ring.since(since)
 	}
+	m.mu.RUnlock()
 
 	return history, nil
 }

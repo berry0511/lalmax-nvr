@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync"
 	"time"
 )
@@ -170,6 +172,13 @@ func (m *Manager) run(ctx context.Context, w *managedWork, source SourceRef, pro
 			}
 			return
 		case err := <-exited:
+			if err != nil {
+				if diagnostic, ok := p.(interface{ Diagnostic() string }); ok {
+					if text := strings.TrimSpace(diagnostic.Diagnostic()); text != "" {
+						slog.Warn("media backend stderr", "variant_id", w.runtime.VariantID, "stderr", text)
+					}
+				}
+			}
 			if timedOut {
 				m.set(w, Failed, "output_timeout")
 				return

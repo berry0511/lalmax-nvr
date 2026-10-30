@@ -8,6 +8,7 @@ import (
 
 	"github.com/lalmax-pro/lalmax-nvr/internal/media"
 	"github.com/lalmax-pro/lalmax-nvr/internal/storage"
+	"github.com/q191201771/lal/pkg/base"
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,6 +27,38 @@ func TestRelaySourcePlayURLUsesConfiguredPlaybackToken(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "playback-token", engine.token)
 	require.Equal(t, "rtmp://127.0.0.1:11935/live/issue66?token=playback-token", url)
+}
+
+func TestRelayStatsCountMediaAndRetainFinalSnapshot(t *testing.T) {
+	db, err := storage.New(filepath.Join(t.TempDir(), "relay.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	require.NoError(t, db.Init(context.Background()))
+
+	manager := NewManager(db, nil)
+	t.Cleanup(manager.Stop)
+	task := &Task{ID: "stats-task", StreamID: "stream-1", Status: TaskStatusError}
+	at := &activeTask{task: task, lastStatsAt: time.Now().Add(-2 * time.Second)}
+	manager.mu.Lock()
+	manager.tasks[task.ID] = at
+	manager.mu.Unlock()
+
+	for i := 0; i < 30; i++ {
+		trackRelayMedia(at, base.RtmpMsg{Header: base.RtmpHeader{MsgTypeId: base.RtmpTypeIdVideo}, Payload: []byte{0x17, 0x01, 0, 0, 1}})
+	}
+	for i := 0; i < 100; i++ {
+		trackRelayMedia(at, base.RtmpMsg{Header: base.RtmpHeader{MsgTypeId: base.RtmpTypeIdAudio}, Payload: []byte{0xaf, 0x01, 1, 2}})
+	}
+	manager.collectTaskStats(context.Background(), task, at)
+
+	stats, err := manager.GetTaskStats(context.Background(), task.ID)
+	require.NoError(t, err)
+	require.InDelta(t, 15, stats.VideoFPS, 2)
+	require.InDelta(t, 50, stats.AudioFPS, 4)
+	require.Greater(t, stats.VideoPayloadBitrate, 0)
+	require.Greater(t, stats.AudioPayloadBitrate, 0)
+	require.Equal(t, "output_wire;input_media_payload_components", stats.BitrateScope)
+	require.True(t, at.hasStats, "final snapshot must remain available after a non-running task state")
 }
 
 func TestManagerPersistsTasksThroughRepository(t *testing.T) {
