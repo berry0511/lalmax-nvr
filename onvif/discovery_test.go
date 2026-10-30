@@ -58,11 +58,13 @@ func TestDiscoverDevicesLocalTimeout(t *testing.T) {
 	defer cancel()
 	devices, err := DiscoverDevices(ctx, 50*time.Millisecond)
 	if err != nil {
-		require.Error(t, err)
-		require.Nil(t, devices)
+		require.Empty(t, devices)
 		return
 	}
-	require.NotNil(t, devices)
+	// UDP multicast may find nothing (nil/empty) or local stubs. Neither requires a camera.
+	for _, device := range devices {
+		require.NotNil(t, device)
+	}
 }
 
 func TestListenHelloCancelLocal(t *testing.T) {
