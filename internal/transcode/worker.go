@@ -199,7 +199,7 @@ func RunIsolatedWorker(input io.Reader) error {
     // Never pass the one-shot authorization key to the FFmpeg/GStreamer child.
     _=os.Unsetenv(workerKeyEnv)
     if err!=nil || len(key)!=32{return errors.New("worker authorization not configured")}
-    reader:=bufio.NewReader(input)
+    reader:=bufio.NewReader(io.LimitReader(input,workerFrameLimit+1))
     frame,err:=reader.ReadBytes('\n')
     if err!=nil || len(frame)>workerFrameLimit{return errors.New("invalid worker frame")}
     var envelope workerEnvelope
@@ -212,7 +212,7 @@ func RunIsolatedWorker(input io.Reader) error {
     defer cancel()
     // No more commands may be submitted. Reading to EOF is a heartbeat:
     // disappearance of the supervisor immediately triggers cancellation.
-    go func(){_,_=io.Copy(io.Discard,reader);cancel()}()
+    go func(){_,_=io.Copy(io.Discard,io.MultiReader(reader,input));cancel()}()
     var process Process
     switch command.Spec.Profile.Backend {
     case "ffmpeg":
