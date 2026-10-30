@@ -157,6 +157,26 @@ func TestRestartGB28181DisabledAndEmptyID(t *testing.T) {
 	})
 	require.ErrorContains(t, err, "gb28181 config")
 	require.Nil(t, app.CurrentGB28181Server())
+
+	err = app.RestartGB28181(context.Background(), &config.GB28181Config{
+		Enabled:  &enabled,
+		ID:       "34020000002000000001",
+		Password: "",
+		MediaIP:  "192.0.2.10",
+		Port:     5060,
+	})
+	require.ErrorContains(t, err, "password is required")
+	require.Nil(t, app.CurrentGB28181Server())
+
+	err = app.RestartGB28181(context.Background(), &config.GB28181Config{
+		Enabled:  &enabled,
+		ID:       "34020000002000000001",
+		Password: "secret",
+		MediaIP:  "192.0.2.10",
+		Port:     0,
+	})
+	require.ErrorContains(t, err, "1-65535")
+	require.Nil(t, app.CurrentGB28181Server())
 }
 
 func TestWireRecordTasksRequiresEngineAndCameraManager(t *testing.T) {
