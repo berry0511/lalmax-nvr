@@ -118,3 +118,18 @@ func TestDemandLeaseRecoversFailedMediaWithoutNewConsumer(t *testing.T) {
  if errors:=service.ReconcileDemand(context.Background());len(errors)!=0 {t.Fatal(errors)}
  if _,ok:=manager.Status(job.ID);ok {t.Fatal("released demand lease restarted media")}
 }
+
+func TestDemandLeaseReleaseIgnoresExpiredOtherConsumer(t *testing.T) {
+ service,manager,_,job:=setupDemandLeaseService(t)
+ first,_,err:=service.AcquireDemand(context.Background(),job.ID,job.Generation)
+ if err!=nil {t.Fatal(err)}
+ second,_,err:=service.AcquireDemand(context.Background(),job.ID,job.Generation)
+ if err!=nil {t.Fatal(err)}
+ service.mu.Lock()
+ second.ExpiresAt=time.Now().Add(-time.Second)
+ service.leases[second.Token]=second
+ service.mu.Unlock()
+ if err:=service.ReleaseDemand(context.Background(),first.Token);err!=nil {t.Fatal(err)}
+ if _,ok:=manager.Status(job.ID);ok {t.Fatal("expired second lease kept media process alive after final live consumer released")}
+ if _,err:=service.RenewDemand(second.Token);err==nil {t.Fatal("expired lease unexpectedly renewed")}
+}
