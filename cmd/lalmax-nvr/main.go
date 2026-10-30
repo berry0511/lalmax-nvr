@@ -399,6 +399,7 @@ func resolveConfigPath(path string) string {
 type App struct {
 	transcodeManager *transcode.Manager
 	transcodeService *transcode.Service
+	transcodeAdapter *media.TranscodeAdapter
 	cfg              *config.Config
 	configPath       string
 	watcher          *config.Watcher
@@ -972,12 +973,21 @@ func (a *App) buildRouter() http.Handler {
 			a.mediaAuth.RestoreInternalStream(id)
 		}
 	}
-	adapter := &media.TranscodeAdapter{Engine: a.mediaEngine, Auth: a.mediaAuth, Config: &transcodeCfg, RegisterOutput: a.db.RegisterTranscodeOutput}
+	adapter := &media.TranscodeAdapter{
+		Engine: a.mediaEngine, Auth: a.mediaAuth, Config: &transcodeCfg,
+		RegisterOutput: a.db.RegisterTranscodeOutput,
+		StopDerivedRecording: func(ctx context.Context, outputID string) error {
+			if a.recTasks == nil { return nil }
+			return a.recTasks.Stop(ctx, outputID, recorder.ReasonStreamDown)
+		},
+	}
+	a.transcodeAdapter = adapter
 	executor := &transcode.BackendExecutor{Adapter: adapter, Config: cfg.Transcoding}
 	a.transcodeManager = transcode.NewManager(context.Background(), executor, cfg.Transcoding.MaxConcurrent)
 	a.transcodeService = transcode.NewService(a.db, a.transcodeManager, handler.TranscodeProbeService(), cfg.Transcoding)
 	handler.SetTranscodeService(a.transcodeService)
 	handler.SetTranscodePlayback(adapter)
+	handler.SetDerivedRecorder(a.recTasks)
 	if a.mediaAuth != nil {
 		handler.SetInternalMediaStreamCheck(a.mediaAuth.InternalPlaybackRequired)
 	}
@@ -1284,6 +1294,14 @@ func (a *App) wireRecordTasks() {
 	}
 	tasks := recorder.NewTaskManager(a.mediaEngine, a.store, a.db, a.metrics, a.eventBus, segDur)
 	tasks.SetOwnerFunc(func(streamID string) recorder.StreamOwner {
+		if a.transcodeAdapter != nil {
+			if source, ok := a.transcodeAdapter.RecordingSource(streamID); ok {
+				return recorder.StreamOwner{
+					CameraID: source.StreamID, Name: source.StreamID,
+					Encoding: "h264", AudioEnabled: true, Derived: true,
+				}
+			}
+		}
 		cam := a.camMgr.CameraByStream(streamID)
 		if cam == nil {
 			return recorder.StreamOwner{CameraID: streamID, Name: streamID}
@@ -1315,6 +1333,10 @@ func (a *App) wireRecordTasks() {
 		return cam.Adaptive.TimelapseIntervalDuration()
 	})
 	tasks.SetSkip(func(streamID string) bool {
+		// Internal derived streams must never start default/event/plan recording.
+		if a.mediaAuth != nil && a.mediaAuth.InternalPlaybackRequired(streamID) {
+			return true
+		}
 		if media.IsSubStreamID(streamID) {
 			return true
 		}
