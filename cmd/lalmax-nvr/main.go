@@ -1516,6 +1516,9 @@ func (a *App) Start() error {
 
 	if a.transcodeService != nil {
 		go a.transcodeService.Run(ctx)
+		if a.apiHandler != nil {
+			go a.apiHandler.RunHAPreload(ctx)
+		}
 	}
 
 	// Start media runtime (optional protocols live behind this boundary)
