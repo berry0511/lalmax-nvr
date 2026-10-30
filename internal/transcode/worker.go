@@ -159,6 +159,9 @@ func StartIsolatedWorker(ctx context.Context, tools ToolPaths, spec JobSpec, wid
     stdin,err:=cmd.StdinPipe()
     if err!=nil{return nil,&Error{Code:"worker_unavailable",Message:"worker control pipe unavailable"}}
     configureProcess(cmd)
+    // exec.Command (unlike CommandContext) forbids a non-nil Cancel callback.
+    // Lifecycle cancellation is supervised through the private stdin pipe.
+    cmd.Cancel=nil
     cmd.WaitDelay=2*time.Second
     owner,err:=startOwnedProcess(cmd)
     if err!=nil{_ = stdin.Close();return nil,&Error{Code:"worker_unavailable",Message:"could not start isolated worker"}}
