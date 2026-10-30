@@ -87,3 +87,11 @@ func TestWorkerRejectsMissingAuthenticationWithoutSpawning(t *testing.T) {
         t.Fatal("unauthenticated worker executed request")
     }
 }
+
+func TestWorkerRejectsOversizedControlFrame(t *testing.T) {
+    t.Setenv(workerKeyEnv,strings.Repeat("4",64))
+    oversized:=strings.Repeat("A",workerFrameLimit+512)+"\n"
+    if err:=RunIsolatedWorker(strings.NewReader(oversized));err==nil {
+        t.Fatal("oversized worker control frame accepted")
+    }
+}
