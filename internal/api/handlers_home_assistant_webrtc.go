@@ -133,7 +133,7 @@ func (h *Handler) requestHomeAssistantWHEP(r *http.Request, method string, targe
 	req.Header.Set("Content-Type", "application/sdp")
 	// The configured engine is trusted, but never forward cookies or follow a
 	// redirect carrying NVR account credentials to another authority.
-	if target.User == nil {
+	if target.User == nil && target.Query().Get("token") == "" {
 		req.Header.Set("Authorization", r.Header.Get("Authorization"))
 	}
 	client := *h.playProxyClient()
@@ -179,10 +179,6 @@ func (h *Handler) handleHomeAssistantWHEP(w http.ResponseWriter, r *http.Request
 		writeError(w, 404, "stream is not published to Home Assistant")
 		return
 	}
-	if cfg.Streams[i].TranscodeJobID != "" {
-		writeError(w, 400, "derived output currently supports RTSP/HLS only")
-		return
-	}
 	app := info.AppName
 	if app == "" {
 		app = cfg.Streams[i].AppName
@@ -190,10 +186,38 @@ func (h *Handler) handleHomeAssistantWHEP(w http.ResponseWriter, r *http.Request
 	if app == "" {
 		app = "live"
 	}
-	upstream, err := h.homeAssistantWHEPURL(r.Context(), sid, app, false)
-	if err != nil {
-		writeError(w, 503, "WebRTC playback unavailable")
-		return
+	var upstream *url.URL
+	var requiredAudio string
+	if selected := cfg.Streams[i].TranscodeJobID; selected != "" {
+		derived, resolveErr := h.resolveDerivedPlayback(r.Context(), sid, selected, "webrtc")
+		if resolveErr != nil {
+			writeDerivedPlaybackError(w, resolveErr, "derived WebRTC output unavailable")
+			return
+		}
+		codec = homeAssistantWebRTCCodec(derived.Stream.VideoCodec)
+		switch strings.ToLower(derived.Stream.AudioCodec) {
+		case "g711a", "pcma": requiredAudio = "PCMA/8000"
+		case "g711u", "pcmu": requiredAudio = "PCMU/8000"
+		case "opus": requiredAudio = "opus/48000/2"
+		default:
+			writeError(w, 422, "derived WebRTC audio requires PCMA, PCMU or Opus; select a G711A output profile")
+			return
+		}
+		if codec == "" {
+			writeError(w, 422, "derived WebRTC output requires H264 or H265")
+			return
+		}
+		upstream, err = url.Parse(derived.URL.URL)
+		if err != nil || upstream.Host == "" || (upstream.Scheme != "http" && upstream.Scheme != "https") {
+			writeError(w, 503, "invalid derived WebRTC playback endpoint")
+			return
+		}
+	} else {
+		upstream, err = h.homeAssistantWHEPURL(r.Context(), sid, app, false)
+		if err != nil {
+			writeError(w, 503, "WebRTC playback unavailable")
+			return
+		}
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil || len(body) == 0 {
@@ -202,6 +226,10 @@ func (h *Handler) handleHomeAssistantWHEP(w http.ResponseWriter, r *http.Request
 	}
 	if !homeAssistantOfferSupportsCodec(body, codec) {
 		writeError(w, 400, "WebRTC offer does not support the stream codec; use HLS or RTSP")
+		return
+	}
+	if requiredAudio != "" && !homeAssistantOfferSupportsAudio(body, requiredAudio) {
+		writeError(w, 400, "WebRTC offer must accept the derived audio codec")
 		return
 	}
 	resp, err := h.requestHomeAssistantWHEP(r, "POST", upstream, strings.NewReader(string(body)))
