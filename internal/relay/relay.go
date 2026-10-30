@@ -82,6 +82,7 @@ type Task struct {
 type TaskStats struct {
 	TaskID       string        `json:"task_id"`
 	StreamID     string        `json:"stream_id"`
+	TranscodeJobID string      `json:"transcode_job_id,omitempty"`
 	TargetURL    string        `json:"target_url"`
 	Status       TaskStatus    `json:"status"`
 	StartedAt    *time.Time    `json:"started_at,omitempty"`
