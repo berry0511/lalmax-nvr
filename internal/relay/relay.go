@@ -117,6 +117,7 @@ type Manager struct {
 	engine media.Engine
 	derivedResolver func(context.Context, string, string) (string, string, error)
 	isInternalStream func(string) bool
+	playbackTokenResolver func(string) string
 
 	mu       sync.RWMutex
 	tasks    map[string]*activeTask
@@ -286,6 +287,31 @@ func (m *Manager) SetDerivedResolver(
     m.isInternalStream = isInternal
 }
 
+// SetPlaybackTokenResolver installs the trusted source playback-token lookup
+// used by ordinary relay pulls. The token is passed only to the media engine;
+// it is never persisted or logged by the relay manager.
+func (m *Manager) SetPlaybackTokenResolver(resolve func(string) string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.playbackTokenResolver = resolve
+}
+
+type relayPlayURLBuilder interface {
+	BuildPlayURL(context.Context, media.PlayURLRequest) (*media.PlayURL, error)
+}
+
+func buildRelaySourcePlayURL(ctx context.Context, engine relayPlayURLBuilder, streamID, token string) (string, error) {
+	playURL, err := engine.BuildPlayURL(ctx, media.PlayURLRequest{
+		StreamID: streamID,
+		Protocol: "rtmp",
+		Token:    token,
+	})
+	if err != nil || playURL == nil || playURL.URL == "" {
+		return "", fmt.Errorf("build play URL failed")
+	}
+	return playURL.URL, nil
+}
+
 // CreateDerivedTask binds relay to a logical transcode job, not an ephemeral
 // internal stream ID. It never creates a new transcoding encoder.
 func (m *Manager) CreateDerivedTask(ctx context.Context, sourceID, jobID, targetURL string) (*Task,error) {
@@ -437,11 +463,14 @@ func (m *Manager) StartTask(ctx context.Context, taskID string) error {
 		if m.isInternalStream != nil && m.isInternalStream(task.StreamID) {
 			return fmt.Errorf("internal stream requires a source-bound transcode job")
 		}
-		pullURL, playErr := m.engine.BuildPlayURL(ctx, media.PlayURLRequest{
-			StreamID: task.StreamID, Protocol: "rtmp",
-		})
-		if playErr != nil || pullURL == nil { return fmt.Errorf("build play URL failed") }
-		pullAddress = pullURL.URL
+		token := ""
+		if m.playbackTokenResolver != nil {
+			token = m.playbackTokenResolver(task.StreamID)
+		}
+		pullAddress, err = buildRelaySourcePlayURL(ctx, m.engine, task.StreamID, token)
+		if err != nil {
+			return err
+		}
 	}
 	streamInfo, err := m.engine.GetStream(ctx, physicalID)
 	if err != nil || streamInfo == nil || !streamInfo.Active {

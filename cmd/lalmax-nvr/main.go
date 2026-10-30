@@ -686,6 +686,9 @@ func NewApp(cfg *config.Config, configPath string) (*App, error) {
 	a.camMgr.SetMediaEngine(engine)
 
 	a.relayMgr = relay.NewManager(db, engine)
+	a.relayMgr.SetPlaybackTokenResolver(func(streamID string) string {
+		return cfg.Auth.PlaybackTokens[streamID]
+	})
 	slog.Info("relay manager started")
 
 	// Set kick function on ban manager (deferred to break circular dependency)

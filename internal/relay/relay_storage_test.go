@@ -6,9 +6,27 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lalmax-pro/lalmax-nvr/internal/media"
 	"github.com/lalmax-pro/lalmax-nvr/internal/storage"
 	"github.com/stretchr/testify/require"
 )
+
+type relayPlayURLTestEngine struct {
+	token string
+}
+
+func (e *relayPlayURLTestEngine) BuildPlayURL(_ context.Context, req media.PlayURLRequest) (*media.PlayURL, error) {
+	e.token = req.Token
+	return &media.PlayURL{URL: "rtmp://127.0.0.1:11935/live/issue66?token=" + req.Token, Protocol: "rtmp"}, nil
+}
+
+func TestRelaySourcePlayURLUsesConfiguredPlaybackToken(t *testing.T) {
+	engine := &relayPlayURLTestEngine{}
+	url, err := buildRelaySourcePlayURL(context.Background(), engine, "issue66", "playback-token")
+	require.NoError(t, err)
+	require.Equal(t, "playback-token", engine.token)
+	require.Equal(t, "rtmp://127.0.0.1:11935/live/issue66?token=playback-token", url)
+}
 
 func TestManagerPersistsTasksThroughRepository(t *testing.T) {
 	db, err := storage.New(filepath.Join(t.TempDir(), "relay.db"))
