@@ -3,8 +3,47 @@
   import { t } from '$lib/i18n';
   import FlvPlayer from '../../components/FlvPlayer.svelte';
   let preview = $state<TranscodeJob | null>(null);
-  import { listTranscodeJobs, listTranscodeProfiles, createTranscodeProfile, updateTranscodeProfile, deleteTranscodeProfile, probeSavedTranscodeProfile, saveTranscodeJob, transcodeJobAction, derivedRecordingAction } from '$lib/api/transcoding';
-  import type { TranscodeProfile, TranscodeJob, TranscodeVariant } from '$lib/api/transcoding';
+  let previewLease = $state<TranscodeDemandLease | null>(null);
+  let previewEpoch = 0;
+  let renewalTimer: ReturnType<typeof setInterval> | undefined;
+  async function closePreview() {
+    previewEpoch++;
+    if (renewalTimer) clearInterval(renewalTimer);
+    renewalTimer = undefined;
+    const lease = previewLease;
+    previewLease = null;
+    preview = null;
+    if (lease) {
+      try { await releaseTranscodeDemandLease(lease.token); }
+      catch { /* lease expiry or shutdown already releases the media owner */ }
+    }
+  }
+  async function openPreview(job: TranscodeJob) {
+    await closePreview();
+    const epoch = previewEpoch;
+    if (job.run_policy === 'on_demand') {
+      const response = await acquireTranscodeDemandLease(job.id, job.generation, 20000);
+      if (controller.signal.aborted || epoch !== previewEpoch) {
+        await releaseTranscodeDemandLease(response.lease.token).catch(() => undefined);
+        return;
+      }
+      previewLease = response.lease;
+      renewalTimer = setInterval(async () => {
+        const lease = previewLease;
+        if (!lease || controller.signal.aborted) return;
+        try {
+          const updated = await renewTranscodeDemandLease(lease.token);
+          if (previewLease?.token === updated.token) previewLease = updated;
+        } catch {
+          await closePreview();
+          if (!controller.signal.aborted) error = '派生流租约已失效，请重新播放';
+        }
+      }, 30000);
+    }
+    preview = job;
+  }
+  import { listTranscodeJobs, listTranscodeProfiles, createTranscodeProfile, updateTranscodeProfile, deleteTranscodeProfile, probeSavedTranscodeProfile, saveTranscodeJob, transcodeJobAction, derivedRecordingAction, acquireTranscodeDemandLease, renewTranscodeDemandLease, releaseTranscodeDemandLease } from '$lib/api/transcoding';
+  import type { TranscodeProfile, TranscodeJob, TranscodeVariant, TranscodeDemandLease } from '$lib/api/transcoding';
   let profiles = $state<TranscodeProfile[]>([]);
   let jobs = $state<TranscodeJob[]>([]);
   let variants = $state<TranscodeVariant[]>([]);
@@ -26,7 +65,7 @@
     const [p, j] = await Promise.all([listTranscodeProfiles(controller.signal), listTranscodeJobs(controller.signal)]);
     if (!controller.signal.aborted) {
       profiles = p.profiles; jobs = j.jobs; variants = j.variants ?? [];
-      if (preview && !variants.some(v => v.job_id === preview!.id && v.state === 'running')) preview = null;
+      if (preview && !variants.some(v => v.job_id === preview!.id && v.state === 'running')) void closePreview();
     }
   }
   async function act(fn: () => Promise<unknown>) {
@@ -91,7 +130,7 @@
     jobID = ''; sourceID = '';
   }
   onMount(() => { void load().catch(e => { if (!controller.signal.aborted) error = e instanceof Error ? e.message : t('transcode.error'); }).finally(() => loading = false); });
-  onDestroy(() => controller.abort());
+  onDestroy(() => { controller.abort(); void closePreview(); });
 </script>
 
 <section class="card p-6 border th-border space-y-4" aria-label={t('transcode.jobs')}>
@@ -157,7 +196,7 @@
       {#if jobs.length === 0}<p class="text-sm th-text-secondary">{t('transcode.noJobs')}</p>{/if}
       {#if preview}
         <div class="space-y-2">
-          <div class="flex justify-between gap-2"><span class="text-sm th-text-primary">{preview.id}</span><button class="btn btn-secondary" onclick={() => preview = null}>{t('transcode.closePreview')}</button></div>
+          <div class="flex justify-between gap-2"><span class="text-sm th-text-primary">{preview.id}</span><button class="btn btn-secondary" onclick={() => void closePreview()}>{t('transcode.closePreview')}</button></div>
           <div class="aspect-video bg-neutral-900 rounded overflow-hidden">
             {#key preview.id}<FlvPlayer allowSnapshotFallback={false} cameraId={preview.source.stream_id} cameraName={preview.id} streamUrl={`/api/streams/${encodeURIComponent(preview.source.stream_id)}/variants/${encodeURIComponent(preview.id)}/stream.flv`} />{/key}
           </div>
@@ -171,7 +210,7 @@
           {#if runtime}<p role="status" class="text-xs th-text-secondary">{runtime.state}{runtime.error_code ? ` · ${runtime.error_code}` : ''}{#if runtime.retry_at} · {t('transcode.retryAt')}: <time datetime={runtime.retry_at}>{new Date(runtime.retry_at).toLocaleString()}</time>{/if}</p>{/if}
           <div class="flex flex-wrap gap-2">
             <button class="btn btn-secondary" onclick={() => act(() => saveTranscodeJob({...job, enabled: !job.enabled}, controller.signal))}>{job.enabled ? t('transcode.disable') : t('transcode.enable')}</button>
-            <button class="btn btn-secondary" disabled={runtime?.state !== 'running' || busy} onclick={() => preview = job}>{t('transcode.preview')}</button>
+            <button class="btn btn-secondary" disabled={busy || (job.run_policy === 'on_demand' ? !job.enabled : runtime?.state !== 'running')} onclick={() => act(() => openPreview(job))}>{t('transcode.preview')}</button>
             <button class="btn btn-secondary" disabled={runtime?.state !== 'running' || busy} onclick={() => act(() => derivedRecordingAction(job, 'start', controller.signal))}>开始派生录像</button>
             <button class="btn btn-secondary" disabled={runtime?.state !== 'running' || busy} onclick={() => act(() => derivedRecordingAction(job, 'stop', controller.signal))}>停止派生录像</button>
             <button class="btn btn-secondary" disabled={!job.enabled || busy || job.run_policy === 'on_demand'} onclick={() => act(() => transcodeJobAction(job, 'start', controller.signal))}>{t('transcode.start')}</button>
