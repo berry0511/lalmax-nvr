@@ -141,10 +141,10 @@
                   {/each}
                 </select>
                 {#if selectedJob && transcodeJobs.some(j => j.id === selectedJob && j.run_policy === 'on_demand')}
-                  <label class="flex items-center gap-2 text-sm th-text-secondary">
+                  <div class="flex items-center gap-2 text-sm th-text-secondary">
                     <input type="checkbox" aria-label={`为 ${stream.name || stream.stream_id} 预加载按需转码`} checked={settings.streams.find(p => p.stream_id === stream.stream_id)?.preload_transcode ?? false} onchange={e => choosePreload(stream.stream_id, e.currentTarget.checked)} />
                     预加载派生视频（HA 发布期间保持一个消费者租约）
-                  </label>
+                  </div>
                 {/if}
                 <span class="text-xs th-text-tertiary">{t('ha.transcodeOutputHint')}</span>
               </label>
