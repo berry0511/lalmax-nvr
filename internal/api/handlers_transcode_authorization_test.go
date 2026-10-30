@@ -67,6 +67,8 @@ func TestHomeAssistantMediaRoutesRequireSourceAuthorization(t *testing.T) {
         {"POST", "/api/transcoding/jobs/job/leases?generation=1"},
         {"POST", "/api/transcoding/leases/renew"},
         {"POST", "/api/transcoding/leases/release"},
+        {"POST", "/api/transcoding/jobs/job/record/start?generation=1"},
+        {"POST", "/api/transcoding/jobs/job/record/stop?generation=1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
