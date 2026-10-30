@@ -43,6 +43,7 @@ export interface StatsHistory {
 
 export interface CreateRelayTaskRequest {
   stream_id: string;
+  transcode_job_id?: string;
   target_url: string;
 }
 
