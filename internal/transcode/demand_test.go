@@ -46,6 +46,13 @@ func TestDemandLeaseSharesOneProcessAndReleasesLastOwner(t *testing.T){
   variant=result.runtime.VariantID
   tokens=append(tokens,result.lease.Token)
  }
+ deadline:=time.After(4*time.Second)
+ for executor.starts.Load()==0 {
+  select {
+  case <-deadline: t.Fatal("backend did not start after demand acquisition")
+  case <-time.After(10*time.Millisecond):
+  }
+ }
  if executor.starts.Load()!=1 {t.Fatalf("wanted one backend start, got %d",executor.starts.Load())}
  for _,token:=range tokens[:len(tokens)-1]{
   if err:=service.ReleaseDemand(context.Background(),token);err!=nil{t.Fatal(err)}
