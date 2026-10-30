@@ -1,7 +1,7 @@
 import { render, fireEvent, cleanup, waitFor } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import HomeAssistantSettings from '$lib/components/HomeAssistantSettings.svelte';
-import { i18nState } from '$lib/i18n';
+import { i18nState, t } from '$lib/i18n';
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
@@ -23,7 +23,7 @@ describe('Home Assistant publication settings', () => {
     await waitFor(() => expect(view.getByLabelText('Playback output for Door')).toBeTruthy());
     expect(view.queryByText('other-low · 720p')).toBeNull();
     await fireEvent.change(view.getByLabelText('Playback output for Door'), {target: {value: 'door-low'}});
-    await fireEvent.click(view.getByText('Save Settings'));
+    await fireEvent.click(view.getByText(t('settings.save')));
     await waitFor(() => expect(fetch.mock.calls.some(([, o]) => o.method === 'PUT')).toBe(true));
     const [, options] = fetch.mock.calls.find(([, o]) => o.method === 'PUT')!;
     expect(JSON.parse(options.body).streams).toEqual([{stream_id: 'door', app_name: 'live', transcode_job_id: 'door-low'}]);
@@ -43,9 +43,9 @@ describe('Home Assistant publication settings', () => {
     vi.stubGlobal('fetch', fetch);
     const view = render(HomeAssistantSettings);
     await waitFor(() => expect(view.getByLabelText('Camera 100')).toBeTruthy());
-    await fireEvent.click(view.getByLabelText('Enable Home Assistant publication'));
-    await fireEvent.input(view.getByPlaceholderText('Search by name or stream ID'), { target: { value: 'Camera 100' } });
-    await fireEvent.click(view.getByText('Publish matching streams'));
+    await fireEvent.click(view.getByLabelText(t('ha.enabled')));
+    await fireEvent.input(view.getByPlaceholderText(t('ha.search')), { target: { value: 'Camera 100' } });
+    await fireEvent.click(view.getByText(t('ha.selectVisible')));
     await fireEvent.click(view.getByText('Save Settings'));
     await waitFor(() => expect(fetch.mock.calls.some(([, options]) => options.method === 'PUT')).toBe(true));
     const call = fetch.mock.calls.find(([, options]) => options.method === 'PUT');
