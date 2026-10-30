@@ -24,6 +24,7 @@ type homeAssistantWHEPSession struct {
 	StreamID   string `json:"stream_id"`
 	InstanceID string `json:"instance_id"`
 	AppName    string `json:"app_name"`
+	Derived    bool   `json:"derived,omitempty"`
 	URL        string `json:"url"`
 	Expires    int64  `json:"expires"`
 }
@@ -125,7 +126,7 @@ func (h *Handler) homeAssistantWHEPURL(ctx context.Context, sid, app string, cle
 	return u, nil
 }
 
-func (h *Handler) requestHomeAssistantWHEP(r *http.Request, method string, target *url.URL, body io.Reader) (*http.Response, error) {
+func (h *Handler) requestHomeAssistantWHEP(r *http.Request, method string, target *url.URL, body io.Reader, allowCallerAuth bool) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(r.Context(), method, target.String(), body)
 	if err != nil {
 		return nil, err
@@ -133,7 +134,7 @@ func (h *Handler) requestHomeAssistantWHEP(r *http.Request, method string, targe
 	req.Header.Set("Content-Type", "application/sdp")
 	// The configured engine is trusted, but never forward cookies or follow a
 	// redirect carrying NVR account credentials to another authority.
-	if target.User == nil && target.Query().Get("token") == "" {
+	if allowCallerAuth && target.User == nil && target.Query().Get("token") == "" {
 		req.Header.Set("Authorization", r.Header.Get("Authorization"))
 	}
 	client := *h.playProxyClient()
@@ -184,8 +185,9 @@ func (h *Handler) handleHomeAssistantWHEP(w http.ResponseWriter, r *http.Request
 	}
 	var upstream *url.URL
 	var requiredAudio string
-	if selected := cfg.Streams[i].TranscodeJobID; selected != "" {
-		derived, resolveErr := h.resolveDerivedPlayback(r.Context(), sid, selected, "webrtc")
+	selectedJob := cfg.Streams[i].TranscodeJobID
+	if selectedJob != "" {
+		derived, resolveErr := h.resolveDerivedPlayback(r.Context(), sid, selectedJob, "webrtc")
 		if resolveErr != nil {
 			writeDerivedPlaybackError(w, resolveErr, "derived WebRTC output unavailable")
 			return
@@ -232,7 +234,7 @@ func (h *Handler) handleHomeAssistantWHEP(w http.ResponseWriter, r *http.Request
 		writeError(w, 400, "WebRTC offer must accept the derived audio codec")
 		return
 	}
-	resp, err := h.requestHomeAssistantWHEP(r, "POST", upstream, strings.NewReader(string(body)))
+	resp, err := h.requestHomeAssistantWHEP(r, "POST", upstream, strings.NewReader(string(body)), selectedJob == "")
 	if err != nil {
 		writeError(w, 502, "WebRTC negotiation failed")
 		return
@@ -262,7 +264,7 @@ func (h *Handler) handleHomeAssistantWHEP(w http.ResponseWriter, r *http.Request
 		cleanup.User = upstream.User
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 		defer cancel()
-		if response, err := h.requestHomeAssistantWHEP(r.WithContext(cleanupCtx), "DELETE", &cleanup, nil); err == nil {
+		if response, err := h.requestHomeAssistantWHEP(r.WithContext(cleanupCtx), "DELETE", &cleanup, nil, selectedJob == ""); err == nil {
 			response.Body.Close()
 		}
 	}()
@@ -271,7 +273,7 @@ func (h *Handler) handleHomeAssistantWHEP(w http.ResponseWriter, r *http.Request
 		writeError(w, 502, "invalid SDP answer")
 		return
 	}
-	token := h.sealHomeAssistantSession(homeAssistantWHEPSession{StreamID: sid, InstanceID: cfg.InstanceID, AppName: app, URL: target.String(), Expires: time.Now().Add(24 * time.Hour).Unix()})
+	token := h.sealHomeAssistantSession(homeAssistantWHEPSession{StreamID: sid, InstanceID: cfg.InstanceID, AppName: app, URL: target.String(), Derived: selectedJob != "", Expires: time.Now().Add(24 * time.Hour).Unix()})
 	w.Header().Set("Content-Type", "application/sdp")
 	w.Header().Set("Location", "/api/integrations/home-assistant/streams/"+url.PathEscape(sid)+"/webrtc/"+token)
 	w.WriteHeader(201)
@@ -301,10 +303,20 @@ func (h *Handler) handleHomeAssistantCloseWHEP(w http.ResponseWriter, r *http.Re
 		writeError(w, 503, "session engine unavailable")
 		return
 	}
-	target.User = base.User
+	if session.Derived {
+		// A signed derived session carries its own scoped media token. Never
+		// substitute the original camera playback or caller credentials.
+		if target.Query().Get("token") == "" {
+			writeError(w, 400, "derived session has no scoped playback token")
+			return
+		}
+		target.User = nil
+	} else {
+		target.User = base.User
+	}
 	// Cleanup remains allowed after unpublication; the signed token can only
 	// delete a session minted for this instance and stream, never create one.
-	resp, err := h.requestHomeAssistantWHEP(r, "DELETE", target, nil)
+	resp, err := h.requestHomeAssistantWHEP(r, "DELETE", target, nil, !session.Derived)
 	if err != nil {
 		writeError(w, 502, "failed to close WebRTC session")
 		return
