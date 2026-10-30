@@ -259,6 +259,19 @@ func (h *Handler) handleHomeAssistantWHEP(w http.ResponseWriter, r *http.Request
 		writeError(w, 502, "invalid WebRTC session origin")
 		return
 	}
+	if selectedJob != "" {
+		// Media engines commonly return a relative WHEP Location without
+		// repeating the playback token. Bind session cleanup to the same
+		// one-time scoped token; reject a different token in the response.
+		scoped := upstream.Query().Get("token")
+		if scoped == "" || (target.Query().Get("token") != "" && target.Query().Get("token") != scoped) {
+			writeError(w, 502, "invalid derived WebRTC session credential")
+			return
+		}
+		query := target.Query()
+		query.Set("token", scoped)
+		target.RawQuery = query.Encode()
+	}
 	target.User, target.Fragment = nil, ""
 	delivered := false
 	defer func() {
