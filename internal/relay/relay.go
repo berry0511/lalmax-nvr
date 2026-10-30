@@ -336,8 +336,7 @@ func (m *Manager) collectTaskStats(ctx context.Context, task *Task, at *activeTa
 	m.mu.Unlock()
 }
 
-// SetDerivedResolver installs a trusted source-bound, playback-token-aware
-// resolver. Only the logical source and job ID are persisted.
+// trackRelayMedia records media actually received by the relay.
 func trackRelayMedia(at *activeTask, msg base.RtmpMsg) {
 	if at == nil || len(msg.Payload) == 0 {
 		return
@@ -360,6 +359,8 @@ func trackRelayMedia(at *activeTask, msg base.RtmpMsg) {
 	}
 }
 
+// SetDerivedResolver installs a trusted source-bound, playback-token-aware
+// resolver. Only the logical source and job ID are persisted.
 func (m *Manager) SetDerivedResolver(
     resolve func(context.Context, string, string) (string, string, error),
     isInternal func(string) bool,
