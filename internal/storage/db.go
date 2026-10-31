@@ -532,6 +532,7 @@ func (d *DB) Init(ctx context.Context) error {
 	relayTasksSQL := `CREATE TABLE IF NOT EXISTS relay_tasks (
 		id TEXT PRIMARY KEY,
 		stream_id TEXT NOT NULL,
+		transcode_job_id TEXT NOT NULL DEFAULT '',
 		target_url TEXT NOT NULL,
 		status TEXT NOT NULL DEFAULT 'stopped',
 		error_msg TEXT DEFAULT '',
@@ -540,6 +541,9 @@ func (d *DB) Init(ctx context.Context) error {
 		stopped_at DATETIME
 	);`
 	if _, err := d.execContext(ctx, relayTasksSQL); err != nil {
+		return err
+	}
+	if err := d.migrateRelayTranscodeJob(ctx); err != nil {
 		return err
 	}
 	_, _ = d.execContext(ctx, "CREATE INDEX IF NOT EXISTS idx_relay_tasks_stream ON relay_tasks(stream_id)")

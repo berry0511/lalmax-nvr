@@ -151,6 +151,7 @@ type Handler struct {
 	isInternalMediaStream func(string) bool
 	transcodePlayback     derivedPlaybackProvider
 	transcodeService      *transcode.Service
+	derivedRecorder       *recorder.TaskManager
 	transcodeProbe        *transcode.ProbeService
 	homeAssistantMu       sync.Mutex
 	homeAssistantWHEPKey  []byte
@@ -510,6 +511,11 @@ func (h *Handler) Routes() http.Handler {
 		r.With(middleware.RequireOperatePermission()).Patch("/api/transcoding/jobs/{id}", h.handleSaveTranscodeJob)
 		r.With(middleware.RequireOperatePermission()).Delete("/api/transcoding/jobs/{id}", h.handleDeleteTranscodeJob)
 		r.With(middleware.RequireOperatePermission()).Post("/api/transcoding/jobs/{id}/start", h.handleStartTranscodeJob)
+		r.With(middleware.RequireOperatePermission()).Post("/api/transcoding/jobs/{id}/record/start", h.handleStartDerivedRecording)
+		r.With(middleware.RequireOperatePermission()).Post("/api/transcoding/jobs/{id}/record/stop", h.handleStopDerivedRecording)
+		r.With(middleware.RequireOperatePermission()).Post("/api/transcoding/jobs/{id}/leases", h.handleAcquireTranscodeDemandLease)
+		r.With(middleware.RequireOperatePermission()).Post("/api/transcoding/leases/renew", h.handleRenewTranscodeDemandLease)
+		r.With(middleware.RequireOperatePermission()).Post("/api/transcoding/leases/release", h.handleReleaseTranscodeDemandLease)
 		r.With(middleware.RequireOperatePermission()).Post("/api/transcoding/jobs/{id}/stop", h.handleStopTranscodeJob)
 		r.With(middleware.RequireOperatePermission()).Get("/api/streams/{stream_id}/variants", h.handleTranscodeVariants)
 		r.With(middleware.RequireOperatePermission()).Get("/api/streams/{stream_id}/variants/{job_id}/play", h.handleTranscodePlayURL)
