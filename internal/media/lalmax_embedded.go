@@ -32,6 +32,7 @@ type EmbeddedLalmaxConfig struct {
 	ConfigPath        string
 	InternalAuthToken string // 仅供 NVR 内部访问 lalmax 控制 API
 	RTMPPort          int
+	RTMPListenAddr    string
 	RTSPPort          int
 	HTTPPort          int
 	RTMPEnabled       bool
@@ -51,11 +52,11 @@ type EmbeddedLalmaxConfig struct {
 	DLNAEnabled           bool
 	HLSIdleTimeoutMs      int
 	// RTSP server auth
-	RTSPAuthEnable bool
+	RTSPAuthEnable        bool
 	RTSPDisableNativeAuth bool // explicit opt-out; do not overwrite legacy JSON auth by default
-	RTSPAuthMethod int
-	RTSPUsername   string
-	RTSPPassword   string
+	RTSPAuthMethod        int
+	RTSPUsername          string
+	RTSPPassword          string
 	// LalLogLevel mirrors observability.log_level (debug/info/warn/error).
 	LalLogLevel string
 	// HTTPTSGOPNum is lal httpts.gop_num. 1 caches the latest GOP.
@@ -78,9 +79,9 @@ type EmbeddedLalmax struct {
 }
 
 type embeddedHookPlugin struct {
-	plugin lalmaxserver.HookPlugin
+	plugin  lalmaxserver.HookPlugin
 	options lalmaxserver.HookPluginOptions
-	cancel func()
+	cancel  func()
 }
 
 func applyEmbeddedPortDefaults(cfg *EmbeddedLalmaxConfig) {
@@ -628,11 +629,15 @@ func loadEmbeddedLalmaxConfig(cfg EmbeddedLalmaxConfig) (*lalmaxconfig.Config, e
 			if srtPort == 0 {
 				srtPort = config.DefaultSRTPort
 			}
+			rtmpAddr := fmt.Sprintf(":%d", rtmpPort)
+			if strings.TrimSpace(cfg.RTMPListenAddr) != "" {
+				rtmpAddr = strings.TrimSpace(cfg.RTMPListenAddr)
+			}
 			if err := patchLalmaxConfig(
 				cfg.ConfigPath,
 				cfg.RTMPEnabled,
 				cfg.SRTEnabled,
-				fmt.Sprintf(":%d", rtmpPort),
+				rtmpAddr,
 				fmt.Sprintf(":%d", srtPort),
 				cfg.HTTPTSGOPNum,
 				cfg.RTSPDisableNativeAuth,
@@ -744,7 +749,9 @@ func patchLalmaxConfig(path string, rtmpEnabled, srtEnabled bool, rtmpAddr, srtA
 			return fmt.Errorf("parse rtsp config: %w", err)
 		}
 	}
-	rtsp["addr"] = fmt.Sprintf(":%d", config.DefaultLalRTSPPort)
+	if addr, _ := rtsp["addr"].(string); addr == "" {
+		rtsp["addr"] = fmt.Sprintf(":%d", config.DefaultLalRTSPPort)
+	}
 	// Preserve existing native RTSP auth unless the operator explicitly opts
 	// out. A missing YAML setting must not silently disable a protected server.
 	if rtspDisableNativeAuth {
@@ -762,7 +769,9 @@ func patchLalmaxConfig(path string, rtmpEnabled, srtEnabled bool, rtmpAddr, srtA
 			return fmt.Errorf("parse default_http config: %w", err)
 		}
 	}
-	defaultHTTP["http_listen_addr"] = fmt.Sprintf(":%d", config.DefaultLalHTTPPort)
+	if addr, _ := defaultHTTP["http_listen_addr"].(string); addr == "" {
+		defaultHTTP["http_listen_addr"] = fmt.Sprintf(":%d", config.DefaultLalHTTPPort)
+	}
 	patchedHTTP, err := json.Marshal(defaultHTTP)
 	if err != nil {
 		return fmt.Errorf("marshal default_http config: %w", err)
@@ -809,7 +818,9 @@ func patchLalmaxConfig(path string, rtmpEnabled, srtEnabled bool, rtmpAddr, srtA
 			return fmt.Errorf("parse http_config: %w", err)
 		}
 	}
-	httpCfg["http_listen_addr"] = fmt.Sprintf(":%d", config.DefaultLalmaxHTTPPort)
+	if addr, _ := httpCfg["http_listen_addr"].(string); addr == "" {
+		httpCfg["http_listen_addr"] = fmt.Sprintf(":%d", config.DefaultLalmaxHTTPPort)
+	}
 	patchedHTTPConfig, err := json.Marshal(httpCfg)
 	if err != nil {
 		return fmt.Errorf("marshal http_config: %w", err)
@@ -1121,6 +1132,9 @@ func embeddedConfigJSON(cfg EmbeddedLalmaxConfig) ([]byte, error) {
 		}
 	}
 	rtmpAddr := fmt.Sprintf(":%d", cfg.RTMPPort)
+	if strings.TrimSpace(cfg.RTMPListenAddr) != "" {
+		rtmpAddr = strings.TrimSpace(cfg.RTMPListenAddr)
+	}
 	srtAddr := fmt.Sprintf(":%d", cfg.SRTPort)
 
 	// Apply defaults for lalmax HLS settings

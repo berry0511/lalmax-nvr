@@ -34,6 +34,7 @@
   import WebRTCPlayer from '../components/WebRTCPlayer.svelte';
   import FlvPlayer from '../components/FlvPlayer.svelte';
   import CopyableStreamURL from '$lib/components/CopyableStreamURL.svelte';
+  import { listStreamTranscodeVariants, listTranscodeJobs, transcodePreviewFLVURL, acquireTranscodeDemandLease, renewTranscodeDemandLease, releaseTranscodeDemandLease, type TranscodeJob, type TranscodeDemandLease, type TranscodeVariant } from '$lib/api/transcoding';
 
   let { streamId = '' }: { streamId?: string } = $props();
 
@@ -66,6 +67,16 @@
   // Default playback protocol from Settings; applied until the user picks one.
   let configuredDefaultProtocol = $state<string>('wasm');
   let userPickedProtocol = $state(false);
+  let selectedVariantJobID = $state(''); // empty = original media stream
+  let transcodeJobs = $state<TranscodeJob[]>([]);
+  let currentDemandLease = $state<TranscodeDemandLease | null>(null);
+  let demandRenewTimer: number | undefined;
+  let demandPollTimer: number | undefined;
+  let outputSelectionSerial = 0;
+  let derivedVariants = $state<TranscodeVariant[]>([]);
+  let derivedVariantsError = $state('');
+  let derivedRequest = 0;
+  let selectedVariant = $derived(derivedVariants.find(v => v.job_id === selectedVariantJobID));
   const webPlayableProtocols = new Set(['hls', 'll-hls', 'flv', 'ws-flv', 'webrtc', 'fmp4', 'wasm']);
 
   // Dialog states
@@ -167,6 +178,74 @@
       error = e instanceof Error ? e.message : t('streams.loadFailed');
     } finally {
       loading = false;
+    }
+  }
+
+  async function loadDerivedVariants() {
+    const request = ++derivedRequest;
+    try {
+      const result = await listStreamTranscodeVariants(streamId);
+      if (request !== derivedRequest) return;
+      derivedVariants = result.variants ?? [];
+      derivedVariantsError = '';
+    } catch (e) {
+      if (request !== derivedRequest) return;
+      // A disabled/unavailable transcode service must never block original playback.
+      // If the user already selected a variant, retain selection and fail closed.
+      derivedVariants = [];
+      derivedVariantsError = e instanceof Error ? e.message : '无法读取派生流';
+    }
+  }
+
+  async function loadTranscodeJobs() {
+    try {
+      const result = await listTranscodeJobs();
+      transcodeJobs = result.jobs ?? [];
+    } catch {
+      transcodeJobs = [];
+    }
+  }
+
+  // Consumer leases are only created by explicit user choice. They are never
+  // attached to the original stream and never start on component mount.
+  async function selectPlaybackOutput(jobID: string) {
+    const serial = ++outputSelectionSerial;
+    const oldLease = currentDemandLease;
+    currentDemandLease = null;
+    selectedVariantJobID = jobID;
+    derivedVariantsError = '';
+    if (oldLease) void releaseTranscodeDemandLease(oldLease.token).catch(() => {});
+    if (!jobID) return;
+    if (!transcodeJobs.length) await loadTranscodeJobs();
+    const job = transcodeJobs.find(j => j.id === jobID);
+    if (job?.run_policy === 'on_demand') {
+      try {
+        const result = await acquireTranscodeDemandLease(job.id, job.generation);
+        if (outputSelectionSerial !== serial) {
+          void releaseTranscodeDemandLease(result.lease.token).catch(() => {});
+          return;
+        }
+        currentDemandLease = result.lease;
+      } catch (e) {
+        if (outputSelectionSerial === serial) {
+          derivedVariantsError = e instanceof Error ? e.message : '按需派生流申请失败';
+        }
+      }
+    }
+    if (outputSelectionSerial === serial) void loadDerivedVariants();
+  }
+
+  async function renewSelectedDemandLease() {
+    const lease = currentDemandLease;
+    if (!lease || selectedVariantJobID !== lease.job_id) return;
+    try {
+      const next = await renewTranscodeDemandLease(lease.token);
+      if (currentDemandLease?.token === lease.token) currentDemandLease = next;
+    } catch {
+      if (currentDemandLease?.token === lease.token) {
+        currentDemandLease = null;
+        derivedVariantsError = '按需租约失效，请重新选择派生输出';
+      }
     }
   }
 
@@ -565,9 +644,8 @@
     console.info('[StreamDetail] player selection', {
       streamId: stream.stream_id,
       selectedProtocol,
-      selectedURL: getPlayerURL(selectedProtocol),
       availableProtocols: available,
-      playURLs: stream.play_urls,
+      // Never print token-bearing media URLs or playback credentials.
     });
   });
 
@@ -584,6 +662,12 @@
       return;
     }
     loadStream();
+    void loadDerivedVariants();
+    void loadTranscodeJobs();
+    demandPollTimer = window.setInterval(() => {
+      if (selectedVariantJobID && !document.hidden) void loadDerivedVariants();
+    }, 2000);
+    demandRenewTimer = window.setInterval(() => { void renewSelectedDemandLease(); }, 45000);
     // Resolve the configured default playback protocol (Settings page).
     getStreamingSettings()
       .then(config => {
@@ -592,12 +676,18 @@
       .catch(() => { /* keep fallback default */ });
     stopEvents = subscribeNvrEvents({ camera_id: streamId }, () => { void loadStream(); }, { debounceMs: 400 });
     refreshTimer = window.setInterval(() => {
+      void loadDerivedVariants();
       void loadStream();
       void loadGBChannelNames().then(names => { gbNames = names; }).catch(() => {});
     }, 15000);
   });
 
   onDestroy(() => {
+    ++outputSelectionSerial;
+    if (demandPollTimer) window.clearInterval(demandPollTimer);
+    if (demandRenewTimer) window.clearInterval(demandRenewTimer);
+    if (currentDemandLease) void releaseTranscodeDemandLease(currentDemandLease.token).catch(() => {});
+    currentDemandLease = null;
     stopEvents?.();
     if (refreshTimer) {
       window.clearInterval(refreshTimer);
@@ -715,7 +805,27 @@
               <Play size={18} />
               {t('streams.player')}
             </h2>
-            {#if stream.play_urls?.length}
+            {#if derivedVariants.length > 0 || selectedVariantJobID}
+              <label class="input-label" for="stream-derived-output">播放输出</label>
+              <select
+                id="stream-derived-output"
+                class="form-input"
+                aria-label="选择原始流或派生流"
+                value={selectedVariantJobID}
+                onchange={e => void selectPlaybackOutput(e.currentTarget.value)}
+              >
+                <option value="">原始流</option>
+                {#each derivedVariants as variant (variant.job_id)}
+                  <option value={variant.job_id}>
+                    派生流 {variant.profile_id} · {variant.job_id} ({variant.state})
+                  </option>
+                {/each}
+                {#if selectedVariantJobID && !selectedVariant}
+                  <option value={selectedVariantJobID}>已选择的派生流（不可用）</option>
+                {/if}
+              </select>
+            {/if}
+            {#if !selectedVariantJobID && stream.play_urls?.length}
               <div class="protocol-selector">
                 {#each getAvailableProtocols() as protocol}
                   <button
@@ -725,7 +835,7 @@
                       console.info('[StreamDetail] protocol click', {
                         streamId: stream.stream_id,
                         protocol,
-                        targetURL: getPlayerURL(protocol),
+                        // No media URL in diagnostics (it can contain bearer credentials).
                       });
                       userPickedProtocol = true;
                       selectedProtocol = protocol;
@@ -738,7 +848,28 @@
             {/if}
           </div>
 
-          {#if canPlay}
+          {#if selectedVariantJobID}
+            <div class="player-container">
+              {#if selectedVariant?.state === 'running' && (!transcodeJobs.some(j => j.id === selectedVariantJobID && j.run_policy === 'on_demand') || currentDemandLease)}
+                {#key stream.stream_id + ':' + selectedVariantJobID}
+                  <FlvPlayer
+                    cameraId={encodedStreamId}
+                    cameraName={displayName + ' · 派生流'}
+                    streamUrl={transcodePreviewFLVURL(stream.stream_id, selectedVariantJobID)}
+                    allowSnapshotFallback={false}
+                    protocol="flv"
+                    expanded={true}
+                  />
+                {/key}
+              {:else}
+                <div class="player-inactive" role="status">
+                  <WifiOff size={40} />
+                  <p>派生输出尚未就绪：{derivedVariantsError || selectedVariant?.error_code || selectedVariant?.state || '不可用'}</p>
+                  <p class="hint">不会自动切回原始流。可在系统设置的转码任务中启动或检查此输出。</p>
+                </div>
+              {/if}
+            </div>
+          {:else if canPlay}
               <div class="player-container">
                 {#if !selectedProtocol}
                   <!-- Resolving the configured default protocol -->

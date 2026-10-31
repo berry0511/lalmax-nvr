@@ -245,6 +245,12 @@ func (d *DB) Init(ctx context.Context) error {
 	if err := d.createVoIPCallTable(ctx); err != nil {
 		return err
 	}
+	if err := d.createHomeAssistantTable(ctx); err != nil {
+		return err
+	}
+	if err := d.createTranscodeTable(ctx); err != nil {
+		return err
+	}
 	// indices
 	idx1 := `CREATE INDEX IF NOT EXISTS idx_recordings_camera ON recordings(camera_id);`
 	idx2 := `CREATE INDEX IF NOT EXISTS idx_recordings_time ON recordings(started_at);`
@@ -529,6 +535,7 @@ func (d *DB) Init(ctx context.Context) error {
 	relayTasksSQL := `CREATE TABLE IF NOT EXISTS relay_tasks (
 		id TEXT PRIMARY KEY,
 		stream_id TEXT NOT NULL,
+		transcode_job_id TEXT NOT NULL DEFAULT '',
 		target_url TEXT NOT NULL,
 		status TEXT NOT NULL DEFAULT 'stopped',
 		error_msg TEXT DEFAULT '',
@@ -537,6 +544,9 @@ func (d *DB) Init(ctx context.Context) error {
 		stopped_at DATETIME
 	);`
 	if _, err := d.execContext(ctx, relayTasksSQL); err != nil {
+		return err
+	}
+	if err := d.migrateRelayTranscodeJob(ctx); err != nil {
 		return err
 	}
 	_, _ = d.execContext(ctx, "CREATE INDEX IF NOT EXISTS idx_relay_tasks_stream ON relay_tasks(stream_id)")
