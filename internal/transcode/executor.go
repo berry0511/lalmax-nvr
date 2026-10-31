@@ -36,6 +36,13 @@ type BackendExecutor struct {
 	Config   Config
 	mu       sync.Mutex
 	reserved map[string]time.Time
+	ready    map[string]*readinessState
+}
+
+type readinessState struct {
+	lastMediaBytes      uint64
+	mediaProgressCount  int
+	lastMediaProgressAt time.Time
 }
 
 func (e *BackendExecutor) Start(ctx context.Context, source SourceRef, p Profile, id string) (Process, error) {
@@ -96,9 +103,20 @@ func (e *BackendExecutor) Start(ctx context.Context, source SourceRef, p Profile
 	if e.reserved == nil {
 		e.reserved = map[string]time.Time{}
 	}
-	e.reserved[id] = time.Now()
+	started := time.Now()
+	e.reserved[id] = started
+	if e.ready == nil {
+		e.ready = map[string]*readinessState{}
+	}
+	e.ready[id] = &readinessState{}
 	e.mu.Unlock()
-	return &reservedProcess{Process: process, cleanup: func() { cleanup(); e.mu.Lock(); delete(e.reserved, id); e.mu.Unlock() }}, nil
+	return &reservedProcess{Process: process, cleanup: func() {
+		cleanup()
+		e.mu.Lock()
+		delete(e.reserved, id)
+		delete(e.ready, id)
+		e.mu.Unlock()
+	}}, nil
 }
 func (e *BackendExecutor) Ready(ctx context.Context, id string) bool {
 	if e.Adapter == nil {
@@ -108,21 +126,50 @@ func (e *BackendExecutor) Ready(ctx context.Context, id string) bool {
 	if err != nil || !observation.Active || observation.VideoCodec != "h264" {
 		return false
 	}
+	now := time.Now()
 	e.mu.Lock()
 	started, ok := e.reserved[id]
-	e.mu.Unlock()
 	if !ok {
+		e.mu.Unlock()
 		return false
 	}
-	if observation.MediaBytes > 0 {
+	state := e.ready[id]
+	if state == nil {
+		// Keep direct test/manual construction of reserved compatible while
+		// still requiring observed progress before reporting ready.
+		state = &readinessState{}
+		e.ready[id] = state
+	}
+	if observation.MediaBytes < state.lastMediaBytes {
+		// A counter reset belongs to a different publisher generation. Do not
+		// accept it until the new generation demonstrates fresh progress.
+		state.mediaProgressCount = 0
+		state.lastMediaBytes = observation.MediaBytes
+	}
+	if observation.MediaBytes > state.lastMediaBytes {
+		state.mediaProgressCount++
+		state.lastMediaProgressAt = now
+		state.lastMediaBytes = observation.MediaBytes
+	}
+	progressCount := state.mediaProgressCount
+	lastProgressAt := state.lastMediaProgressAt
+	e.mu.Unlock()
+
+	// Engine FPS timestamps have second resolution. They are useful when
+	// present, but are not the only readiness signal because some live inputs
+	// legitimately expose media bytes without an FPS sample.
+	freshFrame := !observation.LastFrame.IsZero() &&
+		!observation.LastFrame.Before(started.Truncate(time.Second)) &&
+		!observation.LastFrame.After(now) &&
+		now.Sub(observation.LastFrame) < 5*time.Second
+	if freshFrame {
 		return true
 	}
-	if observation.LastFrame.IsZero() {
-		return false
-	}
-	// Engine frame statistics have second resolution. Compare against the
-	// start's second boundary; output reservation rejects an existing publisher.
-	return ok && !observation.LastFrame.Before(started.Truncate(time.Second)) && time.Since(observation.LastFrame) < 5*time.Second && time.Since(observation.LastFrame) >= 0
+
+	// One non-zero sample can be only FLV metadata/sequence headers. Require
+	// two observed counter advances and keep the last advance fresh; this
+	// proves ongoing media progress without adding a fixed sleep.
+	return progressCount >= 2 && !lastProgressAt.IsZero() && now.Sub(lastProgressAt) < 5*time.Second
 }
 
 type reservedProcess struct {
