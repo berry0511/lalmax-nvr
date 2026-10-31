@@ -139,7 +139,11 @@ func (h *Handler) requestHomeAssistantWHEP(r *http.Request, method string, targe
 	req.Header.Set("Content-Type", "application/sdp")
 	// The configured engine is trusted, but never forward cookies or follow a
 	// redirect carrying NVR account credentials to another authority.
-	if allowCallerAuth && target.User == nil && target.Query().Get("token") == "" {
+	if allowCallerAuth && target.User == nil {
+		// The embedded media HTTP surface may require the same operator
+		// authorization as the NVR API even when the playback token is
+		// scoped to a derived physical stream. The target was resolved from
+		// the trusted configured engine and redirects are disabled below.
 		req.Header.Set("Authorization", r.Header.Get("Authorization"))
 	}
 	client := *h.playProxyClient()
@@ -239,7 +243,7 @@ func (h *Handler) handleHomeAssistantWHEP(w http.ResponseWriter, r *http.Request
 		writeError(w, 400, "WebRTC offer must accept the derived audio codec")
 		return
 	}
-	resp, err := h.requestHomeAssistantWHEP(r, "POST", upstream, strings.NewReader(string(body)), selectedJob == "")
+	resp, err := h.requestHomeAssistantWHEP(r, "POST", upstream, strings.NewReader(string(body)), true)
 	if err != nil {
 		writeError(w, 502, "WebRTC negotiation failed")
 		return
