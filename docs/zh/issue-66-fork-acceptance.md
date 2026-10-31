@@ -19,13 +19,13 @@
 6. 创建两个同源同有效模板的消费者；确认共用一个物理工作进程，关闭一个仍可解码，关闭最后一个后旧派生输出失效。
 7. 测试源断流、恢复、NVR 重启、错误格式、RTMP 关闭、配额超限、错误音轨和权限拒绝；确认无遗留 FFmpeg/GStreamer 子进程。
 8. 验证 HA 发布派生 RTSP 的逻辑源 ID、云台、事件和录像查询仍指向**原始摄像头**；不能暴露内部物理输出名称或流密钥。
-9. 用浏览器验证 FLV H.264/AAC 实际连续播放；WebRTC 有声支持仍需按 Issue #66 单独验收，不得将 AAC 等同 Opus。
+9. 区分两条播放路径：StreamDetail 派生预览仍是 HTTP-FLV/mpegts.js，PCMA 音频不支持，不能冒充 WHEP；第六轮已用 Chromium 直接验证 NVR 侧 HA-WHEP 的 H.264 + PCMA/8000、ICE/DTLS、RTP、视频解码和 Web Audio 非静音采样。
 10. 验收记录应包含：Commit、系统架构、后端版本、输入输出编解码、首次成功画面时间、异常恢复时间、进程数及失败记录。
 
 ## 自动化检查
 
-Fork PR 的 Build、Transcode Windows 和新增 transcode-media CI 检查必须通过。媒体 CI 使用真实 FFmpeg/GStreamer 进程，但只涵盖合成输入，不能替代真机、真实 HA 和长期运行。
+Fork PR 的 Build、Transcode Windows、transcode-media、前端及跨平台构建必须通过。第六轮原生 Linux 证据还使用真实 FFmpeg/GStreamer 进程完成实际媒体和解码；这些证据仍不能替代生产源、真实 Home Assistant 和长期运行。
 
 ## 仍不能按首批通过推断的范围
 
-按需租约和 HA 预加载、WebRTC 有声音频协商、硬件编码、多档共享解码、派生录像/转推、独立 worker 认证隔离、历史录像离线转码，属于 Issue #66 的后续独立验收门禁，未经实际实现与验证不得标为通过。
+真实 Home Assistant 实例集成仍为 `BLOCKED_ENVIRONMENT`；硬件编码、多档共享解码、派生录像/转推、独立 worker 认证隔离、历史录像离线转码，属于后续独立验收门禁，未经实际实现与验证不得标为通过。WebRTC 有声协商已在 NVR 侧 HA-WHEP 范围内通过，但不等同于真实 Home Assistant 客户端验收。
