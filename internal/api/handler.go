@@ -1071,10 +1071,15 @@ func (h *Handler) mediaPlayURL(ctx context.Context, cameraID, protocol string) (
 	if h.mediaEngine == nil {
 		return nil, nil
 	}
+	token := ""
+	if h.config != nil {
+		token = h.config.Auth.PlaybackTokens[cameraID]
+	}
 	playURL, err := h.mediaEngine.BuildPlayURL(ctx, media.PlayURLRequest{
 		StreamID: cameraID,
 		AppName:  "live",
 		Protocol: protocol,
+		Token:    token,
 	})
 	if err != nil || playURL == nil || playURL.URL == "" {
 		return nil, err
