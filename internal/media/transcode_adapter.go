@@ -122,7 +122,14 @@ func (a *TranscodeAdapter) Observe(ctx context.Context, id string) (transcode.Ou
 	if info == nil {
 		return transcode.OutputObservation{}, nil
 	}
-	return transcode.OutputObservation{Active: info.Active, VideoCodec: strings.ToLower(info.VideoCodec), LastFrame: info.LastFrameTime}, nil
+	var mediaBytes uint64
+	if info.Publisher != nil {
+		mediaBytes = info.Publisher.WroteBytesSum
+		if info.Publisher.ReadBytesSum > mediaBytes {
+			mediaBytes = info.Publisher.ReadBytesSum
+		}
+	}
+	return transcode.OutputObservation{Active: info.Active, VideoCodec: strings.ToLower(info.VideoCodec), LastFrame: info.LastFrameTime, MediaBytes: mediaBytes}, nil
 }
 func (a *TranscodeAdapter) Release(ctx context.Context, id string) error {
 	a.mu.Lock()

@@ -342,7 +342,11 @@ func (h *Handler) handleHomeAssistantCloseWHEP(w http.ResponseWriter, r *http.Re
 	}
 	// Cleanup remains allowed after unpublication; the signed token can only
 	// delete a session minted for this instance and stream, never create one.
-	resp, err := h.requestHomeAssistantWHEP(r, "DELETE", target, nil, !session.Derived)
+	// The embedded WHEP HTTP route is protected by the trusted operator
+	// middleware in addition to the scoped playback token. The token binds
+	// the derived stream/session; the local operator auth authorizes the
+	// server-to-server DELETE without exposing the token to the caller.
+	resp, err := h.requestHomeAssistantWHEP(r, "DELETE", target, nil, true)
 	if err != nil {
 		writeError(w, 502, "failed to close WebRTC session")
 		return

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strconv"
-	"strings"
 )
 
 // gstProperty quotes values for GStreamer's pipeline parser (not a shell).
@@ -18,7 +17,7 @@ func GStreamerArgs(spec JobSpec, width, height int) ([]string, error) {
 	if err := spec.validate("gstreamer"); err != nil {
 		return nil, err
 	}
-	video := strings.ToLower(strings.TrimSpace(spec.VideoCodec))
+	video := normalizeObservedCodec(spec.VideoCodec)
 	codec := "H264"
 	depay := "rtph264depay"
 	parser := "h264parse"
@@ -39,7 +38,7 @@ func GStreamerArgs(spec JobSpec, width, height int) ([]string, error) {
 		args = append(args, "!", decoder, "!", "videoconvert", "!", "videoscale", "!", "videorate", "!", fmt.Sprintf("video/x-raw,format=I420,width=%d,height=%d,framerate=%d/1,pixel-aspect-ratio=1/1", w, h, v.FPS), "!", "x264enc", "tune=zerolatency", "speed-preset=veryfast", "bframes=0", "threads="+strconv.Itoa(spec.Threads), "bitrate="+strconv.Itoa(v.BitrateKbps), "key-int-max="+strconv.Itoa(v.GOPFrames), "!", "h264parse")
 	}
 	args = append(args, "!", "video/x-h264,stream-format=avc,alignment=au", "!", "queue", "!", "mux.video")
-	audio := strings.ToLower(strings.TrimSpace(spec.AudioCodec))
+	audio := normalizeObservedCodec(spec.AudioCodec)
 	a := spec.Profile.Audio
 	if audio == "" || a.Codec == "none" {
 		return args, nil

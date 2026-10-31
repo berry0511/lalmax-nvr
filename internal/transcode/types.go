@@ -204,11 +204,27 @@ const (
 	Failed          State = "failed"
 )
 
+// normalizeObservedCodec maps codec names emitted by media engines to the
+// canonical names used by the fixed transcode templates. In particular, lal
+// reports G.711 A-law as PCMA while profiles use g711a.
+func normalizeObservedCodec(codec string) string {
+	switch strings.ToLower(strings.TrimSpace(codec)) {
+	case "pcma", "g.711a", "g711-a", "alaw":
+		return "g711a"
+	case "pcmu", "g.711u", "g711-u", "mulaw":
+		return "g711u"
+	case "mpeg4-generic", "aac-lc":
+		return "aac"
+	default:
+		return strings.ToLower(strings.TrimSpace(codec))
+	}
+}
+
 // CheckMedia validates copy modes against observed input codecs. Copy is not a
 // promise that any input is compatible with the fixed H.264/AAC FLV output path.
 func (p Profile) CheckMedia(videoCodec, audioCodec string) error {
-	videoCodec = strings.ToLower(strings.TrimSpace(videoCodec))
-	audioCodec = strings.ToLower(strings.TrimSpace(audioCodec))
+	videoCodec = normalizeObservedCodec(videoCodec)
+	audioCodec = normalizeObservedCodec(audioCodec)
 	if err := p.Validate(); err != nil {
 		return err
 	}

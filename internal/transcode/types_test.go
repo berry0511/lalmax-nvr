@@ -87,6 +87,16 @@ func TestWorkKey(t *testing.T) {
 	}
 }
 
+func TestObservedCodecAliasesAreCanonicalized(t *testing.T) {
+	p := testProfile(t)
+	p.Audio = AudioSpec{Codec: "g711a", SampleRate: 8000, Channels: 1, BitrateKbps: 64}
+	for _, alias := range []string{"pcma", "g711a", "G.711A", "alaw"} {
+		if err := p.CheckMedia("H264", alias); err != nil {
+			t.Fatalf("codec alias %q rejected: %v", alias, err)
+		}
+	}
+}
+
 func TestCopyMediaConstraints(t *testing.T) {
 	p := testProfile(t)
 	p.Video = VideoSpec{Codec: "copy"}

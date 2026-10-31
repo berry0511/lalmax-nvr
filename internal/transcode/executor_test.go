@@ -31,6 +31,14 @@ func TestExecutorFailedStartReleasesReservation(t *testing.T) {
 		t.Fatalf("reservation leak: err=%v reserved=%d released=%d", err, a.reserved, a.released)
 	}
 }
+func TestExecutorAcceptsObservedMediaBytesWithoutFPSClock(t *testing.T) {
+	a := &adapterStub{observation: OutputObservation{Active: true, VideoCodec: "h264", MediaBytes: 128}}
+	e := &BackendExecutor{Adapter: a, reserved: map[string]time.Time{"output": time.Now()}}
+	if !e.Ready(context.Background(), "output") {
+		t.Fatal("observed media bytes rejected without FPS timestamp")
+	}
+}
+
 func TestExecutorRequiresFreshOutputMedia(t *testing.T) {
 	started := time.Now().Add(-time.Second)
 	a := &adapterStub{observation: OutputObservation{Active: true, VideoCodec: "h264", LastFrame: time.Now()}}
@@ -47,6 +55,7 @@ func TestExecutorRequiresFreshOutputMedia(t *testing.T) {
 		t.Fatal("previous publisher counted as ready")
 	}
 	a.observation.LastFrame = time.Now()
+	a.observation.MediaBytes = 0
 	a.observation.VideoCodec = "h265"
 	if e.Ready(context.Background(), "output") {
 		t.Fatal("wrong codec counted as ready")

@@ -19,6 +19,7 @@ type OutputObservation struct {
 	Active     bool
 	VideoCodec string
 	LastFrame  time.Time
+	MediaBytes uint64
 }
 
 // MediaAdapter owns engine routing, authorization, and internal-output registry.
@@ -45,6 +46,8 @@ func (e *BackendExecutor) Start(ctx context.Context, source SourceRef, p Profile
 	if err != nil {
 		return nil, err
 	}
+	input.VideoCodec = normalizeObservedCodec(input.VideoCodec)
+	input.AudioCodec = normalizeObservedCodec(input.AudioCodec)
 	if err = p.CheckMedia(input.VideoCodec, input.AudioCodec); err != nil {
 		return nil, err
 	}
@@ -108,6 +111,15 @@ func (e *BackendExecutor) Ready(ctx context.Context, id string) bool {
 	e.mu.Lock()
 	started, ok := e.reserved[id]
 	e.mu.Unlock()
+	if !ok {
+		return false
+	}
+	if observation.MediaBytes > 0 {
+		return true
+	}
+	if observation.LastFrame.IsZero() {
+		return false
+	}
 	// Engine frame statistics have second resolution. Compare against the
 	// start's second boundary; output reservation rejects an existing publisher.
 	return ok && !observation.LastFrame.Before(started.Truncate(time.Second)) && time.Since(observation.LastFrame) < 5*time.Second && time.Since(observation.LastFrame) >= 0
