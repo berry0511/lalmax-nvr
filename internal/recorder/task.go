@@ -35,6 +35,7 @@ type StreamOwner struct {
 	Encoding     string
 	AudioEnabled bool
 	RTSPURL      string
+	Derived      bool // Only explicit derived recordings; never try unauthenticated RTSP fallback.
 }
 
 // StreamOwnerFunc resolves a stream to a recording owner. CameraID may equal StreamID for plan-only streams.
@@ -126,7 +127,17 @@ func (m *TaskManager) SetLifecycleHooks(onStart, onStop func(streamID string, re
 }
 
 // Ensure starts a record task for streamID if one is not already running.
-func (m *TaskManager) Ensure(ctx context.Context, streamID string) (retErr error) {
+func (m *TaskManager) Ensure(ctx context.Context, streamID string) error {
+    return m.ensure(ctx, streamID, false)
+}
+
+// EnsureDerived is only for an already authorized physical derived output.
+// It bypasses the automatic-recording skip predicate, but never starts media.
+func (m *TaskManager) EnsureDerived(ctx context.Context, streamID string) error {
+    return m.ensure(ctx, streamID, true)
+}
+
+func (m *TaskManager) ensure(ctx context.Context, streamID string, explicitDerived bool) (retErr error) {
 	if m == nil {
 		return fmt.Errorf("record task manager not configured")
 	}
@@ -143,7 +154,7 @@ func (m *TaskManager) Ensure(ctx context.Context, streamID string) (retErr error
 	}
 
 	m.mu.Lock()
-	if m.skip != nil && m.skip(streamID) {
+	if !explicitDerived && m.skip != nil && m.skip(streamID) {
 		m.mu.Unlock()
 		return nil
 	}
@@ -330,7 +341,7 @@ func (m *TaskManager) OnStreamUp(ctx context.Context, streamID string) {
 }
 
 func (m *TaskManager) newRecorder(ctx context.Context, streamID string) (model.Recorder, error) {
-	owner := StreamOwner{CameraID: streamID, Name: streamID, AudioEnabled: true}
+	owner := StreamOwner{CameraID: streamID, Name: streamID}
 	m.mu.Lock()
 	ownerFn := m.ownerOf
 	m.mu.Unlock()
@@ -345,7 +356,7 @@ func (m *TaskManager) newRecorder(ctx context.Context, streamID string) (model.R
 	modeFn := m.planMode
 	adaptFn := m.adaptEvery
 	m.mu.Unlock()
-	if owner.RTSPURL == "" && playURL != nil {
+	if owner.RTSPURL == "" && playURL != nil && !owner.Derived {
 		owner.RTSPURL = playURL(ctx, streamID)
 	}
 
