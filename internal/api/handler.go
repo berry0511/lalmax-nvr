@@ -148,6 +148,11 @@ type snapshotCache struct {
 // Handler holds dependencies for the REST API handlers.
 
 type Handler struct {
+	sfuBridges            SFUBridgeRegistry
+	sfuRooms              SFURoomManager
+	sfuSignaling          http.Handler
+	sfuTickets            SFUTicketIssuer
+	sfuWHEPKey            []byte
 	isInternalMediaStream func(string) bool
 	transcodePlayback     derivedPlaybackProvider
 	transcodeService      *transcode.Service
@@ -294,6 +299,7 @@ func NewHandler(db storage.APIRepository, store *storage.Manager, authMW func(ht
 		},
 		transcodeProbe:       transcode.NewProbeService(nil),
 		homeAssistantWHEPKey: []byte(rand.Text()),
+		sfuWHEPKey:           []byte(rand.Text()),
 		eventHub: event.NewLiveHub(),
 		logRing:  middleware.DefaultLogRing(),
 	}
@@ -378,6 +384,15 @@ func (h *Handler) Routes() http.Handler {
 	r.Post("/api/auth/login", h.handleLogin)
 	r.Post("/api/setup", h.handleSetup)
 	r.Get("/api/setup/directories", h.handleSetupDirectories)
+	// Authentication for this WebSocket is a short-lived, single-use ticket;
+	// the signaling handler validates both the ticket and its Origin.
+	r.Get("/api/sfu/ws", h.handleSFUSignaling)
+	r.Get("/sfu-meet", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/sfu-meet/", http.StatusTemporaryRedirect)
+	})
+	r.Get("/sfu-meet/", h.serveSFUMeet)
+	r.Get("/sfu-meet/app.js", h.serveSFUMeet)
+	r.Get("/sfu-meet/style.css", h.serveSFUMeet)
 
 	// Protected routes
 	r.Group(func(r chi.Router) {
@@ -386,6 +401,25 @@ func (h *Handler) Routes() http.Handler {
 		} else {
 			r.Use(h.authMW)
 		}
+		r.Route("/api/sfu/bridges", func(r chi.Router) {
+			r.Use(middleware.RequireOperatePermission())
+			r.Get("/", h.listSFUBridges)
+			r.Post("/", h.createSFUBridge)
+			r.Get("/{id}", h.getSFUBridge)
+			r.Get("/{id}/playback", h.getSFUBridgePlayback)
+			r.Post("/{id}/whep", h.createSFUBridgeWHEP)
+			r.Delete("/{id}/whep/{session}", h.deleteSFUBridgeWHEP)
+			r.Post("/{id}/stop", h.stopSFUBridge)
+			r.Delete("/{id}", h.removeSFUBridge)
+		})
+		r.With(middleware.RequireOperatePermission()).Post("/api/sfu/ticket", h.createSFUTicket)
+		r.With(middleware.RequireOperatePermission()).Get("/api/sfu/bridge-requests", h.getSFUBridgeRequest)
+		r.Route("/api/sfu/rooms", func(r chi.Router) {
+			r.Use(middleware.RequireOperatePermission())
+			r.Get("/", h.listSFURooms)
+			r.Post("/", h.createSFURoom)
+			r.Delete("/{id}", h.closeSFURoom)
+		})
 		// Account-level UI preferences are private to the authenticated user.
 		r.Get("/api/users/me/preferences/{namespace}", h.userPreference)
 		r.Put("/api/users/me/preferences/{namespace}", h.userPreference)

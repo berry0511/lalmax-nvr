@@ -840,7 +840,11 @@
   }
 
   function handleCameraAdded() {
-    loadOnvifCameras();
+    if (activeTab === 'xiaomi') {
+      loadXiaomiCameras();
+    } else {
+      loadOnvifCameras();
+    }
     showDiscovery = false;
   }
 
@@ -1352,7 +1356,7 @@
         <DiscoveryPanel 
           bind:this={discoveryPanel}
           protocol={activeTab === 'onvif' ? 'onvif' : 'xiaomi'}
-          cameras={onvifCameras}
+          cameras={activeTab === 'xiaomi' ? xiaomiCameras : onvifCameras}
           oncameraadded={handleCameraAdded}
           onselectdevice={handleONVIFDeviceSelected}
         />
