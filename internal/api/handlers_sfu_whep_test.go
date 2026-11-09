@@ -70,6 +70,11 @@ func TestSFUBridgeWHEPProxyScopesSessionAndHidesCredential(t *testing.T) {
 		if r.Header.Get("Cookie") != "" {
 			t.Error("cookie forwarded")
 		}
+		// Preserve operator authentication for trusted embedded media calls.
+		// The helper disables redirects and never forwards browser cookies.
+		if got := r.Header.Get("Authorization"); got != "Basic test" {
+			t.Errorf("trusted WHEP authorization not forwarded: %q", got)
+		}
 		if r.Method == http.MethodDelete {
 			if r.URL.Path != "/webrtc/whep/"+id {
 				t.Errorf("wrong delete path %s", r.URL.Path)
