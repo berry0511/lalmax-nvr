@@ -2,35 +2,12 @@
   import { onMount, onDestroy } from 'svelte';
   import { t } from '$lib/i18n';
   import { logout } from '$lib/api';
-  import { getEffectiveTheme } from '$lib/preferences';
+  import { getEffectiveTheme, getPreference, setPreference } from '$lib/preferences';
+  import SidebarNav from './SidebarNav.svelte';
   import LanguageSwitcher from './LanguageSwitcher.svelte';
   import ThemeToggle from './ThemeToggle.svelte';
   import Toast from './Toast.svelte';
-  import {
-    ArrowLeft,
-    Menu,
-    LogOut,
-    LayoutDashboard,
-    Monitor,
-    FolderTree,
-    Network,
-    Film,
-    CalendarClock,
-    Bell,
-    Radio,
-    Link,
-    BarChart3,
-    Phone,
-    Settings,
-    ChevronLeft,
-    ChevronRight,
-    X,
-    Users,
-    ClipboardList,
-    Brain,
-    Send,
-    MapPin,
-  } from 'lucide-svelte';
+  import { ArrowLeft, Menu, LogOut, ChevronLeft, ChevronRight, X } from 'lucide-svelte';
 
   // Props
   let {
@@ -47,8 +24,14 @@
   let sidebarCollapsed = $state(false);
   let mobileMenuOpen = $state(false);
 
+  function syncSidebarWidth() {
+    document.documentElement.style.setProperty('--nvr-sidebar-width', sidebarCollapsed ? '64px' : '240px');
+  }
+
   function toggleSidebar() {
     sidebarCollapsed = !sidebarCollapsed;
+    setPreference('sidebar_collapsed', sidebarCollapsed);
+    syncSidebarWidth();
   }
 
   function toggleMobileMenu() {
@@ -57,6 +40,10 @@
 
   function closeMobileMenu() {
     mobileMenuOpen = false;
+  }
+
+  function handleEscape(event: KeyboardEvent) {
+    if (event.key === 'Escape') closeMobileMenu();
   }
 
   function handleNavClick() {
@@ -74,42 +61,19 @@
     const effectiveTheme = getEffectiveTheme();
     document.documentElement.setAttribute('data-theme', effectiveTheme);
 
+    sidebarCollapsed = getPreference<boolean>('sidebar_collapsed', false);
+    syncSidebarWidth();
     // Sync active route from current hash
     handleHashChange();
     window.addEventListener('hashchange', handleHashChange);
+    window.addEventListener('keydown', handleEscape);
   });
 
   onDestroy(() => {
     window.removeEventListener('hashchange', handleHashChange);
+    window.removeEventListener('keydown', handleEscape);
+    document.documentElement.style.removeProperty('--nvr-sidebar-width');
   });
-
-  // Navigation items with icons
-  const navItems = [
-    { href: '#/dashboard', labelKey: 'nav.dashboard', route: '/dashboard', icon: LayoutDashboard },
-    { href: '#/devices', labelKey: 'nav.devices', route: '/devices', icon: Monitor },
-    { href: '#/map', labelKey: 'nav.map', route: '/map', icon: MapPin },
-    { href: '#/device-groups', labelKey: 'nav.device_groups', route: '/device-groups', icon: FolderTree },
-    { href: '#/gb-channels', labelKey: 'nav.gb_channels', route: '/gb-channels', icon: Network },
-    { href: '#/media-sources', labelKey: 'nav.media_sources', route: '/media-sources', icon: Link },
-    { href: '#/recordings', labelKey: 'nav.recordings', route: '/recordings', icon: Film },
-    { href: '#/recording-plans', labelKey: 'nav.recording_plans', route: '/recording-plans', icon: CalendarClock },
-    { href: '#/events', labelKey: 'nav.events', route: '/events', icon: Bell },
-    { href: '#/streams', labelKey: 'nav.streams', route: '/streams', icon: Radio },
-    { href: '#/relay', labelKey: 'nav.relay', route: '/relay', icon: Send },
-    { href: '#/ai', labelKey: 'nav.ai_detection', route: '/ai', icon: Brain },
-    { href: '#/users', labelKey: 'nav.users', route: '/users', icon: Users },
-    { href: '#/logs', labelKey: 'nav.logs', route: '/logs', icon: ClipboardList },
-    { href: '#/stats', labelKey: 'nav.stats', route: '/stats', icon: BarChart3 },
-    { href: '#/voip', labelKey: 'nav.voip', route: '/voip', icon: Phone },
-    { href: '/sfu-meet/', labelKey: 'nav.sfu', route: '/sfu-meet', icon: Radio },
-    { href: '#/settings', labelKey: 'nav.settings', route: '/settings', icon: Settings },
-  ];
-
-  function isActive(route: string): boolean {
-    const currentPath = activeRoute.split('?')[0];
-    if (route === '/media-sources' && (currentPath === '/iptv' || currentPath === '/emby')) return true;
-    return currentPath === route || currentPath.startsWith(route + '/');
-  }
 
   function goBack() {
     window.history.back();
@@ -168,23 +132,7 @@
     {/if}
   </button>
   
-  <nav class="sidebar-nav">
-    {#each navItems as item}
-      {@const Icon = item.icon}
-      <a
-        href={item.href}
-        class="sidebar-link"
-        class:active={isActive(item.route)}
-        title={sidebarCollapsed ? t(item.labelKey) : ''}
-        onclick={handleNavClick}
-      >
-        <Icon size={20} class="sidebar-icon" />
-        {#if !sidebarCollapsed}
-          <span class="sidebar-label">{t(item.labelKey)}</span>
-        {/if}
-      </a>
-    {/each}
-  </nav>
+  <SidebarNav activeRoute={activeRoute} collapsed={sidebarCollapsed} mobileOpen={mobileMenuOpen} onNavigate={handleNavClick} />
 </aside>
 
 <!-- Toast container -->
@@ -319,7 +267,7 @@
     display: flex;
     flex-direction: column;
     transition: width var(--duration-normal) var(--ease-out);
-    overflow: hidden;
+    overflow: visible;
   }
 
   .sidebar.collapsed {
@@ -331,11 +279,16 @@
     .sidebar {
       transform: translateX(-100%);
       box-shadow: var(--shadow-lg);
+      overflow: hidden;
+      width: 240px;
     }
 
     .sidebar.mobile-open {
       transform: translateX(0);
+      width: 240px;
     }
+
+    .sidebar.collapsed { width: 240px; }
   }
 
   /* Desktop sidebar */
@@ -370,77 +323,4 @@
     border-color: var(--color-primary);
   }
 
-  /* Sidebar navigation */
-  .sidebar-nav {
-    flex: 1;
-    overflow-y: auto;
-    padding: 0.5rem;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .sidebar-link {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.75rem;
-    border-radius: var(--radius-md);
-    color: var(--text-secondary);
-    text-decoration: none;
-    font-size: 0.875rem;
-    font-weight: 500;
-    transition: all var(--duration-fast) var(--ease-out);
-    white-space: nowrap;
-    border: 1px solid transparent;
-  }
-
-  .sidebar-link:hover {
-    color: var(--text-primary);
-    background-color: var(--bg-tertiary);
-    border-color: var(--border);
-  }
-
-  .sidebar-link.active {
-    color: #ffffff;
-    background: var(--color-primary);
-    border-color: var(--color-primary);
-    box-shadow: 0 2px 8px rgba(139, 92, 246, 0.3);
-  }
-
-  .sidebar-link.active:hover {
-    background: var(--color-primary-hover, var(--color-primary));
-  }
-
-  .sidebar.collapsed .sidebar-link {
-    justify-content: center;
-    padding: 0.75rem;
-  }
-
-  .sidebar.collapsed .sidebar-link :global(.sidebar-icon) {
-    margin: 0;
-  }
-
-  .sidebar-label {
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  /* Scrollbar styling */
-  .sidebar-nav::-webkit-scrollbar {
-    width: 4px;
-  }
-
-  .sidebar-nav::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  .sidebar-nav::-webkit-scrollbar-thumb {
-    background: var(--border);
-    border-radius: 2px;
-  }
-
-  .sidebar-nav::-webkit-scrollbar-thumb:hover {
-    background: var(--text-muted);
-  }
 </style>
