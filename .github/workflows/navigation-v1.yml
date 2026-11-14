@@ -1,0 +1,32 @@
+name: Navigation V1 frontend regressions
+
+on:
+  pull_request:
+    paths:
+      - 'web/**'
+      - '.github/workflows/navigation-v1.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+      - name: Install locked frontend dependencies
+        run: npm ci
+      - name: Full frontend unit and component tests
+        run: npm test
+      - name: Production frontend build
+        run: npm run build
