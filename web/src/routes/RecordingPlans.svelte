@@ -318,6 +318,7 @@
   .page {
     padding: 1.5rem 1.75rem 2.5rem;
     max-width: 960px;
+    margin-inline: auto;
   }
   .page-header {
     display: flex;
