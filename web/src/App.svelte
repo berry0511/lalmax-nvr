@@ -334,7 +334,8 @@
 
 <style>
   .main-content {
-    margin-left: 240px;
+    /* Kept in sync with Header's persisted 240px/64px sidebar state. */
+    margin-left: var(--nvr-sidebar-width, 240px);
     margin-top: 56px;
     min-height: calc(100vh - 56px);
     transition: margin-left var(--duration-normal) var(--ease-out);
