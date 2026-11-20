@@ -2912,9 +2912,9 @@ func TestApi2SysCameraStartStopErrors(t *testing.T) {
 	rr := doRequest(t, h.Routes(), "POST", "/api/cameras/missing/start", nil, "", "")
 	api2sysStatus(t, rr, http.StatusNotFound)
 
-	// StopCamera reports an untyped error when no recorder is running.
+	// StopCamera returns not found only for an unknown camera.
 	rr = doRequest(t, h.Routes(), "POST", "/api/cameras/missing/stop", nil, "", "")
-	api2sysStatus(t, rr, http.StatusInternalServerError)
+	api2sysStatus(t, rr, http.StatusNotFound)
 
 	rr = doRequest(t, h.Routes(), "POST", "/api/cameras/missing/pause-recording", nil, "", "")
 	api2sysStatus(t, rr, http.StatusNotFound)

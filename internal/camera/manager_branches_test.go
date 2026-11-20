@@ -1055,11 +1055,11 @@ func TestCam2StartCameraStopCameraBranches(t *testing.T) {
 	require.ErrorContains(t, startErr, "does not support recording")
 
 	// StopCamera for an unknown camera reports not found.
-	require.EqualError(t, mgr.StopCamera(ctx, "missing"), `camera "missing" not found`)
+	require.ErrorAs(t, mgr.StopCamera(ctx, "missing"), new(*model.CameraNotFoundError))
 	require.NoError(t, mgr.StopCamera(ctx, "cam-ok"))
 	require.Equal(t, 0, mgr.RecorderCount())
-	// Stopping an already stopped camera is an error as well.
-	require.Error(t, mgr.StopCamera(ctx, "cam-ok"))
+	// Stopping an already stopped camera is idempotent.
+	require.NoError(t, mgr.StopCamera(ctx, "cam-ok"))
 }
 
 func TestCam2StartSkipsIneligibleCameras(t *testing.T) {

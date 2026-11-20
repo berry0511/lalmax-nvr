@@ -3,6 +3,7 @@ package gb28181
 import (
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -290,24 +291,99 @@ func TestSendPlayByeStatusHandling(t *testing.T) {
 func TestHandlerByeStopsMatchingStream(t *testing.T) {
 	api, _ := playDialogClient(t)
 	engine := api.mediaEngine.(*stubMediaEngine)
-	key := playStreamKey("34020000001320000001", "34020000001320000002")
+	const device, channel, otherChannel = "34020000001320000001", "34020000001320000002", "34020000001320000003"
+	key, otherKey := playStreamKey(device, channel), playStreamKey(device, otherChannel)
 	api.streams.storeStream(key, &Streams{
-		DeviceID: "34020000001320000001", ChannelID: "34020000001320000002", SessionID: "sess-bye",
+		DeviceID: device, ChannelID: channel, SessionID: "sess-a",
+		CallID: "test-call-id", FromTag: "local-a", ToTag: "remote-a",
 	})
-	t.Cleanup(func() { api.streams.deleteStream(key) })
+	api.streams.storeStream(otherKey, &Streams{
+		DeviceID: device, ChannelID: otherChannel, SessionID: "sess-b",
+		CallID: "call-b", FromTag: "local-b", ToTag: "remote-b",
+	})
+	bye := func(from, to, call, remoteTag, localTag string) int {
+		req := newTestInboundRequest(sip.BYE, from, to, "")
+		*req.CallID() = sip.CallIDHeader(call)
+		if remoteTag != "" {
+			req.From().Params.Add("tag", remoteTag)
+		}
+		if localTag != "" {
+			req.To().Params.Add("tag", localTag)
+		}
+		tx := newFakeServerTx()
+		api.handlerBye(req, tx)
+		return tx.StatusCodes()[0]
+	}
+	require.Equal(t, 481, bye(device, api.cfg.ID, "unknown", "remote-a", "local-a"))
+	require.Equal(t, 481, bye("wrong-device", api.cfg.ID, "test-call-id", "remote-a", "local-a"))
+	require.Equal(t, 481, bye(otherChannel, api.cfg.ID, "test-call-id", "remote-a", "local-a"))
+	require.Equal(t, 481, bye(device, api.cfg.ID, "test-call-id", "local-a", "remote-a"))
+	require.Equal(t, 481, bye(device, api.cfg.ID, "test-call-id", "", ""))
+	require.Empty(t, engine.stopped)
+	require.Equal(t, 200, bye(device, api.cfg.ID, "test-call-id", "remote-a", "local-a"))
+	require.False(t, api.streams.isPlaying(device, channel))
+	require.True(t, api.streams.isPlaying(device, otherChannel))
 
-	req := newTestInboundRequest(sip.BYE, "34020000001320000001", "34020000002000000001", "")
+	api.streams.storeStream(key, &Streams{
+		DeviceID: device, ChannelID: channel, SessionID: "sess-new",
+		CallID: "new-call", FromTag: "local-new", ToTag: "remote-new",
+	})
+	require.Equal(t, 481, bye(device, api.cfg.ID, "test-call-id", "remote-a", "local-a"))
+	require.True(t, api.streams.isPlaying(device, channel))
+	require.Equal(t, []string{"sess-a"}, engine.stopped)
+	require.Equal(t, 200, bye(device, otherChannel, "call-b", "", ""))
+	require.Equal(t, []string{"sess-a", "sess-b"}, engine.stopped)
+}
+
+func TestConcurrentByeAndStopCloseReceiverOnce(t *testing.T) {
+	api, _ := playDialogClient(t)
+	const device, channel = "34020000001320000001", "34020000001320000002"
+	key := playStreamKey(device, channel)
+	stream := &Streams{
+		DeviceID: device, ChannelID: channel, SessionID: "sess-a",
+		CallID: "test-call-id", FromTag: "local", ToTag: "remote",
+	}
+	api.streams.storeStream(key, stream)
+	req := newTestInboundRequest(sip.BYE, device, api.cfg.ID, "")
+	req.From().Params.Add("tag", "remote")
+	req.To().Params.Add("tag", "local")
 	tx := newFakeServerTx()
-	api.handlerBye(req, tx)
-	require.Equal(t, []int{200}, tx.StatusCodes())
-	require.False(t, api.streams.isPlaying("34020000001320000001", "34020000001320000002"))
-	require.Contains(t, engine.stopped, "sess-bye")
+	var wg sync.WaitGroup
+	var stopErr error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		api.handlerBye(req, tx)
+	}()
+	go func() {
+		defer wg.Done()
+		stopErr = api.StopPlay(&StopPlayInput{DeviceID: device, ChannelID: channel})
+	}()
+	wg.Wait()
+	require.NoError(t, stopErr)
+	require.False(t, api.streams.isPlaying(device, channel))
+	require.Equal(t, []string{"sess-a"}, api.mediaEngine.(*stubMediaEngine).stopped)
+}
 
-	// A BYE for an unknown device still gets a 200 without touching streams.
-	other := newTestInboundRequest(sip.BYE, "34020000001320009999", "34020000002000000001", "")
-	otherTx := newFakeServerTx()
-	api.handlerBye(other, otherTx)
-	require.Equal(t, []int{200}, otherTx.StatusCodes())
+func TestStopPlayRetriesReceiverCleanupWithoutResendingBye(t *testing.T) {
+	api, requester := playDialogClient(t)
+	const device, channel = "34020000001320000001", "34020000001320000002"
+	stream := &Streams{
+		DeviceID: device, ChannelID: channel, SessionID: "sess-a",
+		CallID: "test-call-id", FromTag: "local", ToTag: "remote",
+	}
+	api.streams.storeStream(playStreamKey(device, channel), stream)
+	engine := api.mediaEngine.(*stubMediaEngine)
+	engine.stopRTPErr = errors.New("receiver unavailable")
+	in := &StopPlayInput{DeviceID: device, ChannelID: channel}
+	require.ErrorContains(t, api.StopPlay(in), "receiver unavailable")
+	require.True(t, stream.dialogClosed.Load())
+	require.True(t, api.streams.isPlaying(device, channel), "retain cleanup state")
+	require.False(t, api.streams.IsStreamPlaying(StreamID(device, channel)))
+	engine.stopRTPErr = nil
+	require.NoError(t, api.StopPlay(in))
+	require.False(t, api.streams.isPlaying(device, channel))
+	require.Len(t, requester.requests, 1)
 }
 
 func TestBuildPlaySDPStreamNumberAndPlaybackFields(t *testing.T) {

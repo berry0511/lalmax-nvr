@@ -2,6 +2,7 @@ package camera
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -268,14 +269,16 @@ func (cm *CameraManager) CameraByStream(streamID string) *config.CameraConfig {
 	return &cp
 }
 
-func (cm *CameraManager) stopRecordTask(ctx context.Context, cam config.CameraConfig, reason string) {
+func (cm *CameraManager) stopRecordTask(ctx context.Context, cam config.CameraConfig, reason string) error {
 	tasks := cm.recordTaskManager()
 	if tasks == nil {
-		return
+		return nil
 	}
-	if err := tasks.Stop(ctx, cm.ingestStreamID(cam), reason); err != nil {
+	err := tasks.Stop(ctx, cm.ingestStreamID(cam), reason)
+	if err != nil {
 		logger.Debug("record task stop failed", "camera_id", cam.ID, "reason", reason, "error", err)
 	}
+	return err
 }
 
 // SetMediaEngine sets the lal/lalmax-backed media engine used for relay pulls.
@@ -1416,13 +1419,15 @@ func (cm *CameraManager) detachRecorderLocked(cameraID string) model.Recorder {
 	return rec
 }
 
-func stopDetachedRecorder(cameraID string, rec model.Recorder) {
+func stopDetachedRecorder(cameraID string, rec model.Recorder) error {
 	if rec == nil {
-		return
+		return nil
 	}
-	if err := rec.Stop(); err != nil {
+	err := rec.Stop()
+	if err != nil {
 		logger.Warn("failed to stop recorder", "camera_id", cameraID, "error", err)
 	}
+	return err
 }
 
 // Status returns the status of all managed recorders, including record tasks.
@@ -1825,6 +1830,61 @@ func (cm *CameraManager) ArchiveCamera(ctx context.Context, cameraID string) err
 	return nil
 }
 
+// SyncGB28181Camera reconciles persisted settings without starting or replacing
+// a recorder. The database owns persisted fields; the stream binding is stable.
+func (cm *CameraManager) SyncGB28181Camera(ctx context.Context, id string, archived bool) error {
+	unlock := cm.lockCamera(id)
+	defer unlock()
+
+	if cm.db == nil {
+		return fmt.Errorf("camera repository unavailable")
+	}
+	row, err := cm.db.GetCamera(ctx, id)
+	if err != nil {
+		return err
+	}
+	if row == nil {
+		return &model.CameraNotFoundError{CameraID: id}
+	}
+	if row.Archived {
+		if !archived {
+			return fmt.Errorf("camera archived during reconciliation")
+		}
+		if _, err := cm.db.UnarchiveAllRecordings(ctx, id); err != nil {
+			return err
+		}
+		if err := cm.db.UnarchiveCameraDB(ctx, id); err != nil {
+			return err
+		}
+	}
+	configs, err := cm.db.ListCameraConfigs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, cam := range configs {
+		if cam.ID != id {
+			continue
+		}
+		cam.StreamID = id
+		cm.mu.Lock()
+		for i := range cm.cfg.Cameras {
+			if cm.cfg.Cameras[i].ID == id {
+				cm.cfg.Cameras[i] = cam
+				cm.mu.Unlock()
+				logger.Info("[GB28181][CAMERA_SYNC]", "camera_id", id, "stream_id", id,
+					"enabled", cam.Enabled, "archived", archived, "db_exists", true, "runtime_exists", true, "recorder_status", row.Status, "action", "update_runtime", "result", "ok")
+				return nil
+			}
+		}
+		cm.cfg.Cameras = append(cm.cfg.Cameras, cam)
+		cm.mu.Unlock()
+		logger.Info("[GB28181][CAMERA_SYNC]", "camera_id", id, "stream_id", id,
+			"enabled", cam.Enabled, "archived", archived, "db_exists", true, "runtime_exists", false, "recorder_status", row.Status, "action", "insert_runtime", "result", "ok")
+		return nil
+	}
+	return &model.CameraNotFoundError{CameraID: id}
+}
+
 // RestoreArchivedCamera restores an archived camera back into the active config.
 // It also marks the camera and its recordings as active again in the database.
 func (cm *CameraManager) RestoreArchivedCamera(ctx context.Context, row *storage.CameraRow) error {
@@ -2222,22 +2282,38 @@ func (cm *CameraManager) StopCamera(ctx context.Context, cameraID string) (retEr
 	rec := cm.detachRecorderLocked(cameraID)
 	cm.mu.Unlock()
 
-	if rec == nil && !(haveCam && cm.RecordsViaTask(camCopy)) {
-		return fmt.Errorf("camera %q not found", cameraID)
+	if rec == nil && !haveCam {
+		if cm.db != nil {
+			row, err := cm.db.GetCamera(ctx, cameraID)
+			if err != nil {
+				return err
+			}
+			if row != nil {
+				return nil
+			}
+		}
+		return &model.CameraNotFoundError{CameraID: cameraID}
 	}
 
 	cm.mu.Lock()
-	_ = cm.stopMediaPullLocked(context.Background(), cameraID)
+	var pullErr error
+	if !haveCam || camCopy.Protocol != "gb28181" {
+		pullErr = cm.stopMediaPullLocked(ctx, cameraID)
+	}
 	if rec != nil && cm.metrics != nil {
 		cm.metrics.ActiveCameras.Dec()
 	}
 	cm.mu.Unlock()
-	stopDetachedRecorder(cameraID, rec)
+	recErr := stopDetachedRecorder(cameraID, rec)
 	if haveCam && cm.groupCovers(camCopy) && cm.groupWriter != nil {
 		cm.groupWriter.Detach(cameraID)
 	}
+	var taskErr error
 	if haveCam {
-		cm.stopRecordTask(ctx, camCopy, recorder.ReasonDeviceStopped)
+		taskErr = cm.stopRecordTask(ctx, camCopy, recorder.ReasonDeviceStopped)
+	}
+	if err := errors.Join(pullErr, recErr, taskErr); err != nil {
+		return err
 	}
 	logger.Info("stopped recorder for camera", "camera_id", cameraID)
 	return nil

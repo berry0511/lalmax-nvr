@@ -58,8 +58,9 @@
   // GB28181 state
   let gb28181Devices = $state<GB28181Device[]>([]);
   let gb28181Loading = $state(false);
+  let gb28181LoadVersion = 0;
   let deletingGB28181DeviceId = $state<string | null>(null);
-  let playingStreams = $state<Set<string>>(new Set());
+  let pendingGBStreams = $state(new Set<string>());
   let gb28181Cameras = $state<Map<string, Camera>>(new Map()); // streamId -> Camera
 
   // GB28181 sub-tabs
@@ -221,17 +222,7 @@
   // Check if current tab supports discovery
   let canDiscover = $derived(activeTab === 'onvif' || activeTab === 'xiaomi');
 
-  function syncGB28181PlayingStreams(deviceList: GB28181Device[]) {
-    const newPlaying = new Set<string>();
-    for (const device of deviceList) {
-      for (const channel of device.channels || []) {
-        if (channel.is_playing) {
-          newPlaying.add(`${device.device_id}:${channel.channel_id}`);
-        }
-      }
-    }
-    playingStreams = newPlaying;
-  }
+
 
   async function loadDevices() {
     loading = true;
@@ -369,15 +360,17 @@
     }
   }
 
-  async function loadGB28181Devices() {
-    gb28181Loading = true;
+  async function loadGB28181Devices(background = false) {
+    const version = ++gb28181LoadVersion;
+    if (!background) gb28181Loading = true;
     try {
-      const [res, allCameras] = await Promise.all([
-        listGB28181Devices(),
-        listCameras()
-      ]);
-      gb28181Devices = res.devices || [];
-      syncGB28181PlayingStreams(gb28181Devices);
+      const [devices, cameras] = await Promise.allSettled([listGB28181Devices(), listCameras()]);
+      if (version !== gb28181LoadVersion) return;
+      if (devices.status === 'fulfilled') gb28181Devices = devices.value.devices || [];
+      else console.warn('Failed to refresh GB28181 SIP state:', devices.reason);
+      if (cameras.status === 'rejected') throw cameras.reason;
+      const allCameras = cameras.value;
+
       
       // Build map of GB28181 cameras (streamId -> Camera)
       const cameraMap = new Map<string, Camera>();
@@ -396,7 +389,7 @@
     } catch (e) {
       console.error('Failed to load GB28181 devices:', e);
     } finally {
-      gb28181Loading = false;
+      if (version === gb28181LoadVersion) gb28181Loading = false;
     }
   }
 
@@ -426,8 +419,9 @@
 
   // Get camera associated with a GB28181 channel
   function getGB28181ChannelCamera(device: GB28181Device, channelId: string): Camera | undefined {
-    const streamId = `${device.device_id}:${channelId}`;
-    return gb28181Cameras.get(streamId);
+    const streamId = device.channels.find(ch => ch.channel_id === channelId)?.stream_id;
+    return (streamId ? gb28181Cameras.get(streamId) : undefined)
+      ?? gb28181Cameras.get(`${device.device_id}:${channelId}`);
   }
 
   // Remove only the offline SIP registration and its discovered channels.
@@ -450,30 +444,26 @@
     }
   }
 
-  async function handleGB28181Play(device: GB28181Device, channelId: string) {
-    const streamKey = `${device.device_id}:${channelId}`;
+  async function controlGB28181Stream(device: GB28181Device, channelId: string, action: 'play' | 'stop' | 'restart') {
+    const key = `${device.device_id}:${channelId}`;
+    if (pendingGBStreams.has(key)) return;
+    pendingGBStreams = new Set([...pendingGBStreams, key]);
     try {
-      const res = await playGB28181Stream({
-        device_id: device.device_id,
-        channel_id: channelId,
-      });
-      playingStreams = new Set([...playingStreams, streamKey]);
-      showToast(`推流已启动: ${res.ssrc}`, 'success');
-      // Reload to get the newly created camera
-      await loadGB28181Devices();
+      const current = (await listGB28181Devices()).devices
+        .find(d => d.device_id === device.device_id)?.channels.find(ch => ch.channel_id === channelId);
+      if (!current) throw new Error('国标通道已不可用');
+      if (action === 'stop' || (action === 'restart' && current.is_playing)) {
+        await stopGB28181Stream(device.device_id, channelId);
+      }
+      if (action !== 'stop') {
+        await playGB28181Stream({ device_id: device.device_id, channel_id: channelId });
+      }
+      showToast(action === 'restart' ? '重启推流成功' : action === 'play' ? '点播会话已建立' : '点播会话已停止', 'success');
     } catch (e) {
-      showToast(e instanceof Error ? e.message : '启动推流失败', 'error');
-    }
-  }
-
-  async function handleGB28181Stop(device: GB28181Device, channelId: string) {
-    const streamKey = `${device.device_id}:${channelId}`;
-    try {
-      await stopGB28181Stream(device.device_id, channelId);
-      playingStreams = new Set([...playingStreams].filter(k => k !== streamKey));
-      showToast('推流已停止', 'success');
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : '停止推流失败', 'error');
+      showToast(e instanceof Error ? e.message : '国标点播操作失败', 'error');
+    } finally {
+      await loadGB28181Devices(true);
+      pendingGBStreams = new Set([...pendingGBStreams].filter(id => id !== key));
     }
   }
 
@@ -1299,7 +1289,7 @@
     }
   }
 
-  async function handleGB28181Restart(device: GB28181Device, channelId: string) {
+  async function handleGB28181RestartRecording(device: GB28181Device, channelId: string) {
     const camera = getGB28181ChannelCamera(device, channelId);
     if (camera) {
       await handleRestartCamera(camera);
@@ -1364,9 +1354,16 @@
 
     const stopHealth = subscribeNvrEvents({ source: 'health' }, () => { void loadHealth(); }, { debounceMs: 300 });
     const healthFallback = window.setInterval(() => loadHealth(), 120000);
+    const gbRefresh = window.setInterval(() => {
+      if (activeTab === 'gb28181' && gb28181SubTab === 'devices' &&
+          !gb28181Loading && pendingGBStreams.size === 0 && !document.hidden) {
+        void loadGB28181Devices(true);
+      }
+    }, 10000);
     return () => {
       stopHealth();
       clearInterval(healthFallback);
+      clearInterval(gbRefresh);
     };
   });
 </script>
@@ -1660,7 +1657,7 @@
                       {#each device.channels as channel}
                         {@const streamKey = `${device.device_id}:${channel.channel_id}`}
                         {@const channelCamera = getGB28181ChannelCamera(device, channel.channel_id)}
-                        {@const isChannelPlaying = playingStreams.has(streamKey) || (channelCamera && channelCamera.status === 'recording')}
+                        {@const isChannelPlaying = channel.is_playing === true}
                         {@const isChannelPaused = channelCamera && (channelCamera.recording_paused || pausedCameras.has(channelCamera.id))}
                         
                         <div class="bg-white dark:bg-gray-800 rounded-lg border th-border overflow-hidden">
@@ -1669,11 +1666,15 @@
                             <div class="flex items-center gap-2">
                               <Video class="w-4 h-4 th-text-tertiary" />
                               <span class="text-sm font-medium th-text-primary">{channel.name || channel.channel_id}</span>
-                              {#if channelCamera}
-                        <span class="px-1.5 py-0.5 text-xs rounded {isChannelPaused ? 'bg-yellow-100 text-yellow-800' : channelCamera.status === 'recording' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}">
-                          {channelCamera.status === 'recording' || channelCamera.status === 'paused' || isChannelPaused ? t('cameras.statusRecording') : t('cameras.statusStopped')}
-                        </span>
-                      {/if}
+                              <span class="px-1.5 py-0.5 text-xs rounded {isChannelPlaying ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}">
+                                {isChannelPlaying ? '点播会话已建立' : '未点播'}
+                              </span>
+                              <span class="px-1.5 py-0.5 text-xs rounded bg-gray-100 text-gray-600">
+                                {channel.media_active === true ? '媒体有数据' : channel.media_active === false ? '未检测到媒体' : '媒体状态未知'}
+                              </span>
+                              <span class="px-1.5 py-0.5 text-xs rounded bg-gray-100 text-gray-600">
+                                {isChannelPaused || channelCamera?.status === 'paused' ? '录像暂停' : channelCamera?.status === 'recording' ? '录像中' : '未录像'}
+                              </span>
                             </div>
                             
                             <div class="flex items-center gap-1">
@@ -1734,38 +1735,35 @@
                                 {/if}
                                 
                                 <button
-                                  onclick={() => handleGB28181Restart(device, channel.channel_id)}
+                                  onclick={() => handleGB28181RestartRecording(device, channel.channel_id)}
                                   class="btn btn-ghost px-2 py-1 text-sm"
-                                  title="重启"
+                                  title="重启录像"
                                 >
                                   <RotateCw size={14} />
                                 </button>
-                              {:else}
-                                <!-- Play/Stop streaming -->
-                                {#if isChannelPlaying}
-                                  <button
-                                    onclick={() => handleGB28181Stop(device, channel.channel_id)}
-                                    class="btn btn-ghost px-2 py-1 text-sm text-red-500"
-                                    title="停止推流"
-                                  >
-                                    <Square size={14} />
-                                  </button>
-                                {:else}
-                                  <button
-                                    onclick={() => handleGB28181Play(device, channel.channel_id)}
-                                    class="btn btn-ghost px-2 py-1 text-sm"
-                                    disabled={!device.is_online}
-                                    title="开始推流"
-                                  >
-                                    <Play size={14} />
-                                  </button>
-                                {/if}
                               {/if}
 
+                              <button type="button"
+                                onclick={() => controlGB28181Stream(device, channel.channel_id, isChannelPlaying ? 'stop' : 'play')}
+                                class="btn btn-ghost px-2 py-1 text-sm"
+                                disabled={pendingGBStreams.has(streamKey) || (!isChannelPlaying && !device.is_online)}
+                                title={isChannelPlaying ? '停止推流' : '开始推流'}
+                              >
+                                {#if isChannelPlaying}<Square size={14} />{:else}<Play size={14} />{/if}
+                              </button>
+                              <button type="button"
+                                onclick={() => controlGB28181Stream(device, channel.channel_id, 'restart')}
+                                class="btn btn-ghost px-2 py-1 text-sm"
+                                disabled={pendingGBStreams.has(streamKey) || !device.is_online}
+                                title="重启推流"
+                              >
+                                <RotateCw size={14} />
+                              </button>
+
                               <!-- Live view -->
-                              {#if isChannelPlaying || (channelCamera && channelCamera.status === 'recording')}
+                              {#if isChannelPlaying || channel.media_active === true}
                                 <a 
-                                  href="#/live/{channelCamera?.id || `${device.device_id}:${channel.channel_id}`}?from=gb28181" 
+                                  href="#/live/{channelCamera?.id || channel.stream_id || streamKey}?from=gb28181"
                                   class="btn btn-ghost px-2 py-1 text-sm"
                                   title="实时预览"
                                 >

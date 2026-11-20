@@ -52,7 +52,26 @@ func (h *Handler) handleGB28181ListDevices(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusOK, map[string]any{"devices": []any{}})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"devices": h.gb28181Server.ListDevices()})
+	devices := h.gb28181Server.ListDevices()
+	if len(devices) > 0 && h.mediaEngine != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 750*time.Millisecond)
+		defer cancel()
+		streams, err := h.mediaEngine.ListStreams(ctx)
+		if err == nil {
+			active := make(map[string]bool, len(streams))
+			for i := range streams {
+				if gbMediaReady(&streams[i]) {
+					active[streams[i].StreamID] = true
+				}
+			}
+			for _, device := range devices {
+				for _, channel := range device["channels"].([]map[string]interface{}) {
+					channel["media_active"] = active[channel["stream_id"].(string)]
+				}
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"devices": devices})
 }
 
 func (h *Handler) handleGB28181Play(w http.ResponseWriter, r *http.Request) {
@@ -78,6 +97,22 @@ func (h *Handler) handleGB28181Play(w http.ResponseWriter, r *http.Request) {
 	if streamID == "" {
 		streamID = gb28181.StreamID(req.DeviceID, req.ChannelID)
 	}
+	if _, ok := h.gb28181Server.GetDeviceStore().GetChannel(req.DeviceID, req.ChannelID); !ok {
+		writeError(w, http.StatusNotFound, "GB28181 channel not found")
+		return
+	}
+	log := slog.With("device_id", req.DeviceID, "channel_id", req.ChannelID, "stream_id", streamID)
+	if h.camMgr == nil {
+		writeError(w, http.StatusServiceUnavailable, "camera manager unavailable")
+		return
+	}
+	if err := h.ensureGB28181Camera(r.Context(), req.DeviceID, req.ChannelID, streamID); err != nil {
+		log.Warn("[GB28181][PLAY]", "phase", "ensure_camera", "result", "failed")
+		writeError(w, http.StatusInternalServerError, "GB28181 camera registration failed")
+		return
+	}
+	log.Info("[GB28181][PLAY]", "phase", "ensure_camera", "result", "ok")
+
 	playInput := &gb28181.PlayInput{
 		DeviceID:   req.DeviceID,
 		ChannelID:  req.ChannelID,
@@ -94,17 +129,11 @@ func (h *Handler) handleGB28181Play(w http.ResponseWriter, r *http.Request) {
 		ssrc, err = h.gb28181Server.Play(playInput)
 	}
 	if err != nil {
+		log.Warn("[GB28181][PLAY]", "phase", "invite", "result", "failed")
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := h.ensureGB28181Camera(r.Context(), req.DeviceID, req.ChannelID, streamID); err != nil {
-		slog.Warn("GB28181 play succeeded but camera registration failed",
-			"device_id", req.DeviceID,
-			"channel_id", req.ChannelID,
-			"stream_id", streamID,
-			"error", err,
-		)
-	}
+	log.Info("[GB28181][PLAY]", "phase", "invite", "result", "ok")
 	h.logSuccess(r, "gb28181.play", "gb28181", req.DeviceID+"/"+req.ChannelID, "GB28181 live play started", map[string]any{"stream_id": streamID})
 	if !req.Ensure {
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -127,14 +156,10 @@ func (h *Handler) handleGB28181Play(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if info != nil && info.Active && info.Publisher != nil &&
-			(info.InFPS > 0 || (!info.LastFrameTime.IsZero() &&
-				time.Since(info.LastFrameTime) >= 0 && time.Since(info.LastFrameTime) <= 15*time.Second)) {
-			// Same readiness contract as GB28181 EnsurePlay: a currently
-			// publishing stream is ready if sampled FPS is positive OR a
-			// recent frame is observed. Neither criterion alone is mandatory.
+		if gbMediaReady(info) {
 			state = "ready"
 		}
+		log.Info("[GB28181][PLAY]", "phase", "media_ready", "result", state)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -142,6 +167,14 @@ func (h *Handler) handleGB28181Play(w http.ResponseWriter, r *http.Request) {
 		"stream_id": streamID,
 		"state":     state,
 	})
+}
+
+func gbMediaReady(info *media.StreamInfo) bool {
+	if info == nil || !info.Active || info.Publisher == nil {
+		return false
+	}
+	age := time.Since(info.LastFrameTime)
+	return info.InFPS > 0 || (!info.LastFrameTime.IsZero() && age >= 0 && age <= 15*time.Second)
 }
 
 func (h *Handler) ensureGB28181Camera(ctx context.Context, deviceID, channelID, streamID string) error {
@@ -170,16 +203,16 @@ func (h *Handler) ensureGB28181Camera(ctx context.Context, deviceID, channelID, 
 		}
 	}
 
-	if existing != nil && !existing.Archived {
+	if existing != nil {
+		if existing.Protocol != "gb28181" {
+			return fmt.Errorf("camera ID belongs to a different protocol")
+		}
 		if cameraName != defaultName {
-			if err := h.db.UpdateDefaultGB28181CameraName(
-				ctx, streamID, channelID, cameraName,
-			); err != nil {
+			if err := h.db.UpdateDefaultGB28181CameraName(ctx, streamID, channelID, cameraName); err != nil {
 				return err
 			}
 		}
-
-		return h.db.SetCameraStream(ctx, streamID, streamID)
+		return h.syncGB28181Camera(ctx, streamID, existing.Archived)
 	}
 
 	cameraURL := ""
@@ -197,41 +230,24 @@ func (h *Handler) ensureGB28181Camera(ctx context.Context, deviceID, channelID, 
 		cameraURL = fmt.Sprintf("rtsp://127.0.0.1:5544/live/%s", streamID)
 	}
 
-	cameraEnabled := true
-	if existing != nil {
-		cameraEnabled = existing.Enabled
+	if err := h.db.UpsertCamera(ctx, streamID, cameraName, "gb28181", "h264",
+		cameraURL, "", "", true, "", "", ""); err != nil {
+		return err
 	}
+	return h.syncGB28181Camera(ctx, streamID, false)
+}
 
-	if existing == nil || existing.Archived {
-		if err := h.db.UpsertCamera(
-			ctx,
-			streamID,
-			cameraName,
-			"gb28181", "h264", cameraURL,
-			"", "", cameraEnabled, "", "", "",
-		); err != nil {
-			return err
-		}
+func (h *Handler) syncGB28181Camera(ctx context.Context, streamID string, archived bool) error {
+	if err := h.db.SetCameraStream(ctx, streamID, streamID); err != nil {
+		return err
 	}
-
-	if existing != nil && existing.Archived {
-		if h.camMgr != nil {
-			row, err := h.db.GetCamera(ctx, streamID)
-			if err != nil {
-				return err
-			}
-			if row == nil || !row.Archived {
-				return fmt.Errorf("archived GB28181 camera %q disappeared before restore", streamID)
-			}
-			if err := h.camMgr.RestoreArchivedCamera(ctx, row); err != nil {
-				return err
-			}
-		} else if err := h.db.UnarchiveCameraDB(ctx, streamID); err != nil {
-			return err
-		}
+	if h.camMgr != nil {
+		return h.camMgr.SyncGB28181Camera(ctx, streamID, archived)
 	}
-
-	return h.db.SetCameraStream(ctx, streamID, streamID)
+	if archived {
+		return h.db.UnarchiveCameraDB(ctx, streamID)
+	}
+	return nil
 }
 
 func (h *Handler) handleGB28181StopPlay(w http.ResponseWriter, r *http.Request) {

@@ -4,6 +4,7 @@ export interface GB28181Channel {
   channel_id: string;
   name?: string;
   is_playing?: boolean;
+  media_active?: boolean;
   stream_id?: string;
   stream_number_list?: string;
   encode_type?: string;

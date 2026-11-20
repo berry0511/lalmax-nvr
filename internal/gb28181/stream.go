@@ -9,17 +9,20 @@ import (
 
 // Streams represents an active GB28181 media stream.
 type Streams struct {
-	DeviceID  string
-	ChannelID string
-	SSRC      string
-	SessionID string
-	CallID    string
-	FromTag   string
-	ToTag     string
-	RemoteURI string
-	InviteCSeq uint32
-	Transport string
-	StartedAt time.Time
+	cleanupMu    sync.Mutex
+	dialogClosed atomic.Bool
+	DeviceID     string
+	ChannelID    string
+	InternalID   string
+	SSRC         string
+	SessionID    string
+	CallID       string
+	FromTag      string
+	ToTag        string
+	RemoteURI    string
+	InviteCSeq   uint32
+	Transport    string
+	StartedAt    time.Time
 }
 
 // streamsManager manages active streams.
@@ -67,6 +70,7 @@ func playStreamKey(deviceID, channelID string) string {
 }
 
 func (m *streamsManager) isPlaying(deviceID, channelID string) bool {
+	// Keep offline-device removal blocked while receiver cleanup is pending.
 	_, ok := m.loadStream(playStreamKey(deviceID, channelID))
 	return ok
 }
@@ -76,7 +80,7 @@ func (m *streamsManager) IsStreamPlaying(streamID string) bool {
 	found := false
 	m.streams.Range(func(_, value any) bool {
 		stream := value.(*Streams)
-		if StreamID(stream.DeviceID, stream.ChannelID) == streamID {
+		if !stream.dialogClosed.Load() && (StreamID(stream.DeviceID, stream.ChannelID) == streamID || stream.InternalID == streamID) {
 			found = true
 			return false
 		}

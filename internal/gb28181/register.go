@@ -132,12 +132,16 @@ func (g *GB28181API) logout(deviceID string) {
 	wasOnline := false
 
 	if dev, ok := g.store.Load(deviceID); ok {
+		dev.playMutex.Lock()
+		defer dev.playMutex.Unlock()
 		wasOnline = dev.IsOnline
 		dev.Channels.Range(func(key, value any) bool {
 			ch := value.(*Channel)
 			streamKey := "play:" + deviceID + ":" + ch.ChannelID
-			if stream, loaded := g.streams.deleteStream(streamKey); loaded {
-				g.stopPlay(stream)
+			if stream, loaded := g.streams.loadStream(streamKey); loaded {
+				if err := g.finishPlay(streamKey, stream); err != nil {
+					slog.Warn("[GB28181][STOP] logout cleanup failed", "device_id", deviceID, "channel_id", ch.ChannelID)
+				}
 			}
 			return true
 		})

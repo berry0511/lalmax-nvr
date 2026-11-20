@@ -33,6 +33,7 @@ import (
 	"github.com/lalmax-pro/lalmax-nvr/internal/config"
 	"github.com/lalmax-pro/lalmax-nvr/internal/gb28181"
 	"github.com/lalmax-pro/lalmax-nvr/internal/media"
+	"github.com/lalmax-pro/lalmax-nvr/internal/middleware"
 	"github.com/lalmax-pro/lalmax-nvr/internal/model"
 	"github.com/lalmax-pro/lalmax-nvr/internal/storage"
 )
@@ -317,7 +318,12 @@ func gb74NewHandler(db *storage.DB, engine media.Engine, srv *gb28181.Server) *H
 	if db != nil {
 		apiRepo = db
 	}
-	h := NewHandler(apiRepo, nil, noopAuthMW(), gb74Config("2016"), nil, "", nil, nil)
+	cfg := gb74Config("2016")
+	var mgr *camera.CameraManager
+	if db != nil {
+		mgr = camera.NewCameraManager(cfg, nil, db, "")
+	}
+	h := NewHandler(apiRepo, nil, noopAuthMW(), cfg, mgr, "", nil, nil)
 	if engine != nil {
 		h.SetMediaEngine(engine)
 	}
@@ -865,7 +871,7 @@ func TestIssue74GB28181PlayLifecycle(t *testing.T) {
 	gb74Status(t, gb74Call(h.handleGB28181Play, "POST", "/play", `{`, nil), http.StatusBadRequest)
 	gb74Status(t, gb74Call(h.handleGB28181Play, "POST", "/play", `{"device_id":""}`, nil), http.StatusBadRequest)
 	gb74Status(t, gb74Call(h.handleGB28181Play, "POST", "/play",
-		fmt.Sprintf(`{"device_id":%q,"channel_id":"34020000001320009999"}`, deviceID), nil), http.StatusInternalServerError)
+		fmt.Sprintf(`{"device_id":%q,"channel_id":"34020000001320009999"}`, deviceID), nil), http.StatusNotFound)
 
 	// Success: the SIP INVITE is answered by the fake f.peer and a camera row is created.
 	rr := gb74Call(h.handleGB28181Play, "POST", "/play", playBody, nil)
@@ -888,6 +894,14 @@ func TestIssue74GB28181PlayLifecycle(t *testing.T) {
 
 	// A second play refreshes the existing camera row (default-name update path).
 	gb74Status(t, gb74Call(h.handleGB28181Play, "POST", "/play", playBody, nil), http.StatusOK)
+
+	runtime := h.camMgr.ListCameraConfigs()
+	if len(runtime) != 1 || runtime[0].ID != streamID || runtime[0].StreamID != streamID || h.camMgr.RecorderCount() != 0 {
+		t.Fatal("repeat Play should reconcile one runtime camera without starting a recorder")
+	}
+	if err := h.camMgr.StopCamera(context.Background(), streamID); err != nil {
+		t.Fatalf("stopping configured camera with no recorder: %v", err)
+	}
 
 	// Explicit stream_id is honoured.
 	custom := fmt.Sprintf(`{"device_id":%q,"channel_id":%q,"stream_id":"gb74-custom-stream"}`, deviceID, channelID)
@@ -999,9 +1013,44 @@ func TestIssue74GB28181EnsureCameraFallbacks(t *testing.T) {
 		t.Fatal("expected the archived camera to be restored")
 	}
 
-	// A handler without a database still starts play; camera registration is skipped.
+	// A handler without camera persistence must not start play.
 	hNoDB := gb74NewHandler(nil, f.engine, f.srv)
-	gb74Status(t, gb74Call(hNoDB.handleGB28181Play, "POST", "/play", playBody, nil), http.StatusOK)
+	gb74Status(t, gb74Call(hNoDB.handleGB28181Play, "POST", "/play", playBody, nil), http.StatusServiceUnavailable)
+}
+
+func TestGB28181ReconcilesMissingRuntimeFromPersistedCamera(t *testing.T) {
+	f := gb74NewFixture(t, nil)
+	h := f.handler()
+	ctx := context.Background()
+	const deviceID, channelID = "34020000001110000015", "34020000001320000015"
+	f.seed(deviceID, gb74Channel(channelID, "Catalog name"))
+	streamID := gb28181.StreamID(deviceID, channelID)
+	const cameraURL = "rtsp://127.0.0.1:15544/live/existing"
+	if err := f.db.UpsertCamera(ctx, streamID, "Custom name", "gb28181", "h265",
+		cameraURL, "", "", false, "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.SaveCameraExtras(ctx, config.CameraConfig{ID: streamID, SampleInterval: 17}); err != nil {
+		t.Fatal(err)
+	}
+	if h.camMgr.GetCameraConfig(streamID) != nil {
+		t.Fatal("fixture should not have a runtime camera yet")
+	}
+	if err := h.camMgr.StopCamera(ctx, streamID); err != nil {
+		t.Fatalf("known DB-only camera should already be stopped: %v", err)
+	}
+	body := fmt.Sprintf(`{"device_id":%q,"channel_id":%q}`, deviceID, channelID)
+	gb74Status(t, gb74Call(h.handleGB28181Play, "POST", "/play", body, nil), http.StatusOK)
+
+	cam := h.camMgr.GetCameraConfig(streamID)
+	if cam == nil || cam.Name != "Custom name" || cam.URL != cameraURL || cam.Enabled ||
+		cam.Encoding != "h265" || cam.SampleInterval != 17 || cam.StreamID != streamID {
+		t.Fatal("reconciliation did not preserve persisted camera settings")
+	}
+	var disabled *model.CameraDisabledError
+	if err := h.camMgr.StartCamera(ctx, streamID); !errors.As(err, &disabled) {
+		t.Fatalf("expected a registered but disabled camera: %v", err)
+	}
 }
 
 func TestIssue74GB28181ArchivedPlayRestoresRuntimeState(t *testing.T) {
@@ -1010,7 +1059,7 @@ func TestIssue74GB28181ArchivedPlayRestoresRuntimeState(t *testing.T) {
 	const (
 		deviceID  = "32010000001327000001"
 		channelID = "32010000001327000001"
-		oldName   = "HuaiHai nei"
+		oldName   = "GB28181 " + channelID
 		newName   = "银川路沿河桥西-短"
 	)
 	f.seed(deviceID, gb74Channel(channelID, newName))
@@ -2060,12 +2109,16 @@ func TestIssue74GB28181CameraRegistrationFailure(t *testing.T) {
 		channelID = "34020000001320000120"
 	)
 	f.seed(deviceID, gb74Channel(channelID, "DB failure"))
-	// Play still succeeds: camera registration failures are warnings only.
+	// A persistence failure must prevent the INVITE.
+	seen := f.peer.seen()
 	if err := f.db.Close(); err != nil {
 		t.Fatalf("close db: %v", err)
 	}
 	gb74Status(t, gb74Call(h.handleGB28181Play, "POST", "/play",
-		fmt.Sprintf(`{"device_id":%q,"channel_id":%q}`, deviceID, channelID), nil), http.StatusOK)
+		fmt.Sprintf(`{"device_id":%q,"channel_id":%q}`, deviceID, channelID), nil), http.StatusInternalServerError)
+	if f.peer.seen() != seen {
+		t.Fatal("sent SIP traffic after camera registration failed")
+	}
 }
 
 func TestIssue74GB28181DeleteDeviceStorageFailure(t *testing.T) {
@@ -2188,5 +2241,36 @@ func TestIssue74GB28181TalkWebsocketStream(t *testing.T) {
 			t.Fatal("talk session was not stopped after the websocket closed")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestGB28181ControlRoutePermissions(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		role model.Role
+		want int
+	}{
+		{"read-only", model.RoleUser, http.StatusForbidden},
+		{"administrator", model.RoleSuperAdmin, http.StatusServiceUnavailable},
+		{"legacy single-user", "", http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewHandler(nil, nil, noopAuthMW(), nil, nil, "", nil, nil)
+			if tc.role != "" {
+				h.SetMultiUserAuthMW(middleware.InjectUser(&model.User{Role: tc.role, Enabled: true}))
+			}
+			for _, path := range []string{"/play", "/stop", "/playback", "/playback/speed", "/playback/seek",
+				"/playback/pause", "/playback/resume", "/broadcast/start", "/broadcast/stop", "/talk/start",
+				"/talk/stop", "/download/start", "/download/stop"} {
+				rr := httptest.NewRecorder()
+				h.Routes().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/gb28181"+path, nil))
+				if rr.Code != tc.want {
+					t.Errorf("%s: got %d, want %d", path, rr.Code, tc.want)
+				}
+			}
+			rr := httptest.NewRecorder()
+			h.Routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/gb28181/devices", nil))
+			gb74Status(t, rr, http.StatusOK)
+		})
 	}
 }

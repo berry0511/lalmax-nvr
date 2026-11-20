@@ -71,34 +71,69 @@ type StopPlayInput struct {
 	ChannelID string
 }
 
-// handlerBye handles incoming BYE requests from devices.
+// matchesIncomingBye checks the remote-to-local orientation of the dialog.
+func matchesIncomingBye(req *sip.Request, stream *Streams, localID string) bool {
+	from, to, call := req.From(), req.To(), req.CallID()
+	if from == nil || to == nil || call == nil || stream.CallID == "" || string(*call) != stream.CallID {
+		return false
+	}
+	remoteUser, localUser := from.Address.User, to.Address.User
+	if (remoteUser != stream.DeviceID && remoteUser != stream.ChannelID) ||
+		(localUser != localID && localUser != stream.ChannelID) {
+		return false
+	}
+	fromTag, _ := from.Params.Get("tag")
+	toTag, _ := to.Params.Get("tag")
+	if (fromTag != "" && fromTag != stream.ToTag) || (toTag != "" && toTag != stream.FromTag) {
+		return false
+	}
+	if fromTag == "" || toTag == "" {
+		return (remoteUser == stream.DeviceID && localUser == stream.ChannelID) ||
+			(stream.DeviceID == stream.ChannelID && remoteUser == stream.DeviceID && localUser == localID)
+	}
+	return true
+}
+
 func (g *GB28181API) handlerBye(req *sip.Request, tx sip.ServerTransaction) {
-	deviceID := req.From().Address.User
-	callID := string(*req.CallID())
-	source := req.Source()
-
-	slog.Info("[SIP] BYE received",
-		"device_id", deviceID,
-		"call_id", callID,
-		"source", source,
-	)
-
-	// Find and remove the stream by matching CallID
+	status, reason := 481, "Call/Transaction Does Not Exist"
 	g.streams.streams.Range(func(key, value any) bool {
 		stream := value.(*Streams)
-		if stream.DeviceID == deviceID {
-			slog.Info("[SIP] BYE - stopping stream", "device_id", deviceID, "stream_key", key)
-			g.streams.deleteStream(key.(string))
-			if stream.SessionID != "" && g.mediaEngine != nil {
-				_ = g.mediaEngine.StopRTPReceive(context.Background(), stream.SessionID)
-			}
-			return false
+		if !matchesIncomingBye(req, stream, g.cfg.ID) {
+			return true
 		}
-		return true
+		log := slog.With("device_id", stream.DeviceID, "channel_id", stream.ChannelID,
+			"call_id", stream.CallID, "from_tag", stream.ToTag, "to_tag", stream.FromTag,
+			"session_id", stream.SessionID, "matched_stream_key", key)
+		status, reason = 200, "OK"
+		if err := g.finishPlay(key.(string), stream); err != nil {
+			log.Warn("[GB28181][BYE] RTP cleanup failed", "result", "matched")
+		} else {
+			log.Info("[GB28181][BYE] dialog closed", "result", "matched")
+		}
+		return false
 	})
+	if status == 481 {
+		slog.Info("[GB28181][BYE] dialog not found", "result", "unmatched")
+	}
+	if err := tx.Respond(sip.NewResponseFromRequest(req, status, reason, nil)); err != nil {
+		slog.Warn("[GB28181][BYE] response failed", "sip_status", status)
+	}
+}
 
-	tx.Respond(sip.NewResponseFromRequest(req, 200, "OK", nil))
-	slog.Info("[SIP] BYE response sent", "device_id", deviceID)
+// Serialize receiver cleanup and never delete a replacement dialog.
+func (g *GB28181API) finishPlay(key string, stream *Streams) error {
+	stream.cleanupMu.Lock()
+	defer stream.cleanupMu.Unlock()
+	current, ok := g.streams.loadStream(key)
+	if !ok || current != stream {
+		return nil
+	}
+	stream.dialogClosed.Store(true)
+	if err := g.stopPlayRTPReceiver(stream); err != nil {
+		return err
+	}
+	g.streams.streams.CompareAndDelete(key, stream)
+	return nil
 }
 
 // Play explicitly starts or restarts a GB28181 stream.
@@ -133,7 +168,8 @@ func (g *GB28181API) play(in *PlayInput, reuseExisting bool) (string, error) {
 		in.InternalID = StreamID(in.DeviceID, in.ChannelID)
 	}
 	existing, hasExisting := g.streams.loadStream(key)
-	if hasExisting && reuseExisting {
+	if hasExisting && reuseExisting && !existing.dialogClosed.Load() &&
+		(existing.InternalID == "" || existing.InternalID == in.InternalID) {
 		if g.mediaEngine == nil {
 			return "", fmt.Errorf("media engine unavailable")
 		}
@@ -176,13 +212,15 @@ func (g *GB28181API) play(in *PlayInput, reuseExisting bool) (string, error) {
 		if reuseExisting {
 			g.recoveryAttempts.Store(key, time.Now())
 		}
-		if err := g.stopPlay(existing); err != nil {
+		if err := g.stopPlay(key, existing); err != nil {
 			return "", fmt.Errorf("stop previous RTP receiver: %w", err)
 		}
-		g.streams.deleteStream(key)
 	}
 
 	// Step 1: Open RTP server on lalmax
+	if g.mediaEngine == nil {
+		return "", fmt.Errorf("media engine unavailable")
+	}
 	log.Debug("opening RTP server on lalmax")
 	protocol := "udp"
 	if in.StreamMode == 1 || in.StreamMode == 2 {
@@ -227,6 +265,7 @@ func (g *GB28181API) play(in *PlayInput, reuseExisting bool) (string, error) {
 	stream := &Streams{
 		DeviceID:  in.DeviceID,
 		ChannelID: in.ChannelID,
+		InternalID: in.InternalID,
 		SSRC:      inviteResult.SSRC,
 		SessionID: rtpSession.SessionID,
 		CallID:    inviteResult.CallID,
@@ -239,7 +278,7 @@ func (g *GB28181API) play(in *PlayInput, reuseExisting bool) (string, error) {
 	}
 	g.streams.storeStream(key, stream)
 
-	log.Info("play started", "ssrc", inviteResult.SSRC, "port", rtpSession.Port)
+	log.Info("[GB28181][PLAY]", "phase", "invite", "result", "ok", "stream_id", in.InternalID, "call_id", stream.CallID, "session_id", stream.SessionID)
 	return inviteResult.SSRC, nil
 }
 
@@ -265,7 +304,9 @@ func (g *GB28181API) Playback(in *PlaybackInput) (string, error) {
 	key := "play:" + in.DeviceID + ":" + in.ChannelID
 	if existing, ok := g.streams.loadStream(key); ok {
 		log.Debug("stopping existing stream before playback")
-		g.stopPlay(existing)
+		if err := g.stopPlay(key, existing); err != nil {
+			return "", err
+		}
 	}
 
 	// Step 1: Open RTP server on lalmax
@@ -309,6 +350,7 @@ func (g *GB28181API) Playback(in *PlaybackInput) (string, error) {
 	stream := &Streams{
 		DeviceID:  in.DeviceID,
 		ChannelID: in.ChannelID,
+		InternalID: in.InternalID,
 		SSRC:      inviteResult.SSRC,
 		SessionID: rtpSession.SessionID,
 		CallID:    inviteResult.CallID,
@@ -469,20 +511,34 @@ func (g *GB28181API) sendSIPInfo(stream *Streams, body string, contentType strin
 // StopPlay stops a GB28181 play session by sending BYE.
 func (g *GB28181API) StopPlay(in *StopPlayInput) error {
 	key := playStreamKey(in.DeviceID, in.ChannelID)
-	stream, ok := g.streams.loadStream(key)
-	if !ok { return nil }
 	ch, found := g.store.GetChannel(in.DeviceID, in.ChannelID)
-	if found { ch.device.playMutex.Lock(); defer ch.device.playMutex.Unlock() }
-	if err := g.stopPlay(stream); err != nil { return err }
-	g.streams.deleteStream(key)
-	return nil
+	if found {
+		ch.device.playMutex.Lock()
+		defer ch.device.playMutex.Unlock()
+	}
+	stream, ok := g.streams.loadStream(key)
+	if !ok {
+		return nil
+	}
+	return g.stopPlay(key, stream)
 }
 
-func (g *GB28181API) stopPlay(stream *Streams) error {
-	// Terminate the remote SIP dialog before releasing its RTP receiver.
-	// On failure retain the session so recovery does not issue another INVITE.
-	if err := g.sendPlayBye(stream); err != nil { return err }
-	return g.stopPlayRTPReceiver(stream)
+func (g *GB28181API) stopPlay(key string, stream *Streams) error {
+	log := slog.With("device_id", stream.DeviceID, "channel_id", stream.ChannelID,
+		"stream_id", StreamID(stream.DeviceID, stream.ChannelID), "call_id", stream.CallID)
+	if !stream.dialogClosed.Load() {
+		log.Info("[GB28181][STOP]", "phase", "send_bye")
+		if err := g.sendPlayBye(stream); err != nil && !stream.dialogClosed.Load() {
+			log.Warn("[GB28181][STOP]", "phase", "bye_response", "result", "failed")
+			return err
+		}
+	}
+	if err := g.finishPlay(key, stream); err != nil {
+		log.Warn("[GB28181][STOP]", "phase", "stop_rtp", "result", "failed")
+		return err
+	}
+	log.Info("[GB28181][STOP]", "phase", "delete_session", "result", "ok")
+	return nil
 }
 
 // stopPlayRTPReceiver is idempotent: an RTP receiver may have timed out
@@ -491,7 +547,9 @@ func (g *GB28181API) stopPlay(stream *Streams) error {
 // a new INVITE so that state cannot silently diverge.
 func (g *GB28181API) stopPlayRTPReceiver(stream *Streams) error {
 	if stream.SessionID == "" || g.mediaEngine == nil { return nil }
-	err := g.mediaEngine.StopRTPReceive(context.Background(), stream.SessionID)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := g.mediaEngine.StopRTPReceive(ctx, stream.SessionID)
 	if media.IsRTPReceiveSessionNotFound(err) {
 		slog.Info("GB28181 RTP receiver already absent; local session can be released",
 			"session_id", stream.SessionID, "device_id", stream.DeviceID)
@@ -531,7 +589,7 @@ func (g *GB28181API) sendPlayBye(stream *Streams) error {
 	if resp.StatusCode == 481 {
 		slog.Info("[SIP] BYE remote dialog already absent, proceeding with local cleanup", "call_id", stream.CallID)
 	}
-	slog.Info("[SIP] BYE acknowledged", "call_id", stream.CallID, "device_id", stream.DeviceID, "channel_id", stream.ChannelID)
+	slog.Info("[SIP] BYE acknowledged", "call_id", stream.CallID, "device_id", stream.DeviceID, "channel_id", stream.ChannelID, "sip_status", resp.StatusCode)
 	return nil
 }
 

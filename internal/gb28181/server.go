@@ -623,11 +623,17 @@ func (s *Server) ListDevices() []map[string]interface{} {
 		channels := make([]map[string]interface{}, 0)
 		dev.Channels.Range(func(k, v any) bool {
 			ch := v.(*Channel)
+			streamID := StreamID(deviceID, ch.ChannelID)
+			session, found := globalStreams.loadStream(playStreamKey(deviceID, ch.ChannelID))
+			playing := found && !session.dialogClosed.Load()
+			if found && session.InternalID != "" {
+				streamID = session.InternalID
+			}
 			chInfo := map[string]interface{}{
 				"channel_id": ch.ChannelID,
 				"name":       ch.Name,
-				"is_playing": globalStreams.isPlaying(deviceID, ch.ChannelID),
-				"stream_id":  StreamID(deviceID, ch.ChannelID),
+				"is_playing": playing,
+				"stream_id":  streamID,
 
 				// 2016标准字段
 				"manufacturer": ch.Manufacturer,
